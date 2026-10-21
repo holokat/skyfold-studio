@@ -1,0 +1,732 @@
+{
+ "about": "The asset gate's rules (tools/asset_gate.py; docs/asset-rules.md is generated from this file). Kinds are derived from each model's facts, first match wins. Limits: a value above `warn` warns, above `fail` fails (`compare: min`: below). The Rust side embeds this file (src/asset_rules.rs).",
+ "version": 1,
+ "walk_in_groups": [
+  "buildings",
+  "encounters",
+  "portals",
+  "entrances",
+  "monuments"
+ ],
+ "kinds": [
+  {
+   "id": "scene",
+   "name": "Scene (composite)",
+   "when": [
+    {
+     "composite": true
+    }
+   ]
+  },
+  {
+   "id": "creature",
+   "name": "Creature",
+   "when": [
+    {
+     "pack": [
+      "fish"
+     ]
+    },
+    {
+     "group": [
+      "creatures",
+      "animals",
+      "fish"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "nature",
+   "name": "Nature / photoscan",
+   "when": [
+    {
+     "format": "lods"
+    },
+    {
+     "pack": [
+      "photoscan",
+      "crops"
+     ]
+    },
+    {
+     "group": [
+      "nature",
+      "rocks",
+      "plants",
+      "trees"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "building",
+   "name": "Building / walk-in",
+   "when": [
+    {
+     "walk_in": true,
+     "max_dim": {
+      "ge": 4.0
+     }
+    }
+   ]
+  },
+  {
+   "id": "large_piece",
+   "name": "Large piece",
+   "when": [
+    {
+     "max_dim": {
+      "ge": 3.0
+     }
+    }
+   ]
+  },
+  {
+   "id": "prop",
+   "name": "Prop",
+   "when": [
+    {
+     "max_dim": {
+      "ge": 0.4
+     }
+    }
+   ]
+  },
+  {
+   "id": "small_prop",
+   "name": "Small prop",
+   "when": [
+    {}
+   ]
+  }
+ ],
+ "walker": {
+  "radius": 0.32,
+  "height": 1.8,
+  "step": 0.45,
+  "floor_disc": 0.7,
+  "relaxed": {
+   "radius": 0.15,
+   "step": 0.6,
+   "height": 1.0,
+   "floor_disc": 0.15
+  },
+  "source": "src/motion/collide.rs Body::WALKER and movement.rs ground_move (floor disc = radius x 0.7)"
+ },
+ "walk": {
+  "min_floor_m2": 4.0,
+  "door_min": [
+   0.5,
+   1.5
+  ],
+  "note": "Floors are flat (within 41°) span tops more than 0.25 m up with room to stand. Regions smaller than min_floor_m2 are ignored, and so is furniture: a region less than furniture.below_m above the floor under it and smaller than furniture.max_m2 (beds, tables, counters). A floor neither walker reaches has no way up drawn (roofs, decorative decks) and is exempt.",
+  "furniture": {
+   "below_m": 1.0,
+   "max_m2": 8.0
+  }
+ },
+ "rules": [
+  {
+   "id": "tris",
+   "name": "Triangles drawn",
+   "metric": "tris",
+   "unit": "triangles",
+   "why": "Every triangle is drawn each frame the model is on screen, and again in each shadow cascade: budgets per kind keep a whole village at frame rate.",
+   "limits": {
+    "small_prop": {
+     "warn": 5000,
+     "fail": 20000
+    },
+    "prop": {
+     "warn": 12000,
+     "fail": 40000
+    },
+    "large_piece": {
+     "warn": 30000,
+     "fail": 120000
+    },
+    "building": {
+     "warn": 32000,
+     "fail": 64000
+    },
+    "scene": {
+     "warn": 120000,
+     "fail": 200000
+    },
+    "nature": {
+     "warn": 20000,
+     "fail": 60000
+    },
+    "creature": {
+     "warn": 12000,
+     "fail": 25000
+    }
+   }
+  },
+  {
+   "id": "unique_tris",
+   "name": "Triangles in memory (scenes)",
+   "metric": "unique_tris",
+   "unit": "triangles",
+   "why": "A scene's pieces are instanced: what it keeps in memory and uploads is its unique triangles.",
+   "limits": {
+    "scene": {
+     "warn": 90000,
+     "fail": 150000
+    }
+   }
+  },
+  {
+   "id": "tri_density",
+   "name": "Triangle density",
+   "metric": "tri_density",
+   "unit": "triangles per m² of surface",
+   "why": "Detail the eye can't see at the distance the model is seen from: tiny triangles shade four times over; a 1.6 m bed at 5,600/m² is ten times denser than any hand-painted prop.",
+   "limits": {
+    "small_prop": {
+     "warn": 60000,
+     "fail": 250000
+    },
+    "prop": {
+     "warn": 2000,
+     "fail": 5000
+    },
+    "large_piece": {
+     "warn": 600,
+     "fail": 3000
+    },
+    "building": {
+     "warn": 60,
+     "fail": 120
+    },
+    "scene": {
+     "warn": 35,
+     "fail": 60
+    },
+    "nature": {
+     "warn": 4000,
+     "fail": 12000
+    },
+    "creature": {
+     "warn": 30000,
+     "fail": 80000
+    }
+   }
+  },
+  {
+   "id": "materials",
+   "name": "Materials",
+   "metric": "materials",
+   "unit": "materials",
+   "why": "Each material is at least one more draw call and pipeline state per copy.",
+   "limits": {
+    "small_prop": {
+     "warn": 3,
+     "fail": 6
+    },
+    "prop": {
+     "warn": 6,
+     "fail": 10
+    },
+    "large_piece": {
+     "warn": 9,
+     "fail": 12
+    },
+    "building": {
+     "warn": 9,
+     "fail": 12
+    },
+    "scene": {
+     "warn": 16,
+     "fail": 24
+    },
+    "nature": {
+     "warn": 2,
+     "fail": 4
+    },
+    "creature": {
+     "warn": 4,
+     "fail": 6
+    }
+   }
+  },
+  {
+   "id": "draw_prims",
+   "name": "Draw primitives",
+   "metric": "draw_prims",
+   "unit": "primitives (instances counted)",
+   "why": "Each primitive drawn (every instance of every mesh) is a draw call, before batching.",
+   "limits": {
+    "small_prop": {
+     "warn": 4,
+     "fail": 8
+    },
+    "prop": {
+     "warn": 8,
+     "fail": 16
+    },
+    "large_piece": {
+     "warn": 16,
+     "fail": 32
+    },
+    "building": {
+     "warn": 32,
+     "fail": 64
+    },
+    "scene": {
+     "warn": 150,
+     "fail": 250
+    },
+    "nature": {
+     "warn": 2,
+     "fail": 4
+    },
+    "creature": {
+     "warn": 4,
+     "fail": 8
+    }
+   }
+  },
+  {
+   "id": "unique_texture_px",
+   "name": "Largest own texture",
+   "metric": "unique_texture_px",
+   "unit": "px",
+   "why": "Textures only this model (or its set) uses cost memory for it alone; shared library textures are free.",
+   "limits": {
+    "small_prop": {
+     "warn": 1024,
+     "fail": 2048
+    },
+    "prop": {
+     "warn": 2048,
+     "fail": 4096
+    },
+    "large_piece": {
+     "warn": 2048,
+     "fail": 4096
+    },
+    "building": {
+     "warn": 2048,
+     "fail": 4096
+    },
+    "scene": {
+     "warn": 2048,
+     "fail": 4096
+    },
+    "nature": {
+     "warn": 4096,
+     "fail": 8192
+    },
+    "creature": {
+     "warn": 2048,
+     "fail": 4096
+    }
+   }
+  },
+  {
+   "id": "unique_texture_mpix",
+   "name": "Own texture memory",
+   "metric": "unique_texture_mpix",
+   "unit": "megapixels",
+   "why": "Megapixels of textures nobody else shares: what loading this model adds to video memory.",
+   "limits": {
+    "small_prop": {
+     "warn": 3.2,
+     "fail": 8.4
+    },
+    "prop": {
+     "warn": 6.3,
+     "fail": 16.8
+    },
+    "large_piece": {
+     "warn": 12.6,
+     "fail": 33.6
+    },
+    "building": {
+     "warn": 12.6,
+     "fail": 33.6
+    },
+    "scene": {
+     "warn": 16.8,
+     "fail": 50.4
+    },
+    "nature": {
+     "warn": 8.4,
+     "fail": 16.8
+    },
+    "creature": {
+     "warn": 4.2,
+     "fail": 8.4
+    }
+   }
+  },
+  {
+   "id": "unique_textures",
+   "name": "Own textures",
+   "metric": "unique_textures",
+   "unit": "textures",
+   "why": "Many one-off textures usually mean a material set that should have come from the shared library.",
+   "limits": {
+    "small_prop": {
+     "warn": 4,
+     "fail": null
+    },
+    "prop": {
+     "warn": 8,
+     "fail": null
+    },
+    "large_piece": {
+     "warn": 12,
+     "fail": null
+    },
+    "building": {
+     "warn": 12,
+     "fail": null
+    },
+    "scene": {
+     "warn": 16,
+     "fail": null
+    },
+    "nature": {
+     "warn": 3,
+     "fail": null
+    },
+    "creature": {
+     "warn": 4,
+     "fail": null
+    }
+   }
+  },
+  {
+   "id": "missing_textures",
+   "name": "Missing textures",
+   "metric": "missing_textures",
+   "unit": "files",
+   "why": "A texture the model points at isn't there: it renders untextured (and other engines refuse it).",
+   "limits": {
+    "default": {
+     "warn": null,
+     "fail": 0
+    }
+   }
+  },
+  {
+   "id": "origin",
+   "name": "Origin at the bottom centre",
+   "metric": "origin_offset",
+   "unit": "× half the footprint off centre",
+   "why": "Models are placed, turned and snapped by their origin: off-centre pivots swing wide when turned (wall and hanging pieces pivot on their fixing and are exempt).",
+   "limits": {
+    "default": {
+     "warn": 0.5,
+     "fail": 2.5
+    }
+   }
+  },
+  {
+   "id": "base",
+   "name": "Bottom at the origin",
+   "metric": "float_m",
+   "unit": "m between the origin and the model's bottom, above it",
+   "why": "A model whose bottom is above its origin floats when placed on the ground (wall and hanging pieces pivot on their fixing and are exempt).",
+   "limits": {
+    "default": {
+     "warn": 0.15,
+     "fail": 1.5
+    }
+   }
+  },
+  {
+   "id": "sunk",
+   "name": "Not mostly below the origin",
+   "metric": "sunk_share",
+   "unit": "share of the height below the origin",
+   "why": "Sinking a base into the ground is fine (a ship's hull below the waterline, a crypt stair, a rock's roots); most of a model below its origin means the pivot isn't at its bottom.",
+   "skip_when": [
+    {
+     "pack": [
+      "fish"
+     ]
+    }
+   ],
+   "limits": {
+    "default": {
+     "warn": 0.35,
+     "fail": 0.75
+    }
+   }
+  },
+  {
+   "id": "size_large",
+   "name": "Plausible size (metres)",
+   "metric": "max_dim",
+   "unit": "m",
+   "why": "Larger than any building or ship: usually centimetres exported as metres.",
+   "limits": {
+    "default": {
+     "warn": 120,
+     "fail": 300
+    }
+   }
+  },
+  {
+   "id": "size_small",
+   "name": "Plausible size (metres)",
+   "metric": "max_dim",
+   "unit": "m",
+   "compare": "min",
+   "why": "Smaller than a coin: usually millimetres, or metres exported as centimetres the wrong way.",
+   "limits": {
+    "default": {
+     "warn": 0.03,
+     "fail": 0.01
+    }
+   }
+  },
+  {
+   "id": "declared_size",
+   "name": "Y-up, metres, as declared",
+   "metric": "declared_size_mismatch",
+   "unit": "× the declared size",
+   "why": "The glTF's real bounds must match the size its manifest or build stats declare: a Z-up export, a unit slip or a stray root transform shows up here.",
+   "limits": {
+    "default": {
+     "warn": 0.05,
+     "fail": 0.1
+    }
+   }
+  },
+  {
+   "id": "verts_per_tri",
+   "name": "Welded vertices",
+   "metric": "verts_per_tri",
+   "unit": "vertices per triangle",
+   "why": "An unwelded mesh (a triangle soup) carries three vertices a triangle instead of about one: three times the memory and vertex work.",
+   "limits": {
+    "default": {
+     "warn": 2.25,
+     "fail": 2.9
+    }
+   }
+  },
+  {
+   "id": "duplicate_verts",
+   "name": "Duplicate vertices",
+   "metric": "duplicate_verts",
+   "unit": "share of vertices",
+   "why": "Vertices identical in every attribute should be one vertex.",
+   "limits": {
+    "default": {
+     "warn": 0.05,
+     "fail": 0.3
+    }
+   }
+  },
+  {
+   "id": "degenerate",
+   "name": "Degenerate triangles",
+   "metric": "degenerate_tris",
+   "unit": "share of triangles",
+   "why": "Zero-area triangles cost a draw slot each and break normals, colliders and other engines' importers.",
+   "limits": {
+    "default": {
+     "warn": 0.005,
+     "fail": 0.05
+    }
+   }
+  },
+  {
+   "id": "split_prims",
+   "name": "One primitive per material",
+   "metric": "split_prims",
+   "unit": "extra primitives",
+   "why": "A mesh with two primitives of the same material draws twice what could be drawn once.",
+   "limits": {
+    "default": {
+     "warn": 0,
+     "fail": 2
+    }
+   }
+  },
+  {
+   "id": "instancing",
+   "name": "Repeated pieces instanced",
+   "metric": "uninstanced_copies",
+   "unit": "duplicate meshes",
+   "why": "Identical meshes stored more than once: a scene must instance one mesh per piece.",
+   "limits": {
+    "scene": {
+     "warn": null,
+     "fail": 0
+    },
+    "default": {
+     "warn": 0,
+     "fail": 4
+    }
+   }
+  },
+  {
+   "id": "unused_materials",
+   "name": "Unused materials",
+   "metric": "unused_materials",
+   "unit": "materials",
+   "why": "Materials nothing draws still get loaded and exported.",
+   "limits": {
+    "default": {
+     "warn": 0,
+     "fail": 3
+    }
+   }
+  },
+  {
+   "id": "unused_images",
+   "name": "Unused images",
+   "metric": "unused_images",
+   "unit": "images",
+   "why": "Images no used material samples still ship and may still load.",
+   "limits": {
+    "default": {
+     "warn": 0,
+     "fail": 2
+    }
+   }
+  },
+  {
+   "id": "non_triangles",
+   "name": "Points and lines",
+   "metric": "non_triangle_prims",
+   "unit": "primitives",
+   "why": "Point and line primitives aren't drawn as surfaces by the engine or most exporters.",
+   "limits": {
+    "default": {
+     "warn": 0,
+     "fail": null
+    }
+   }
+  },
+  {
+   "id": "collider",
+   "name": "Collider size",
+   "metric": "collider_tris",
+   "unit": "triangles",
+   "why": "Walkable models collide with every triangle: the column grid near the player is rasterised from all of them.",
+   "only_when": [
+    {
+     "walkable": true
+    }
+   ],
+   "limits": {
+    "building": {
+     "warn": 40000,
+     "fail": 100000
+    },
+    "scene": {
+     "warn": 120000,
+     "fail": 200000
+    },
+    "default": {
+     "warn": 30000,
+     "fail": 100000
+    }
+   }
+  },
+  {
+   "id": "walk_floors",
+   "name": "Floors with a way up are reachable",
+   "metric": "unreachable_floor_m2",
+   "unit": "m² of floor",
+   "why": "A floor the drawn stairs, steps or ramps lead to that the walker (0.32 m radius, 1.8 m tall, 0.45 m steps) can't reach: too steep, too tight or too low on the way.",
+   "only_when": [
+    {
+     "walk_in": true
+    }
+   ],
+   "limits": {
+    "default": {
+     "warn": null,
+     "fail": 0
+    }
+   },
+   "skip_when": [
+    {
+     "floats": true
+    }
+   ]
+  },
+  {
+   "id": "walk_floors_open",
+   "name": "Floors with a way up are reachable (open models)",
+   "metric": "unreachable_floor_m2",
+   "unit": "m² of floor",
+   "why": "Like walk_floors, for walkable models that aren't walk-in (they collide as solid columns).",
+   "only_when": [
+    {
+     "walk_in": false
+    }
+   ],
+   "limits": {
+    "default": {
+     "warn": 0,
+     "fail": null
+    }
+   },
+   "skip_when": [
+    {
+     "floats": true
+    }
+   ]
+  },
+  {
+   "id": "walk_doors",
+   "name": "Doors are passable",
+   "metric": "blocked_doors",
+   "unit": "doors",
+   "why": "A walk-size door the walker can't get through on both sides: the opening behind the leaf is too narrow or too low, or blocked.",
+   "only_when": [
+    {
+     "walk_in": true
+    }
+   ],
+   "limits": {
+    "default": {
+     "warn": null,
+     "fail": 0
+    }
+   },
+   "skip_when": [
+    {
+     "floats": true
+    }
+   ]
+  }
+ ],
+ "lint": [
+  {
+   "id": "set_imports",
+   "severity": "fail",
+   "why": "A set module may import only the library (hp_lib, hp_parts, hp_props, hp_buildings, hp_chest, hp_grave, hp_kit): importing another set's module ties two builds together, so one mid-edit breaks the other."
+  },
+  {
+   "id": "mats_at_import",
+   "severity": "fail",
+   "why": "Adding to MATS at import time changes the shared material set for every build that happens to import the module: materials belong in hp_lib.MATS (or hp_kit)."
+  },
+  {
+   "id": "noise_vector",
+   "severity": "fail",
+   "why": "mathutils noise.noise_vector is reseeded per Blender process, so builds stop being byte-identical: use three noise.noise lookups like Asset.wobble."
+  },
+  {
+   "id": "global_random",
+   "severity": "fail",
+   "why": "The random module's global functions and an unseeded random.Random() differ run to run: draw from the asset's seeded rng (Asset.rng; Asset.replay_rng restores a state)."
+  },
+  {
+   "id": "bmesh_set_input",
+   "severity": "warn",
+   "why": "A bmesh op fed from a set (a set comprehension, set(...), {…}) gets its elements in hash order, which changes run to run: keep order with dict.fromkeys(...)."
+  }
+ ]
+}

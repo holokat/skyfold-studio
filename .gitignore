@@ -1,0 +1,30 @@
+# Public source release only. Runtime asset bundles are restored locally.
+/target/
+/worlds/
+/exports/
+/work/
+/art/
+/.claude/
+/.unlazy/
+__pycache__/
+*.py[cod]
+*.orig
+*.bak
+*.backup
+*~
+.DS_Store
+
+# Never add marketplace, authoring, or licensed runtime payloads here.
+/assets/models/
+/assets/audio/
+/assets/icons/
+/assets/textures/handpainted/
+/assets/textures/foliage/
+/assets/.thumbs/
+/assets/.lods/
+/assets/.texcache/
+/tools/stylepack/
+/tools/audio/
+/tools/flora/
+/tools/dungeon_sheets/
+/tools/fish_models/

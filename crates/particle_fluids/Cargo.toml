@@ -1,0 +1,14 @@
+[package]
+name = "particle_fluids"
+version = "0.1.0"
+edition = "2024"
+description = "CPU Rust port of threejs-particle-fluids (MIT, Daniel Greenheck): liquids, cloth, soft bodies, smoke"
+license = "MIT"
+
+[dependencies]
+glam = "0.33"
+rayon = "1"
+
+[features]
+# Print accumulated time per solver phase when a Simulation is dropped (profiling aid).
+timing = []

@@ -1,0 +1,54 @@
+[package]
+name = "world_builder"
+version = "0.1.0"
+edition = "2024"
+description = "Paintbrush-simple 3D world editor for MMO worlds"
+license = "MIT"
+homepage = "https://skyfoldstudio.com"
+repository = "https://github.com/holokat/skyfold-studio"
+
+[workspace]
+members = [".", "crates/ez_tree", "crates/particle_fluids"]
+
+[dependencies]
+bevy = { version = "0.20.0", features = ["mp3", "jpeg", "file_watcher"] }
+bevy_egui = "0.43.1"
+egui-phosphor = "0.14"
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+bytemuck = "1"
+fastrand = "2"
+rustfft = "6.4"
+half = "2.7"
+ez_tree = { path = "crates/ez_tree" }
+particle_fluids = { path = "crates/particle_fluids" }
+# MCP server (Streamable HTTP on localhost)
+tiny_http = "0.12"
+# world map: vector drawing, glyph outlines, parallel rasterising
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+ab_glyph = "0.2"
+rayon = "1"
+# objects.bin: deflate (pure Rust; already in the tree through png)
+miniz_oxide = "0.8"
+# GPU texture compression (BC7 / BC5) of model and terrain textures: pure Rust CPU encoder
+block_compression = { version = "0.10.1", default-features = false, features = ["bc15", "bc7"] }
+
+# the Dock icon (already in the tree through winit)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+# the GPU-reset canary (gpu_watchdog.rs): an empty command buffer on wgpu's Metal queue (both already in the tree through wgpu)
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLCommandBuffer", "MTLCommandQueue"] }
+wgpu = { version = "30", default-features = false }
+
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 4

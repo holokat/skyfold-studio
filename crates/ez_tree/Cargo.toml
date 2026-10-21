@@ -1,0 +1,13 @@
+[package]
+name = "ez_tree"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of ez-tree (MIT, Daniel Greenheck): procedural tree generator"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: exact (correctly rounded) parsing of values such as
+# 0.049999999999999996 in the presets; the default parser can be 1 ulp off.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+glam = "0.33"

@@ -1,0 +1,69 @@
+{
+ "fires": {
+  "torch": {
+   "file": "torch.png",
+   "effect": "fire_torch",
+   "frames": 48,
+   "columns": 8,
+   "rows": 6,
+   "fps": 24.0,
+   "frame_px": [
+    128,
+    224
+   ],
+   "width_m": 0.6857,
+   "height_m": 1.2,
+   "foot_v": 0.05,
+   "gain": 1.0
+  },
+  "brazier": {
+   "file": "brazier.png",
+   "effect": "fire_torch_brazier",
+   "frames": 48,
+   "columns": 8,
+   "rows": 6,
+   "fps": 24.0,
+   "frame_px": [
+    160,
+    320
+   ],
+   "width_m": 1.155,
+   "height_m": 2.31,
+   "foot_v": 0.05,
+   "gain": 1.0
+  },
+  "campfire": {
+   "file": "campfire.png",
+   "effect": "campfire",
+   "frames": 48,
+   "columns": 8,
+   "rows": 6,
+   "fps": 24.0,
+   "frame_px": [
+    192,
+    256
+   ],
+   "width_m": 1.3613,
+   "height_m": 1.815,
+   "foot_v": 0.05,
+   "gain": 1.008
+  },
+  "candle": {
+   "file": "candle.png",
+   "effect": "lantern_light",
+   "frames": 32,
+   "columns": 8,
+   "rows": 4,
+   "fps": 20.0,
+   "frame_px": [
+    48,
+    64
+   ],
+   "width_m": 0.0675,
+   "height_m": 0.09,
+   "foot_v": 0.05,
+   "gain": 1.153
+  }
+ },
+ "source": "AetherFX (MIT) by Gene / holokat, github.com/holokat/AetherFX: baked by tools/flames/bake_flames.py"
+}
