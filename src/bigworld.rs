@@ -752,7 +752,7 @@ fn test_hooks(
     if let Ok(spec) = std::env::var("WB_BW_DIALOG") {
         let f: Vec<u32> = spec.split(',').filter_map(|v| v.parse().ok()).collect();
         if f.first() == Some(&*frame) {
-            ed.show_new_world = true;
+            ed.open_new_world();
         }
         if f.get(1) == Some(&*frame) {
             ed.show_new_world = false;

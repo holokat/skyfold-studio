@@ -513,6 +513,17 @@ impl Default for Editor {
 }
 
 impl Editor {
+    /// Opens File › New. Climate and nature start fresh for every new world (never the last
+    /// world's); its shape, size and art style stay as last picked.
+    pub fn open_new_world(&mut self) {
+        let d = Editor::default();
+        self.new_world_biomes = d.new_world_biomes;
+        self.new_world_climate = d.new_world_climate;
+        self.new_world_appearance = d.new_world_appearance;
+        self.new_world_fields = d.new_world_fields;
+        self.show_new_world = true;
+    }
+
     /// The brush used by the active tab (None for tabs without a terrain brush).
     pub fn active_brush(&self) -> Option<Brush> {
         match self.tab {

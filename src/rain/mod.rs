@@ -100,8 +100,8 @@ const WET_SECS: f32 = 18.0;
 const DRY_SECS: f32 = 150.0;
 const FILL_SECS: f32 = 40.0;
 const DRAIN_SECS: f32 = 320.0;
-/// The first seconds after start-up follow the weather at once (a world opened in the rain
-/// starts wet, not drying out of a sunny default).
+/// The first seconds after start-up, a load or a new world follow the weather at once (a world
+/// opened in the rain starts wet, a new one doesn't start drying out of the last world's storm).
 const PRIME_SECS: f32 = 8.0;
 
 pub struct RainPlugin;
@@ -117,14 +117,26 @@ impl Plugin for RainPlugin {
 }
 
 /// Follows the weather's wetness: quickly up while it rains, slowly down after.
-fn track(sky: Res<SkyState>, time: Res<Time>, mut st: ResMut<RainState>) {
+fn track(
+    sky: Res<SkyState>,
+    time: Res<Time>,
+    terrain: Res<crate::terrain::Terrain>,
+    mut world: Local<Option<u64>>,
+    mut prime_until: Local<f32>,
+    mut st: ResMut<RainState>,
+) {
+    // (another world opened: its terrain generation changed)
+    if *world != Some(terrain.generation) {
+        *world = Some(terrain.generation);
+        *prime_until = time.elapsed_secs() + PRIME_SECS;
+    }
     let dt = time.delta_secs().min(0.25);
     let target = sky.weather.wet.clamp(0.0, 1.0);
     // (`update_weather` already keeps both at 0 with rain and snow switched off)
     let rain = sky.weather.rain.clamp(0.0, 1.0);
     // (steady rain fills them; a drizzle only darkens the ground)
     let fill = smoothstep(0.2, 0.85, rain) * target;
-    let priming = time.elapsed_secs() < PRIME_SECS;
+    let priming = time.elapsed_secs() < *prime_until;
     let follow = |cur: f32, to: f32, up: f32, down: f32| {
         let tau = if priming {
             0.4

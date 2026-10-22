@@ -290,7 +290,7 @@ fn world_capsule(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
             ui.set_min_width(250.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             if menu_row(ui, "PageAdd", "New world…", "⌘N", false).clicked() {
-                s.ed.show_new_world = true;
+                s.ed.open_new_world();
             }
             if menu_row(ui, "FolderOpen", "Open…", "⌘O", false).clicked() {
                 out.actions.write(UiAction::Open);

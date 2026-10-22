@@ -402,6 +402,7 @@ fn update_weather(
     terrain: Option<Res<Terrain>>,
     mut sky: ResMut<SkyState>,
     time: Res<Time>,
+    mut world: Local<Option<u64>>,
 ) {
     let base = Weather::Clear.params();
     let mut target = WeatherParams {
@@ -448,7 +449,14 @@ fn update_weather(
         target.snow = 0.0;
         target.wet = 0.0;
     }
-    let k = 1.0 - (-time.delta_secs() * 0.6).exp();
+    // another world opened (new or loaded): its weather at once, not eased out of the last one's
+    let generation = terrain.as_ref().map(|t| t.generation);
+    let k = if *world != generation {
+        *world = generation;
+        1.0
+    } else {
+        1.0 - (-time.delta_secs() * 0.6).exp()
+    };
     sky.weather = sky.weather.lerp(target, k);
 }
 

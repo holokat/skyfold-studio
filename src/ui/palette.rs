@@ -389,7 +389,7 @@ fn run(act: Act, s: &mut UiState, out: &mut UiOut, ctx: &egui::Context) {
         Act::Edit(a) => {
             out.editor_actions.write(a);
         }
-        Act::NewWorld => s.ed.show_new_world = true,
+        Act::NewWorld => s.ed.open_new_world(),
         Act::Playtest => {
             out.motion.write(crate::motion::MotionAction::Playtest);
         }
