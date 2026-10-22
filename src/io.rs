@@ -884,6 +884,21 @@ pub fn new_world_from(data: &mut WorldData, heights: Vec<f32>, res: usize, cell:
         ore_settings,
         ..default()
     };
+    // sky, weather, look, wind and ocean belong to the world; the render-quality choices are
+    // about this machine, so a new world keeps them
+    let l = &*data.lighting;
+    *data.lighting = Lighting {
+        cloud_quality: l.cloud_quality,
+        shadow_quality: l.shadow_quality,
+        contact_shadows: l.contact_shadows,
+        ambient_occlusion: l.ambient_occlusion,
+        anti_aliasing: l.anti_aliasing,
+        volumetrics: l.volumetrics,
+        bounce_light: l.bounce_light,
+        ..default()
+    };
+    *data.wind = default();
+    *data.water_style = default();
     *data.roads = crate::roads::Roads {
         dirty: true,
         ..default()
