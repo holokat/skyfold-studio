@@ -166,7 +166,7 @@ impl CloudQuality {
         }
     }
     /// (coarse steps across the layer, light samples, weight of a new frame in the history)
-    fn march(self) -> (f32, f32, f32) {
+    pub(crate) fn march(self) -> (f32, f32, f32) {
         match self {
             CloudQuality::Low => (32.0, 3.0, 0.12),
             CloudQuality::Medium => (48.0, 4.0, 0.15),
@@ -462,7 +462,7 @@ fn repeat_sampler(mipmaps: bool) -> ImageSampler {
 }
 
 /// Base shape (128³, one tile = 4096 m): r = Perlin–Worley, gba = Worley at 2×, 4×, 8× frequency.
-fn base_volume() -> Image {
+pub(crate) fn base_volume() -> Image {
     let data = volume(BASE_RES, |p| {
         let pf = 0.55 * perlin3(p * 4.0, 4, 1)
             + 0.3 * perlin3(p * 8.0, 8, 2)
@@ -493,7 +493,7 @@ fn base_volume() -> Image {
 }
 
 /// Detail erosion (32³, one tile = 512 m): rgb = Worley at 2, 4, 8 cells per tile.
-fn detail_volume() -> Image {
+pub(crate) fn detail_volume() -> Image {
     let data = volume(DETAIL_RES, |p| {
         [
             1.0 - worley3(p * 2.0, 2, 8),
@@ -559,7 +559,7 @@ fn cover_map() -> Image {
 }
 
 /// Cirrus (one tile, mipmapped): r = fibres along x, g = patches, b = fibres along (3, 1).
-fn cirrus_map() -> Image {
+pub(crate) fn cirrus_map() -> Image {
     let n = CIRRUS_RES as usize;
     let fibres = |u: f32, v: f32, seed: u32| {
         // stretched gradient noise (8:1), three octaves: long thin streaks

@@ -249,6 +249,13 @@ pub struct Snapshot {
     /// per-vertex grass map (density, dryness, tint, height) at the terrain's resolution
     pub grass: Option<Vec<[u8; 4]>>,
     pub grass_amount: f32,
+    /// the meadow's blade length multiplier and lushness (0..1), and whether the world is
+    /// hand-painted (its grass is stylised)
+    pub grass_height: f32,
+    pub grass_lushness: f32,
+    pub painted: bool,
+    /// how much the tree crowns darken the sky light under them (0..1, `nature::shade`)
+    pub canopy_shade: f32,
     /// editor camera eye and focus
     pub camera: (Vec3, Vec3),
     /// procedural nature as density maps + rules (its instances are baked into `objects`)
@@ -367,6 +374,19 @@ pub fn snapshot(world: &World) -> Snapshot {
             .filter(|(_, n)| *n == t.n())
             .map(|(d, _)| d.to_vec()),
         grass_amount: world.resource::<crate::objects::NatureAmounts>().grass,
+        grass_height: world.resource::<crate::objects::NatureAmounts>().grass_height,
+        grass_lushness: world
+            .get_resource::<crate::nature::NatureAppearance>()
+            .map(|a| a.grass_lushness)
+            .unwrap_or(0.0),
+        painted: world
+            .resource::<crate::world::WorldMeta>()
+            .art_style
+            .painted(),
+        canopy_shade: world
+            .get_resource::<crate::nature::NatureAppearance>()
+            .map(|a| a.sanitized().canopy_shade)
+            .unwrap_or(1.0),
         camera: (orbit.eye(), orbit.focus),
         nature,
         caves: world

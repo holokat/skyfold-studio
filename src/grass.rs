@@ -557,6 +557,13 @@ fn patch_mesh(blades: &[Blade], lod: usize, realistic: bool) -> Mesh {
     m
 }
 
+/// The three patch meshes (near, mid, far) of the meadow as the editor draws them, for the game
+/// engine exports (Godot rebuilds the same blades with a port of `grass.wesl`).
+pub(crate) fn export_patch_meshes(realistic: bool) -> [Mesh; 3] {
+    let patch = build_patch(2024);
+    [0, 1, 2].map(|lod| patch_mesh(&patch, lod, realistic))
+}
+
 /// Grass density, dryness, tint and height for one terrain vertex, from the final ground
 /// materials and the biome map.
 fn density_at(

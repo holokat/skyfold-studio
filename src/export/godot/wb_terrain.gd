@@ -42,12 +42,12 @@ func _build_tile(tile: Dictionary, cell: float) -> void:
 		m.mesh = mi.mesh
 		m.material_override = material
 		if ranges.has(str(mi.name)):
-			# hard switches with a little hysteresis (no fade: the skirts hide the seams)
+			# hard switches (no fade: the skirts hide the seams) and no margins: without a fade
+			# Godot treats margins as hysteresis, and a chunk first seen inside the band has neither
+			# level shown (a hole in the ground)
 			var r: Array = ranges[str(mi.name)]
 			m.visibility_range_begin = float(r[0])
 			m.visibility_range_end = float(r[1])
-			m.visibility_range_begin_margin = float(r[0]) * 0.05
-			m.visibility_range_end_margin = float(r[1]) * 0.05
 		m.set_meta("wb_built", true)
 		add_child(m, false, Node.INTERNAL_MODE_BACK)
 	src.free()
