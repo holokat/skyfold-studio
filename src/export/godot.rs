@@ -31,7 +31,7 @@ const FLAME_SHADER: &str = include_str!("godot/wb_flame.gdshader");
 const SKY_SHADER: &str = include_str!("godot/wb_sky.gdshader");
 const POST_SHADER: &str = include_str!("godot/wb_post.gdshader");
 
-mod look;
+pub(super) mod look;
 const ATMOSPHERE_GD: &str = include_str!("godot/wb_atmosphere.gd");
 
 const DATA: &str = "world_builder";
@@ -76,7 +76,7 @@ fn transform(m: Mat3, o: Vec3) -> String {
 /// Zenith and horizon sky colours (linear) for the world's hour: clear blue by day, warm at
 /// sunrise / sunset, dark blue at night; haze pales the horizon. The day colours (with the 0.5
 /// day energy in `Night::sky_energy`) are fitted to the editor's sky measured side by side.
-fn sky_colors(light: &core::LightOut, haze: f32) -> (Vec3, Vec3) {
+pub(super) fn sky_colors(light: &core::LightOut, haze: f32) -> (Vec3, Vec3) {
     let sun_y = light.sun_dir.y;
     let night = light.night;
     let sunset = (1.0 - (sun_y * 4.0).abs()).clamp(0.0, 1.0) * (1.0 - night);
@@ -1317,7 +1317,7 @@ fn write_atmosphere(s: &Snapshot, ctx: &Ctx, canopy: Option<Value>) -> Result<()
 /// as `water::update_water_materials` hands them to its water shader (illuminance × exposure / π,
 /// warmed when low; the fog colour × 0.8), for Godot's water: (direction, key, sky clear, sky
 /// under storm cloud, sky in dust), linear.
-fn water_light(s: &Snapshot, light: &core::LightOut) -> (Vec3, Vec3, Vec3, Vec3, Vec3) {
+pub(super) fn water_light(s: &Snapshot, light: &core::LightOut) -> (Vec3, Vec3, Vec3, Vec3, Vec3) {
     let l = &s.lighting;
     let lk = &s.look;
     let sun_y = light.sun_dir.y;
@@ -1359,11 +1359,11 @@ fn water_light(s: &Snapshot, light: &core::LightOut) -> (Vec3, Vec3, Vec3, Vec3,
 /// whenever haze is on, `sky::update_sun_moon`: its reach follows the haze switch, not the
 /// amount), then the distance fog of the haze amount and the look's colour haze (`look_post`),
 /// whose tint also colours the fog.
-struct Haze {
+pub(super) struct Haze {
     /// per metre
-    density: f32,
+    pub(super) density: f32,
     /// sRGB, under Godot's exposure
-    color: [f32; 3],
+    pub(super) color: [f32; 3],
     sun_scatter: f32,
 }
 
@@ -1374,7 +1374,7 @@ impl Haze {
     /// scattered light in it.
     const TINT: Vec3 = Vec3::new(0.27, 0.29, 0.34);
 
-    fn of(s: &Snapshot, light: &core::LightOut, exposure: f32) -> Self {
+    pub(super) fn of(s: &Snapshot, light: &core::LightOut, exposure: f32) -> Self {
         let lk = &s.look;
         let on = if light.haze_enabled { 1.0 } else { 0.0 };
         let colour_haze = lk.color_haze.clamp(0.0, 1.0) * on;
@@ -1415,9 +1415,9 @@ const NIGHT_FILL_COLOR: [f32; 3] = [0.55, 0.62, 0.85];
 
 /// How the editor lights the world at night, in Godot's terms (light energy 1.1 = the editor's
 /// default sun, `sky::update_sun_moon`).
-struct Night {
+pub(super) struct Night {
     /// stops the exposure opens up by
-    ev: f32,
+    pub(super) ev: f32,
     moon: f32,
     /// unit vector towards the moon
     moon_dir: Vec3,
@@ -1430,7 +1430,7 @@ struct Night {
 impl Night {
     /// The sky's energy under the opened exposure: most of the gain undone, so the night sky stays
     /// a deep blue (all of it leaves a flat grey).
-    fn sky_energy(&self) -> f32 {
+    pub(super) fn sky_energy(&self) -> f32 {
         2f32.powf(-0.6 * self.ev) * (0.5 + 0.5 * self.night)
     }
 
@@ -1440,7 +1440,7 @@ impl Night {
         2f32.powf(-self.ev)
     }
 
-    fn of(s: &Snapshot, light: &core::LightOut) -> Self {
+    pub(super) fn of(s: &Snapshot, light: &core::LightOut) -> Self {
         let l = &s.lighting;
         let sun_y = light.sun_dir.y;
         let day = crate::noise::smoothstep(-0.2, 0.18, sun_y);

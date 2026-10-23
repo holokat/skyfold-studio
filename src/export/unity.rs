@@ -22,6 +22,8 @@ const NAVMESH_CS: &str = include_str!("unity/WorldBuilderNavMesh.cs");
 const PORTAL_CS: &str = include_str!("unity/WorldBuilderPortal.cs");
 const FLICKER_CS: &str = include_str!("unity/WorldBuilderFlicker.cs");
 const PIECE_CS: &str = include_str!("unity/WorldBuilderPiece.cs");
+const WATER_SHADER: &str = include_str!("unity/WorldBuilderWater.shader");
+const SKY_SHADER: &str = include_str!("unity/WorldBuilderSky.shader");
 
 /// glTFast's conversion: X is mirrored.
 fn pos(p: [f32; 3]) -> [f32; 3] {
@@ -47,6 +49,57 @@ fn sample(t: &TerrainOut, map: &[u8], x: f32, z: f32) -> f32 {
         + (v(i0, j0 + 1) * (1.0 - fx) + v(i0 + 1, j0 + 1) * fx) * fz
 }
 
+/// The world's look in URP terms (`WorldBuilderImporter.BuildLook`), from the Godot export's
+/// side-by-side calibrations: the same haze, sky colours and night exposure.
+struct UnityLook {
+    /// URP `TonemappingMode`
+    tonemap: &'static str,
+    /// URP post exposure (EV)
+    ev: f32,
+    bloom: f32,
+    vignette: f32,
+    haze: super::godot::Haze,
+    /// sky radiance (sRGB-coded) for the sky shader and the water's reflections
+    sky_top: [f32; 3],
+    sky_horizon: [f32; 3],
+    /// the key light and the sky's irradiance in the editor's display units (the water optics)
+    water_sun: [f32; 3],
+    water_sky: [f32; 3],
+}
+
+impl UnityLook {
+    /// Stops URP's tonemappers need to land at the editor's brightness on sunlit ground.
+    const CALIBRATION_EV: f32 = 0.0;
+    /// URP's Neutral / ACES curves render the Godot-calibrated sky darker: measured side by side.
+    const SKY_GAIN: f32 = 1.8;
+
+    fn of(s: &Snapshot, light: &core::LightOut) -> Self {
+        use crate::look::ToneCurve;
+        let night = super::godot::Night::of(s, light);
+        let wl = super::godot::water_light(s, light);
+        let ev = light.exposure + night.ev + Self::CALIBRATION_EV;
+        let (top, horizon) = super::godot::sky_colors(light, s.look.haze * light.haze);
+        // the sky's radiance as the Godot sky shader draws it (its energy under the exposure)
+        // and URP's tone curves need
+        let energy = night.sky_energy() * Self::SKY_GAIN;
+        let srgb = |c: Vec3| (c * energy).to_array().map(|v| crate::terrain::textures::lin_to_srgb(v) as f32 / 255.0);
+        UnityLook {
+            tonemap: match s.look.tone {
+                ToneCurve::Punchy | ToneCurve::Classic => "ACES",
+                ToneCurve::Filmic | ToneCurve::Soft => "Neutral",
+            },
+            ev,
+            bloom: light.bloom * 1.5,
+            vignette: light.vignette * 0.5,
+            haze: super::godot::Haze::of(s, light, 2f32.powf(ev)),
+            sky_top: srgb(top),
+            sky_horizon: srgb(horizon),
+            water_sun: wl.1.to_array(),
+            water_sky: wl.2.to_array(),
+        }
+    }
+}
+
 /// Plants scattered as terrain details (lily pads float on water, so they stay objects).
 fn is_detail(s: &Snapshot, m: &ModelOut) -> bool {
     let a = &s.assets[m.asset];
@@ -62,6 +115,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             &base,
             "WorldBuilder/Editor",
             "WorldBuilder/Runtime",
+            "WorldBuilder/Shaders",
             "Server",
             "README.md",
             "CREDITS.md",
@@ -280,7 +334,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     }
 
     ctx.stage("Water, roads, gameplay", 0.9)?;
-    let style = |st: &crate::water::WaterStyle| json!({ "shallow": st.shallow, "deep": st.deep, "clarity": st.clarity, "transparency": st.transparency, "roughness": st.roughness });
+    let style = |st: &crate::water::WaterStyle| json!({ "shallow": st.shallow, "deep": st.deep, "clarity": st.clarity, "transparency": st.transparency, "roughness": st.roughness, "shoreFoam": st.shore_foam, "extinct": crate::water::water_optics(st).0.to_array(), "inscat": crate::water::water_optics(st).1.to_array() });
     let mut water = json!({ "enabled": false });
     if o.water {
         let (glb, bodies) = core::water(s);
@@ -366,6 +420,12 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     // for game servers (outside the WorldBuilder folder: not for Unity's Assets)
     let navmesh = super::nav::write(ctx, &s.navmesh, "Server/navmesh")?;
     let light = core::lighting(s);
+    let ulook = UnityLook::of(s, &light);
+    // the look's post-tonemap grade as a URP Color Lookup strip (Unity's rows run bottom up)
+    ctx.write(
+        &format!("{base}/Look/grade_lut.png"),
+        &core::png_rgb(&image::imageops::flip_vertical(&super::godot::look::grade_lut(&s.look))),
+    )?;
     ctx.write_json(&format!("{base}/Data/lighting.json"), &light.json(s))?;
     // the shared model textures and what they are (the importer sets normal maps and linear data
     // before it builds anything)
@@ -387,6 +447,30 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         }
         None => s.camera,
     };
+    let light_json = json!({
+        "hour": light.hour,
+        "sunDirection": pos(light.sun_dir.to_array()),
+        "sunColor": srgb(light.sun_color),
+        "intensity": (light.sun_strength * 1.25).max(0.02),
+        "fog": light.fog,
+        "fogDensity": light.fog_density_exp2,
+        "fogColor": srgb(light.fog_color),
+        "haze": light.haze,
+        "exposure": light.exposure,
+        "contrast": light.contrast,
+        "saturation": light.saturation,
+        "tonemap": ulook.tonemap,
+        "postExposure": ulook.ev,
+        "bloom": ulook.bloom,
+        "vignette": ulook.vignette,
+        "lut": "Look/grade_lut.png",
+        "hazeDensity": ulook.haze.density,
+        "hazeColor": ulook.haze.color,
+        "skyTop": ulook.sky_top,
+        "skyHorizon": ulook.sky_horizon,
+        "waterSun": ulook.water_sun,
+        "waterSky": ulook.water_sky,
+    });
     let doc = json!({
         "version": 1,
         "name": s.name,
@@ -421,19 +505,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         }).collect::<Vec<_>>(),
         // Unity's own navmesh, baked by the importer from the exported colliders
         "navMesh": { "build": o.navmesh, "voxelSize": 0.3, "agentRadius": 0.4, "agentHeight": 1.8, "maxSlope": 45.0, "stepHeight": 0.45 },
-        "light": {
-            "hour": light.hour,
-            "sunDirection": pos(light.sun_dir.to_array()),
-            "sunColor": srgb(light.sun_color),
-            "intensity": (light.sun_strength * 1.25).max(0.02),
-            "fog": light.fog,
-            "fogDensity": light.fog_density_exp2,
-            "fogColor": srgb(light.fog_color),
-            "haze": light.haze,
-            "exposure": light.exposure,
-            "contrast": light.contrast,
-            "saturation": light.saturation,
-        },
+        "light": light_json,
         "markers": markers.iter().map(|m| {
             let d = (-m.yaw.cos(), -m.yaw.sin());
             json!({
@@ -476,6 +548,14 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     ctx.write(
         "WorldBuilder/Runtime/WorldBuilderPiece.cs",
         PIECE_CS.as_bytes(),
+    )?;
+    ctx.write(
+        "WorldBuilder/Shaders/WorldBuilderWater.shader",
+        WATER_SHADER.as_bytes(),
+    )?;
+    ctx.write(
+        "WorldBuilder/Shaders/WorldBuilderSky.shader",
+        SKY_SHADER.as_bytes(),
     )?;
     ctx.write_json("Packages-manifest-snippet.json", &json!({ "dependencies": { "com.unity.cloud.gltfast": "6.20.0", "com.unity.ai.navigation": "2.0.16" } }))?;
     ctx.write("CREDITS.md", core::credits(s, &layers).as_bytes())?;
@@ -706,8 +786,11 @@ The log line `WBIMPORT OK …` lists what was built (`WBIMPORT FAILED …` and e
   within a few centimetres), each with a **PhysicsMaterial** for its footstep surface. Buildings
   get **lightmap UVs** (LOD0, `Generated/Meshes`) and contribute to baked GI; the rest use
   light probes.
-- **Water**: the ocean plane at sea level and the lake / river / waterfall surfaces with
-  transparent materials in each body's colour, and **swim volumes** (trigger boxes on the Water
+- **Water**: the ocean plane at sea level and the lake / river / waterfall surfaces with the
+  `WorldBuilder/Water` shader (URP and built-in): the editor's water optics — the water column
+  from the ground heights (baked to `Generated/Materials/WaterGround.asset`), the bed fading per
+  colour channel through each body's water and depth colours, sun and sky light scattered in it,
+  Fresnel sky reflection, sun glints, a foam line on the shore, the haze — and **swim volumes** (trigger boxes on the Water
   layer with `WorldBuilderWaterVolume`: lakes, river stretches, the ocean); **roads** as textured
   meshes; **caves** (caves, mines, sinkholes, rock arches) as textured meshes with mesh colliders
   (not their pools and cobwebs) and their glowing crystals as point lights, the terrain cut open
@@ -726,17 +809,19 @@ The log line `WBIMPORT OK …` lists what was built (`WBIMPORT FAILED …` and e
 - **NavMesh** baked from the colliders (a NavMeshSurface with AI Navigation installed, else the
   core builder's NavMeshData loaded by `WorldBuilderNavMesh`; `-wbNoNavMesh` skips it: big worlds
   take minutes).
-- **Sun** (directional light at the world's time of day), procedural **skybox**, **fog** matching
-  the world's haze; gameplay **markers** (`WorldBuilderMarker` components: player start, POIs,
+- **Sun** (directional light at the world's time of day), the editor's **sky** colours for the
+  hour with its sun (`WorldBuilder/Sky`, also the ambient light), **fog** matching the world's
+  haze; in URP projects a global **Volume** (`Generated/Look.asset`) with the art style's tone
+  curve, exposure, bloom, vignette and its colour grade (saturation, contrast, split toning,
+  lift, foliage hue, vibrance) as a Color Lookup LUT (`Look/grade_lut.png`); gameplay **markers** (`WorldBuilderMarker` components: player start, POIs,
   NPCs, spawn regions with outlines, resource nodes, fishing spots) and a **camera** with
   `WorldBuilderFlyCamera` (WASD, right mouse to look, Shift fast, F walk / fly).
 
-The colour grade (contrast, saturation, exposure, bloom) is in `Data/lighting.json` for a
-post-processing Volume. Model textures are written once into `Textures/` (the GLBs refer to
-them; `Textures/textures.json` lists which are normal maps). `Data/gameplay.json` is the
-documented server format (`docs/server-data.md`: every item with its zone and level range);
-`Server/navmesh/` (outside the WorldBuilder folder) has Skyfold Studio's own navmesh for game
-servers. All positions are in Unity space (Skyfold Studio's +X east is Unity -X,
-matching glTFast). `manifest.json` lists the terrain transform, counts and lighting values;
-`CREDITS.md` lists the CC0 sources.
+The full lighting and grade values are also in `Data/lighting.json`. Model textures are written
+once into `Textures/` (the GLBs refer to them; `Textures/textures.json` lists which are normal
+maps). `Data/gameplay.json` is the documented server format (`docs/server-data.md`: every item
+with its zone and level range); `Server/navmesh/` (outside the WorldBuilder folder) has Skyfold
+Studio's own navmesh for game servers. All positions are in Unity space (Skyfold Studio's +X
+east is Unity -X, matching glTFast). `manifest.json` lists the terrain transform, counts and
+lighting values; `CREDITS.md` lists the CC0 sources.
 "#;

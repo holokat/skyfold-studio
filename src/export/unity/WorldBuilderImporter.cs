@@ -27,6 +27,14 @@ namespace WorldBuilder
     {
         const string WorldsRoot = "Assets/WorldBuilder/Worlds";
 
+        // Navigation Static is deprecated in Unity 6 (the navmesh is baked from the colliders,
+        // by a NavMeshSurface or the core builder): only older editors get the flag
+#if UNITY_6000_0_OR_NEWER
+        const StaticEditorFlags NavStatic = 0;
+#else
+        const StaticEditorFlags NavStatic = StaticEditorFlags.NavigationStatic;
+#endif
+
         [MenuItem("Tools/Skyfold Studio/Import World")]
         public static void ImportMenu()
         {
@@ -133,7 +141,7 @@ namespace WorldBuilder
             Step("Rocks and props", 0.7f);
             PlaceProps(w, prefabs, report);
             Step("Water and roads", 0.85f);
-            BuildWater(w, folder, gen, report);
+            BuildWater(w, folder, gen, terrains, report);
             BuildRoads(w, folder, report);
             BuildCaves(w, folder, report);
             Step("Light and markers", 0.95f);
@@ -141,7 +149,8 @@ namespace WorldBuilder
             BuildMarkers(w, report);
             BuildWaysIn(w, folder, report);
             BuildFires(w.fires, w, folder, true);
-            BuildCamera(w);
+            var camera = BuildCamera(w);
+            BuildLook(w, folder, gen, camera);
             Step("Navigation", 0.97f);
             BuildNavMesh(w, gen, report);
 
@@ -207,7 +216,12 @@ namespace WorldBuilder
             {
                 var td = new TerrainData();
                 td.heightmapResolution = n;
+                td.alphamapResolution = w.alphamapResolution;
                 td.size = new Vector3(w.tileSize, Mathf.Max(w.heightMax - w.heightMin, 1f), w.tileSize);
+                // the asset first: the alphamaps and holes live in sub-assets that are only saved
+                // when they are written to a TerrainData that is already an asset (else Unity
+                // reloads it as all first layer)
+                AssetDatabase.CreateAsset(td, gen + "/TerrainData_" + tile.x + "_" + tile.z + ".asset");
                 var raw = File.ReadAllBytes(Path.Combine(folder, tile.heightmap));
                 var h = new float[n, n];
                 for (int z = 0; z < n; z++)
@@ -216,7 +230,6 @@ namespace WorldBuilder
                 td.SetHeights(0, 0, h);
                 td.terrainLayers = layers;
                 int a = w.alphamapResolution;
-                td.alphamapResolution = a;
                 var bytes = File.ReadAllBytes(Path.Combine(folder, tile.alphamaps));
                 int L = layers.Length;
                 var maps = new float[a, a, L];
@@ -238,12 +251,12 @@ namespace WorldBuilder
                     td.SetHoles(0, 0, solid);
                     holes += tile.holes.Length / 2;
                 }
-                AssetDatabase.CreateAsset(td, gen + "/TerrainData_" + tile.x + "_" + tile.z + ".asset");
+                EditorUtility.SetDirty(td);
 
                 var go = Terrain.CreateTerrainGameObject(td);
                 go.name = tiles == 1 ? "Terrain" : "Terrain " + tile.x + "_" + tile.z;
                 go.transform.position = new Vector3(tile.position[0], tile.position[1], tile.position[2]);
-                GameObjectUtility.SetStaticEditorFlags(go, StaticEditorFlags.ContributeGI | StaticEditorFlags.OccluderStatic | StaticEditorFlags.BatchingStatic | StaticEditorFlags.NavigationStatic);
+                GameObjectUtility.SetStaticEditorFlags(go, StaticEditorFlags.ContributeGI | StaticEditorFlags.OccluderStatic | StaticEditorFlags.BatchingStatic | NavStatic);
                 var t = go.GetComponent<Terrain>();
                 t.drawInstanced = true;
                 t.heightmapPixelError = 3f;
@@ -420,6 +433,15 @@ namespace WorldBuilder
             if (known != null) return known;
             var m = Object.Instantiate(src);
             m.name = name;
+            // the unwrap splits vertices along its seams: a big mesh outgrows 16-bit indices (the
+            // triangles have to be set again after the switch)
+            if (m.indexFormat == IndexFormat.UInt16)
+            {
+                var subs = new int[m.subMeshCount][];
+                for (int i = 0; i < subs.Length; i++) subs[i] = m.GetTriangles(i);
+                m.indexFormat = IndexFormat.UInt32;
+                for (int i = 0; i < subs.Length; i++) m.SetTriangles(subs[i], i);
+            }
             Unwrapping.GenerateSecondaryUVSet(m);
             EnsureFolder(gen + "/Meshes");
             AssetDatabase.CreateAsset(m, path);
@@ -655,7 +677,7 @@ namespace WorldBuilder
                     var go = (GameObject)PrefabUtility.InstantiatePrefab(v.prefab, Parent(new Vector3(m.data[i + 1], m.data[i + 2], m.data[i + 3]), m.name));
                     go.transform.SetPositionAndRotation(new Vector3(m.data[i + 1], m.data[i + 2], m.data[i + 3]), new Quaternion(m.data[i + 4], m.data[i + 5], m.data[i + 6], m.data[i + 7]));
                     go.transform.localScale = (stretch.TryGetValue(i / 9, out var f) ? f : Vector3.one) * m.data[i + 8];
-                    var flags = StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.NavigationStatic;
+                    var flags = StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | NavStatic;
                     if (m.lightmap) flags |= StaticEditorFlags.ContributeGI;
                     GameObjectUtility.SetStaticEditorFlags(go, flags);
                     count++;
@@ -666,8 +688,83 @@ namespace WorldBuilder
 
         // ------------------------------------------------------------------ water, roads, light
 
-        static Material WaterMaterial(string gen, string name, WaterStyle s, Texture2D normal)
+        /// The ground under the water (metres, Unity space) for the water shader's depth: the
+        /// terrain heights resampled over the whole world.
+        static Texture2D GroundHeights(WorldData w, Terrain[] terrains, string gen)
         {
+            const int n = 1024;
+            var tex = new Texture2D(n, n, TextureFormat.RFloat, false, true)
+            {
+                name = "WaterGround",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+            };
+            var px = new Color[n * n];
+            float h = w.size * 0.5f, cell = w.size / n;
+            for (int j = 0; j < n; j++)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    var p = new Vector3(-h + (i + 0.5f) * cell, 0f, -h + (j + 0.5f) * cell);
+                    var t = TileAt(w, terrains, p);
+                    px[j * n + i] = new Color(t.SampleHeight(p) + t.transform.position.y, 0f, 0f, 1f);
+                }
+            }
+            tex.SetPixels(px);
+            tex.Apply(false, false);
+            AssetDatabase.CreateAsset(tex, gen + "/Materials/WaterGround.asset");
+            return tex;
+        }
+
+        static Material WaterMaterial(string gen, string name, WaterStyle s, Texture2D normal, WorldData w, Texture2D ground)
+        {
+            var custom = Shader.Find("WorldBuilder/Water");
+            if (custom != null)
+            {
+                var wm = new Material(custom) { name = name };
+                wm.SetColor("_Shallow", Rgb(s.shallow));
+                wm.SetColor("_Deep", Rgb(s.deep));
+                wm.SetFloat("_Clarity", Mathf.Max(s.clarity, 0.05f));
+                wm.SetFloat("_Transparency", Mathf.Clamp01(s.transparency));
+                wm.SetFloat("_Roughness", Mathf.Clamp01(s.roughness));
+                wm.SetFloat("_ShoreFoam", s.shoreFoam);
+                if (s.extinct != null && s.extinct.Length >= 3)
+                {
+                    wm.SetVector("_Extinct", new Vector4(s.extinct[0], s.extinct[1], s.extinct[2], 0f));
+                    wm.SetVector("_Inscat", new Vector4(s.inscat[0], s.inscat[1], s.inscat[2], 0f));
+                }
+                if (normal != null) wm.SetTexture("_BumpMap", normal);
+                if (ground != null)
+                {
+                    wm.SetTexture("_Ground", ground);
+                    wm.SetVector("_GroundRect", new Vector4(-w.size * 0.5f, -w.size * 0.5f, 1f / w.size, 1f));
+                }
+                var l = w.light;
+                if (l != null)
+                {
+                    var toSun = new Vector3(l.sunDirection[0], l.sunDirection[1], l.sunDirection[2]).normalized;
+                    wm.SetVector("_SunDir", toSun);
+                    wm.SetColor("_SunColor", Rgb(l.sunColor) * l.intensity);
+                    if (l.skyTop != null && l.skyTop.Length >= 3)
+                    {
+                        wm.SetColor("_SkyTop", Rgb(l.skyTop));
+                        wm.SetColor("_SkyHorizon", Rgb(l.skyHorizon));
+                    }
+                    if (l.waterSun != null && l.waterSun.Length >= 3)
+                    {
+                        wm.SetVector("_SunDisp", new Vector4(l.waterSun[0], l.waterSun[1], l.waterSun[2], 0f));
+                        wm.SetVector("_SkyDisp", new Vector4(l.waterSky[0], l.waterSky[1], l.waterSky[2], 0f));
+                        wm.SetFloat("_Exposure", Mathf.Pow(2f, l.postExposure));
+                    }
+                    if (l.hazeColor != null && l.hazeColor.Length >= 3)
+                    {
+                        wm.SetColor("_FogColor", Rgb(l.hazeColor));
+                        wm.SetFloat("_FogDensity", l.hazeDensity);
+                    }
+                }
+                AssetDatabase.CreateAsset(wm, gen + "/Materials/" + name + ".mat");
+                return wm;
+            }
             bool urp = GraphicsSettings.currentRenderPipeline != null;
             var shader = Shader.Find(urp ? "Universal Render Pipeline/Lit" : "Standard");
             var m = new Material(shader) { name = name };
@@ -705,10 +802,12 @@ namespace WorldBuilder
             return m;
         }
 
-        static void BuildWater(WorldData w, string folder, string gen, List<string> report)
+        static void BuildWater(WorldData w, string folder, string gen, Terrain[] terrains, List<string> report)
         {
             if (w.water == null || !w.water.enabled) return;
             var normal = string.IsNullOrEmpty(w.water.normalMap) ? null : Texture(folder + "/" + w.water.normalMap, true, true);
+            var ground = terrains != null && terrains.Length > 0 && Shader.Find("WorldBuilder/Water") != null
+                ? GroundHeights(w, terrains, gen) : null;
             var root = new GameObject("Water");
             int bodies = 0;
             if (w.water.ocean)
@@ -720,7 +819,7 @@ namespace WorldBuilder
                 plane.transform.position = new Vector3(0f, w.water.seaLevel, 0f);
                 plane.transform.localScale = new Vector3(w.size * 0.4f, 1f, w.size * 0.4f);
                 var r = plane.GetComponent<MeshRenderer>();
-                r.sharedMaterial = WaterMaterial(gen, "Water_Ocean", w.water.oceanStyle, normal);
+                r.sharedMaterial = WaterMaterial(gen, "Water_Ocean", w.water.oceanStyle, normal, w, ground);
                 r.shadowCastingMode = ShadowCastingMode.Off;
                 bodies++;
             }
@@ -735,7 +834,7 @@ namespace WorldBuilder
                         var t = FindDeep(go.transform, b.node);
                         var r = t != null ? t.GetComponentInChildren<MeshRenderer>() : null;
                         if (r == null) continue;
-                        r.sharedMaterial = WaterMaterial(gen, "Water_" + b.node, b.style, normal);
+                        r.sharedMaterial = WaterMaterial(gen, "Water_" + b.node, b.style, normal, w, ground);
                         r.shadowCastingMode = ShadowCastingMode.Off;
                         bodies++;
                     }
@@ -827,8 +926,20 @@ namespace WorldBuilder
             var toSun = new Vector3(l.sunDirection[0], l.sunDirection[1], l.sunDirection[2]);
             sun.transform.rotation = Quaternion.LookRotation(-toSun.normalized);
             RenderSettings.sun = light;
+            var ownSky = Shader.Find("WorldBuilder/Sky");
             var skyShader = Shader.Find("Skybox/Procedural");
-            if (skyShader != null)
+            if (ownSky != null && l.skyTop != null && l.skyTop.Length >= 3)
+            {
+                // the editor's sky colours for the hour, as calibrated for the Godot export
+                var sky = new Material(ownSky) { name = "Sky" };
+                sky.SetColor("_SkyTop", Rgb(l.skyTop));
+                sky.SetColor("_SkyHorizon", Rgb(l.skyHorizon));
+                sky.SetVector("_SunDir", toSun.normalized);
+                sky.SetColor("_SunColor", Rgb(l.sunColor) * Mathf.Clamp01(l.intensity));
+                AssetDatabase.CreateAsset(sky, gen + "/Materials/Sky.mat");
+                RenderSettings.skybox = sky;
+            }
+            else if (skyShader != null)
             {
                 var sky = new Material(skyShader);
                 sky.SetFloat("_SunSize", 0.04f);
@@ -838,11 +949,101 @@ namespace WorldBuilder
                 RenderSettings.skybox = sky;
             }
             RenderSettings.ambientMode = AmbientMode.Skybox;
-            RenderSettings.fog = l.fog;
-            RenderSettings.fogMode = FogMode.ExponentialSquared;
-            RenderSettings.fogDensity = l.fogDensity;
-            RenderSettings.fogColor = Rgb(l.fogColor);
+            if (l.hazeColor != null && l.hazeColor.Length >= 3)
+            {
+                // the editor's distance haze (aerial perspective, haze amount, colour haze) as one
+                // exponential fog, as the Godot export calibrates it
+                RenderSettings.fog = l.hazeDensity > 0f;
+                RenderSettings.fogMode = FogMode.Exponential;
+                RenderSettings.fogDensity = l.hazeDensity;
+                RenderSettings.fogColor = Rgb(l.hazeColor);
+            }
+            else
+            {
+                RenderSettings.fog = l.fog;
+                RenderSettings.fogMode = FogMode.ExponentialSquared;
+                RenderSettings.fogDensity = l.fogDensity;
+                RenderSettings.fogColor = Rgb(l.fogColor);
+            }
             DynamicGI.UpdateEnvironment();
+        }
+
+        /// The world's art style in a URP project: a global Volume with the editor's tone curve
+        /// (Tonemapping), exposure, bloom, vignette and its post-tonemap grade (saturation, contrast,
+        /// split toning, lift, foliage hue, vibrance) as a Color Lookup LUT. Built by name, so the
+        /// importer still compiles in built-in pipeline projects (where it does nothing).
+        static void BuildLook(WorldData w, string folder, string gen, Camera cam)
+        {
+            var l = w.light;
+            if (l == null || string.IsNullOrEmpty(l.tonemap) || GraphicsSettings.currentRenderPipeline == null) return;
+            var volumeType = FindType("UnityEngine.Rendering.Volume");
+            var profileType = FindType("UnityEngine.Rendering.VolumeProfile");
+            if (volumeType == null || profileType == null) return;
+            var profile = ScriptableObject.CreateInstance(profileType);
+            profile.name = "Look";
+            AssetDatabase.CreateAsset(profile, gen + "/Look.asset");
+            var add = profileType.GetMethod("Add", new[] { typeof(Type), typeof(bool) });
+            void Component(string type, params (string field, object value)[] sets)
+            {
+                var t = FindType("UnityEngine.Rendering.Universal." + type);
+                if (t == null || add == null) return;
+                var comp = (ScriptableObject)add.Invoke(profile, new object[] { t, false });
+                comp.name = type;
+                foreach (var (field, value) in sets)
+                {
+                    var p = t.GetField(field)?.GetValue(comp);
+                    var valueProp = p?.GetType().GetProperty("value");
+                    if (valueProp == null) continue;
+                    var v = value is string s && valueProp.PropertyType.IsEnum ? Enum.Parse(valueProp.PropertyType, s) : value;
+                    valueProp.SetValue(p, v);
+                    p.GetType().GetProperty("overrideState")?.SetValue(p, true);
+                }
+                AssetDatabase.AddObjectToAsset(comp, profile);
+            }
+            Component("Tonemapping", ("mode", l.tonemap));
+            Component("ColorAdjustments", ("postExposure", l.postExposure));
+            if (l.bloom > 0f) Component("Bloom", ("intensity", l.bloom), ("threshold", 1f));
+            if (l.vignette > 0f) Component("Vignette", ("intensity", l.vignette), ("smoothness", 0.4f));
+            if (!string.IsNullOrEmpty(l.lut))
+            {
+                var path = folder + "/" + l.lut;
+                if (AssetImporter.GetAtPath(path) is TextureImporter imp)
+                {
+                    imp.textureType = TextureImporterType.Default;
+                    imp.sRGBTexture = false;
+                    imp.mipmapEnabled = false;
+                    imp.textureCompression = TextureImporterCompression.Uncompressed;
+                    imp.wrapMode = TextureWrapMode.Clamp;
+                    imp.filterMode = FilterMode.Bilinear;
+                    imp.npotScale = TextureImporterNPOTScale.None;
+                    imp.SaveAndReimport();
+                }
+                var lut = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+                if (lut != null) Component("ColorLookup", ("texture", lut), ("contribution", 1f));
+            }
+            EditorUtility.SetDirty(profile);
+            var go = new GameObject("Look");
+            var volume = go.AddComponent(volumeType);
+            volumeType.GetProperty("isGlobal")?.SetValue(volume, true);
+            volumeType.GetField("isGlobal")?.SetValue(volume, true);
+            volumeType.GetField("sharedProfile")?.SetValue(volume, profile);
+            // URP cameras render post-processing only when asked to
+            var camData = FindType("UnityEngine.Rendering.Universal.UniversalAdditionalCameraData");
+            if (cam != null && camData != null)
+            {
+                var data = cam.GetComponent(camData) ?? cam.gameObject.AddComponent(camData);
+                camData.GetProperty("renderPostProcessing")?.SetValue(data, true);
+            }
+        }
+
+        static Type FindType(string fullName)
+        {
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = a.GetType(fullName, false);
+                if (t != null) return t;
+            }
+            return null;
         }
 
         static void BuildMarkers(WorldData w, List<string> report)
@@ -1121,7 +1322,7 @@ namespace WorldBuilder
                         mf.gameObject.AddComponent<MeshCollider>().sharedMesh = mf.sharedMesh;
                 foreach (var t in arch.GetComponentsInChildren<Transform>())
                     if (!InPieces(t))
-                        GameObjectUtility.SetStaticEditorFlags(t.gameObject, StaticEditorFlags.ContributeGI | StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.BatchingStatic | StaticEditorFlags.NavigationStatic);
+                        GameObjectUtility.SetStaticEditorFlags(t.gameObject, StaticEditorFlags.ContributeGI | StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.BatchingStatic | NavStatic);
 
                 // doors, gates, levers, plates and traps come alive; the game's markers (arenas,
                 // checkpoints, loot and spawn spots) are WorldBuilderMarkers
@@ -1217,7 +1418,7 @@ namespace WorldBuilder
                         var go = (GameObject)PrefabUtility.InstantiatePrefab(v.prefab, props.transform);
                         go.transform.SetPositionAndRotation(new Vector3(o.data[i + 1], o.data[i + 2], o.data[i + 3]), new Quaternion(o.data[i + 4], o.data[i + 5], o.data[i + 6], o.data[i + 7]));
                         go.transform.localScale = (stretch.TryGetValue(i / 9, out var sf) ? sf : Vector3.one) * o.data[i + 8];
-                        GameObjectUtility.SetStaticEditorFlags(go, StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.NavigationStatic);
+                        GameObjectUtility.SetStaticEditorFlags(go, StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccludeeStatic | NavStatic);
                         count++;
                     }
                 }
@@ -1304,7 +1505,7 @@ namespace WorldBuilder
             EditorBuildSettings.scenes = list.ToArray();
         }
 
-        static void BuildCamera(WorldData w)
+        static Camera BuildCamera(WorldData w)
         {
             var go = new GameObject("Main Camera");
             go.tag = "MainCamera";
@@ -1317,6 +1518,7 @@ namespace WorldBuilder
             var p = new Vector3(w.camera.position[0], w.camera.position[1], w.camera.position[2]);
             var t = new Vector3(w.camera.target[0], w.camera.target[1], w.camera.target[2]);
             go.transform.SetPositionAndRotation(p, Quaternion.LookRotation((t - p).normalized, Vector3.up));
+            return cam;
         }
     }
 
@@ -1608,6 +1810,10 @@ namespace WorldBuilder
         public float clarity;
         public float transparency;
         public float roughness;
+        public float shoreFoam;
+        /// the editor's optics: extinction per metre and in-scatter albedo (linear)
+        public float[] extinct;
+        public float[] inscat;
     }
 
     [Serializable] public class WaterBody
@@ -1643,6 +1849,23 @@ namespace WorldBuilder
         public float exposure;
         public float contrast;
         public float saturation;
+        /// URP TonemappingMode name ("ACES", "Neutral"); empty in older exports
+        public string tonemap;
+        /// URP post exposure (EV)
+        public float postExposure;
+        public float bloom;
+        public float vignette;
+        /// the post-tonemap grade as a URP Color Lookup strip (sRGB in, sRGB out)
+        public string lut;
+        /// exponential haze (per m) and its colour (sRGB)
+        public float hazeDensity;
+        public float[] hazeColor;
+        /// sky colours for the water's reflections (sRGB)
+        public float[] skyTop;
+        public float[] skyHorizon;
+        /// the key light and sky irradiance in the editor's display units (water optics)
+        public float[] waterSun;
+        public float[] waterSky;
     }
 
     [Serializable] public class MarkerData
