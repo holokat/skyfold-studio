@@ -51,6 +51,7 @@ TREES = (
     "crates/particle_fluids",
     "assets/shaders",
     "docs/screenshots",
+    "docs/readme",
     "tools/release",
 )
 

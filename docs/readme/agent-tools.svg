@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="sea" x1="0" x2="1">
+      <stop offset="0" stop-color="#5ab0ff"/>
+      <stop offset="1" stop-color="#7ee0a1"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1d22"/>
+      <stop offset="1" stop-color="#14161a"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5f6b78"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="620" rx="28" fill="#0c0d10"/>
+
+  <text x="40" y="58" font-size="26" font-weight="700" fill="#f2f4f7" letter-spacing="-0.5">The model decides. <tspan fill="url(#sea)">The engine builds.</tspan></text>
+  <text x="40" y="86" font-size="15" fill="#8d96a1">Your agent plans the edit in a few small tool calls. Skyfold's native engine does the heavy lifting.</text>
+
+  <!-- 1. You -->
+  <rect x="40" y="118" width="250" height="236" rx="20" fill="url(#card)" stroke="#262a31"/>
+  <text x="64" y="152" font-size="12" font-weight="700" fill="#5ab0ff" letter-spacing="1.5">1 · YOU</text>
+  <text x="64" y="180" font-size="18" font-weight="600" fill="#f2f4f7">Lasso an area and ask</text>
+  <rect x="64" y="200" width="202" height="62" rx="12" fill="#0f1114" stroke="#2c313a"/>
+  <text x="80" y="226" font-size="14" fill="#e6e9ee">“Make this a dense</text>
+  <text x="80" y="246" font-size="14" fill="#e6e9ee">pine forest”</text>
+  <path d="M84 300 q30 -26 70 -10 t66 4 q14 18 -22 26 t-84 4 q-40 -6 -30 -24z" fill="none" stroke="#7fb8ff" stroke-width="2" stroke-dasharray="5 4"/>
+  <text x="64" y="342" font-size="12.5" fill="#8d96a1">or a screenshot, a map or an outline</text>
+
+  <!-- arrow -->
+  <line x1="296" y1="236" x2="336" y2="236" stroke="#5f6b78" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 2. Agent -->
+  <rect x="342" y="118" width="270" height="236" rx="20" fill="url(#card)" stroke="#262a31"/>
+  <text x="366" y="152" font-size="12" font-weight="700" fill="#5ab0ff" letter-spacing="1.5">2 · YOUR AGENT DECIDES</text>
+  <text x="366" y="180" font-size="18" font-weight="600" fill="#f2f4f7">Picks the tools and settings</text>
+  <text x="366" y="210" font-size="13.5" fill="#b9c0c9">What is there now? Which trees</text>
+  <text x="366" y="230" font-size="13.5" fill="#b9c0c9">suit this climate? How dense?</text>
+  <text x="366" y="250" font-size="13.5" fill="#b9c0c9">What should the ground look like?</text>
+  <g font-size="12" fill="#cfd5dc">
+    <rect x="366" y="276" width="96" height="26" rx="13" fill="#20242b"/><text x="380" y="293">Claude Code</text>
+    <rect x="468" y="276" width="62" height="26" rx="13" fill="#20242b"/><text x="482" y="293">Codex</text>
+    <rect x="536" y="276" width="58" height="26" rx="13" fill="#20242b"/><text x="548" y="293">Cursor</text>
+  </g>
+  <text x="366" y="334" font-size="12.5" fill="#8d96a1">any MCP client, or built into the app</text>
+
+  <!-- arrow -->
+  <line x1="618" y1="236" x2="658" y2="236" stroke="#5f6b78" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 3. Engine -->
+  <rect x="664" y="118" width="296" height="236" rx="20" fill="url(#card)" stroke="#2f4a3a"/>
+  <text x="688" y="152" font-size="12" font-weight="700" fill="#7ee0a1" letter-spacing="1.5">3 · SKYFOLD RUNS THE TOOLS</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
+    <rect x="688" y="170" width="248" height="38" rx="10" fill="#0f1114" stroke="#2c313a"/>
+    <text x="702" y="194" fill="#7fb8ff">terrain_sample</text><text x="836" y="194" fill="#6b7480">look</text>
+    <rect x="688" y="216" width="248" height="38" rx="10" fill="#0f1114" stroke="#2c313a"/>
+    <text x="702" y="240" fill="#7fb8ff">nature_scatter</text><text x="836" y="240" fill="#6b7480">grow pines</text>
+    <rect x="688" y="262" width="248" height="38" rx="10" fill="#0f1114" stroke="#2c313a"/>
+    <text x="702" y="286" fill="#7fb8ff">terrain_paint</text><text x="836" y="286" fill="#6b7480">ground</text>
+  </g>
+  <text x="688" y="334" font-size="12.5" fill="#8d96a1">thousands of trees · one ⌘Z undoes it all</text>
+
+  <!-- feedback loop -->
+  <path d="M812 360 C 812 404, 477 404, 477 362" fill="none" stroke="#5f6b78" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <rect x="520" y="384" width="250" height="28" rx="14" fill="#0c0d10"/>
+  <text x="645" y="403" font-size="13" fill="#b9c0c9" text-anchor="middle">screenshots and analysis come back</text>
+
+  <!-- comparison -->
+  <rect x="40" y="430" width="450" height="160" rx="20" fill="#16121a" stroke="#3a2a33"/>
+  <text x="64" y="464" font-size="12" font-weight="700" fill="#ff8a8a" letter-spacing="1.5">AGENT BUILDS IT OBJECT BY OBJECT</text>
+  <g font-size="14" fill="#c9c2c6">
+    <text x="64" y="496">✕  Writes out every tree, rock and height by hand</text>
+    <text x="64" y="522">✕  A forest costs tens of thousands of tokens</text>
+    <text x="64" y="548">✕  Slow, easy to drift, hard to undo</text>
+    <text x="64" y="574">✕  Guesses at what the world looks like</text>
+  </g>
+
+  <rect x="510" y="430" width="450" height="160" rx="20" fill="#111a15" stroke="#2f4a3a"/>
+  <text x="534" y="464" font-size="12" font-weight="700" fill="#7ee0a1" letter-spacing="1.5">AGENT CALLS SKYFOLD TOOLS</text>
+  <g font-size="14" fill="#c6d3cb">
+    <text x="534" y="496">✓  A few short calls, a few hundred tokens</text>
+    <text x="534" y="522">✓  Native Rust engine places everything at once</text>
+    <text x="534" y="548">✓  Checked arguments, same code as the editor UI</text>
+    <text x="534" y="574">✓  Every edit is undoable and can be scoped to a lasso</text>
+  </g>
+</svg>
