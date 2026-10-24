@@ -374,7 +374,8 @@ pub fn snapshot(world: &World) -> Snapshot {
             .filter(|(_, n)| *n == t.n())
             .map(|(d, _)| d.to_vec()),
         grass_amount: world.resource::<crate::objects::NatureAmounts>().grass,
-        grass_height: world.resource::<crate::objects::NatureAmounts>().grass_height,
+        // (this editor has no blade-length setting: its blades are the default length)
+        grass_height: 1.0,
         grass_lushness: world
             .get_resource::<crate::nature::NatureAppearance>()
             .map(|a| a.grass_lushness)
@@ -383,10 +384,8 @@ pub fn snapshot(world: &World) -> Snapshot {
             .resource::<crate::world::WorldMeta>()
             .art_style
             .painted(),
-        canopy_shade: world
-            .get_resource::<crate::nature::NatureAppearance>()
-            .map(|a| a.sanitized().canopy_shade)
-            .unwrap_or(1.0),
+        // (this editor doesn't shade the ground under tree crowns)
+        canopy_shade: 0.0,
         camera: (orbit.eye(), orbit.focus),
         nature,
         caves: world
