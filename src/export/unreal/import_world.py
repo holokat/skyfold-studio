@@ -361,7 +361,174 @@ def import_textures(layers):
     return tex
 
 
-def landscape_material(layers, tex):
+GRASS_UV_HLSL = r"""
+// a world position -> the grass map's texture coordinates (map vertex (0, 0) at Origin, one
+// vertex step along I and J, Steps steps across)
+float3 d = P - Origin;
+return float2(dot(d, I) / dot(I, I), dot(d, J) / dot(J, J)) / Steps;
+"""
+# landscape grass tufts per 10 m x 10 m at full density (the editor's blade field, measured)
+GRASS_DENSITY = 900.0
+
+
+def build_grass():
+    """Skyfold Studio's meadow grass as Unreal landscape grass: one tuft mesh (the editor's blade
+    recipe), a two-sided material from the world's blade colours with the wind, and two grass
+    types (lush and dry) the landscape material scatters by the editor's grass map."""
+    g = DATA.get("grass")
+    if not g:
+        return None
+    try:
+        import_files([os.path.join(HERE, g["clump"])], DEST + "/Grass")
+        mesh = next(iter(assets_in(DEST + "/Grass", unreal.StaticMesh).values()), None)
+        if mesh is None:
+            warn("grass tuft didn't import")
+            return None
+        try:
+            ns = mesh.get_editor_property("nanite_settings")
+            ns.set_editor_property("enabled", False)
+            mesh.set_editor_property("nanite_settings", ns)
+        except Exception:
+            pass
+        unreal.EditorAssetLibrary.save_loaded_asset(mesh)
+        mat = new_asset("M_WB_Grass", DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
+        mat.set_editor_property("two_sided", True)
+        mat.set_editor_property("used_with_instanced_static_meshes", True)
+        base = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -700, 0)
+        base.set_editor_property("parameter_name", "Base")
+        base.set_editor_property("default_value", unreal.LinearColor(*g["base"], 1.0))
+        tip = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -700, 120)
+        tip.set_editor_property("parameter_name", "Tip")
+        tip.set_editor_property("default_value", unreal.LinearColor(*g["tip"], 1.0))
+        uv = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -900, 240)
+        v = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -760, 240)
+        v.set_editor_property("g", True)
+        MEL.connect_material_expressions(uv, "", v, "")
+        # (dark at the root, the tip's colour from half way up)
+        pw = MEL.create_material_expression(mat, unreal.MaterialExpressionPower, -640, 240)
+        pw.set_editor_property("const_exponent", 0.7)
+        MEL.connect_material_expressions(v, "", pw, "Base")
+        col = MEL.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -480, 60)
+        MEL.connect_material_expressions(tip, "", col, "A")
+        MEL.connect_material_expressions(base, "", col, "B")
+        MEL.connect_material_expressions(pw, "", col, "Alpha")
+        MEL.connect_material_property(col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        for name, value, prop in (("Roughness", 0.85, unreal.MaterialProperty.MP_ROUGHNESS), ("Specular", 0.25, unreal.MaterialProperty.MP_SPECULAR)):
+            c = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -480, 300 if name == "Roughness" else 360)
+            c.set_editor_property("r", value)
+            MEL.connect_material_property(c, "", prop)
+        # the wind, as the plants' (the blades flutter)
+        custom = MEL.create_material_expression(mat, unreal.MaterialExpressionCustom, -480, 500)
+        custom.set_editor_property("code", WIND_HLSL)
+        custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+        ins = []
+        for n in ("Local", "Bounds", "Obj", "Time", "Wind", "Flutter"):
+            ci = unreal.CustomInput()
+            ci.set_editor_property("input_name", n)
+            ins.append(ci)
+        custom.set_editor_property("inputs", ins)
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionLocalPosition, -800, 420), "", custom, "Local")
+        bounds = MEL.create_material_expression(mat, unreal.MaterialExpressionObjectLocalBounds, -800, 480)
+        MEL.connect_material_expressions(bounds, "Max", custom, "Bounds")
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionObjectPositionWS, -800, 540), "", custom, "Obj")
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionTime, -800, 600), "", custom, "Time")
+        wind = MEL.create_material_expression(mat, unreal.MaterialExpressionCollectionParameter, -950, 660)
+        wind.set_editor_property("collection", world_parameters())
+        wind.set_editor_property("parameter_name", "Wind")
+        # (a collection vector reads as one float4)
+        MEL.connect_material_expressions(wind, "", custom, "Wind")
+        one = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -800, 720)
+        one.set_editor_property("r", 1.0)
+        MEL.connect_material_expressions(one, "", custom, "Flutter")
+        MEL.connect_material_property(custom, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+        MEL.recompile_material(mat)
+        unreal.EditorAssetLibrary.save_loaded_asset(mat)
+        types = {}
+        reach = g.get("reach_m", 75.0) * 100.0
+        for key, tip_c in (("Lush", g["tip"]), ("Dry", g["dry"])):
+            mi = new_asset("MI_WB_Grass_" + key, DEST + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+            mi.set_editor_property("parent", mat)
+            MEL.set_material_instance_vector_parameter_value(mi, "Tip", unreal.LinearColor(*tip_c, 1.0))
+            unreal.EditorAssetLibrary.save_loaded_asset(mi)
+            gt = new_asset("GT_WB_" + key, DEST + "/Grass", unreal.LandscapeGrassType, unreal.LandscapeGrassTypeFactory())
+            var = unreal.GrassVariety()
+            var.set_editor_property("grass_mesh", mesh)
+            var.set_editor_property("override_materials", [mi])
+            var.set_editor_property("grass_density", unreal.PerPlatformFloat(default=GRASS_DENSITY))
+            var.set_editor_property("start_cull_distance", unreal.PerPlatformInt(default=int(reach * 0.7)))
+            var.set_editor_property("end_cull_distance", unreal.PerPlatformInt(default=int(reach)))
+            var.set_editor_property("random_rotation", True)
+            var.set_editor_property("align_to_surface", True)
+            var.set_editor_property("scale_x", unreal.FloatInterval(min=0.8, max=1.25))
+            var.set_editor_property("cast_dynamic_shadow", False)
+            gt.set_editor_property("grass_varieties", [var])
+            unreal.EditorAssetLibrary.save_loaded_asset(gt)
+            types[key] = gt
+        map_files = [os.path.join(HERE, g["map"])]
+        import_files(map_files, DEST + "/Grass")
+        gmap = assets_in(DEST + "/Grass", unreal.Texture2D).get("grass")
+        if gmap is not None:
+            gmap.set_editor_property("srgb", False)
+            gmap.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP)
+            unreal.EditorAssetLibrary.save_loaded_asset(gmap)
+        log("meadow grass: lush and dry landscape grass from the grass map")
+        return {"types": types, "map": gmap, "vertices": g["map_vertices"]}
+    except Exception as e:
+        warn("grass: %s" % e)
+        return None
+
+
+def grass_output(mat, grass):
+    """The landscape material's grass: lush where the grass map is dense and green, dry where
+    it is dense and dry (R density, G dryness)."""
+    if not grass or grass.get("map") is None:
+        return
+    n = grass["vertices"]
+    half = DATA["landscape"]["size_m"] * 0.5
+    step = DATA["landscape"]["size_m"] / (n - 1)
+    uvc = MEL.create_material_expression(mat, unreal.MaterialExpressionCustom, -700, 1800)
+    uvc.set_editor_property("code", GRASS_UV_HLSL)
+    uvc.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT2)
+    ins = []
+    for nm in ("P", "Origin", "I", "J", "Steps"):
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", nm)
+        ins.append(ci)
+    uvc.set_editor_property("inputs", ins)
+    wp = MEL.create_material_expression(mat, unreal.MaterialExpressionWorldPosition, -1000, 1700)
+    MEL.connect_material_expressions(wp, "", uvc, "P")
+    for k, (nm, v) in enumerate((("Origin", to_ue([-half, 0.0, -half])), ("I", to_ue([step, 0.0, 0.0])), ("J", to_ue([0.0, 0.0, step])))):
+        c = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -1000, 1760 + k * 60)
+        c.set_editor_property("constant", unreal.LinearColor(v.x, v.y, v.z, 1.0))
+        MEL.connect_material_expressions(c, "", uvc, nm)
+    steps = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -1000, 1940)
+    steps.set_editor_property("r", float(n))
+    MEL.connect_material_expressions(steps, "", uvc, "Steps")
+    smp = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -520, 1800)
+    smp.set_editor_property("texture", grass["map"])
+    smp.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    MEL.connect_material_expressions(uvc, "", smp, "UVs")
+    inv = MEL.create_material_expression(mat, unreal.MaterialExpressionOneMinus, -380, 1880)
+    MEL.connect_material_expressions(smp, "G", inv, "")
+    lush = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -260, 1800)
+    MEL.connect_material_expressions(smp, "R", lush, "A")
+    MEL.connect_material_expressions(inv, "", lush, "B")
+    dry = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -260, 1900)
+    MEL.connect_material_expressions(smp, "R", dry, "A")
+    MEL.connect_material_expressions(smp, "G", dry, "B")
+    out = MEL.create_material_expression(mat, unreal.MaterialExpressionLandscapeGrassOutput, -100, 1850)
+    gi = []
+    for key in ("Lush", "Dry"):
+        x = unreal.GrassInput()
+        x.set_editor_property("name", key)
+        x.set_editor_property("grass_type", grass["types"][key])
+        gi.append(x)
+    out.set_editor_property("grass_types", gi)
+    MEL.connect_material_expressions(lush, "", out, "Lush")
+    MEL.connect_material_expressions(dry, "", out, "Dry")
+
+
+def landscape_material(layers, tex, grass=None):
     try:
         mat = new_asset("M_WB_Landscape", DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
         cell = DATA["landscape"]["size_m"] / (DATA["landscape"]["resolution"] - 1)
@@ -413,6 +580,7 @@ def landscape_material(layers, tex):
         MEL.connect_material_property(normal_blend, "", unreal.MaterialProperty.MP_NORMAL)
         MEL.connect_material_property(rough_blend, "", unreal.MaterialProperty.MP_ROUGHNESS)
         MEL.connect_material_property(ao_blend, "", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION)
+        grass_output(mat, grass)
         if os.path.exists(os.path.join(HERE, "Landscape", "holes_ue.r8")):
             # cave mouths: the visibility layer cuts the ground open
             vis = MEL.create_material_expression(mat, unreal.MaterialExpressionLandscapeVisibilityMask, -300, 1600)
@@ -427,6 +595,20 @@ def landscape_material(layers, tex):
         return None
 
 
+FOAM_HLSL = r"""
+// Skyfold Studio's shore foam: a lace line where the water meets the land and bands rolling in
+// over the shallows, torn up by the ripples (Noise). Behind / Here are scene depths without and
+// at the water (cm); the vertical depth follows from the view's slant.
+// Lakes and rivers foam only at their very edge; the sea also breaks in bands over the shallows
+// (Surf 1) as the Godot export's surf does.
+float d = max(Behind - Here, 0.0) * max(abs(CamZ), 0.05);
+float n = Noise * 0.5 + 0.5;
+float lace = (1.0 - smoothstep(2.0, 18.0, d)) * smoothstep(0.35, 0.65, n) * 0.6;
+float band = Surf * (1.0 - smoothstep(20.0, 90.0, d)) * smoothstep(0.82, 1.0, sin(Time * 1.3 - d * 0.06 + n * 3.0)) * smoothstep(0.3, 0.7, n) * 0.7;
+return saturate((lace + band) * Amount);
+"""
+
+
 def water_material(tex):
     """M_WB_Water: Unreal's Single Layer Water shading with the editor's water optics (its
     extinction per metre and in-scatter albedo per style, `water::water_optics`) as scattering
@@ -435,12 +617,38 @@ def water_material(tex):
         mat = new_asset("M_WB_Water", DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
         mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_SINGLE_LAYER_WATER)
         mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_OPAQUE)
-        black = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, -200)
-        black.set_editor_property("constant", unreal.LinearColor(0.0, 0.0, 0.0, 1.0))
-        MEL.connect_material_property(black, "", unreal.MaterialProperty.MP_BASE_COLOR)
-        # Opacity is the coverage of a layer drawn over the water (foam): none by default
-        # (unconnected it counts as 1 under Substrate: an opaque black top layer)
-        for name, value, prop, y in (("Roughness", 0.04, unreal.MaterialProperty.MP_ROUGHNESS, -100), ("Specular", 0.5, unreal.MaterialProperty.MP_SPECULAR, 0), ("Foam", 0.0, unreal.MaterialProperty.MP_OPACITY, 100)):
+        # the base colour and opacity are the foam lying on the water (unconnected, Opacity counts
+        # as 1 under Substrate: an opaque top layer)
+        white = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, -200)
+        white.set_editor_property("constant", unreal.LinearColor(0.82, 0.85, 0.87, 1.0))
+        MEL.connect_material_property(white, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        foam = MEL.create_material_expression(mat, unreal.MaterialExpressionCustom, -400, 120)
+        foam.set_editor_property("code", FOAM_HLSL)
+        foam.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+        fins = []
+        for n in ("Behind", "Here", "CamZ", "Time", "Noise", "Amount", "Surf"):
+            ci = unreal.CustomInput()
+            ci.set_editor_property("input_name", n)
+            fins.append(ci)
+        foam.set_editor_property("inputs", fins)
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionSceneDepthWithoutWater, -800, 60), "", foam, "Behind")
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionPixelDepth, -800, 120), "", foam, "Here")
+        cam = MEL.create_material_expression(mat, unreal.MaterialExpressionCameraVectorWS, -950, 180)
+        camz = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -800, 180)
+        camz.set_editor_property("b", True)
+        MEL.connect_material_expressions(cam, "", camz, "")
+        MEL.connect_material_expressions(camz, "", foam, "CamZ")
+        MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionTime, -800, 240), "", foam, "Time")
+        amount = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -800, 360)
+        amount.set_editor_property("parameter_name", "ShoreFoam")
+        amount.set_editor_property("default_value", 1.0)
+        MEL.connect_material_expressions(amount, "", foam, "Amount")
+        surf = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -800, 420)
+        surf.set_editor_property("parameter_name", "Surf")
+        surf.set_editor_property("default_value", 0.0)
+        MEL.connect_material_expressions(surf, "", foam, "Surf")
+        MEL.connect_material_property(foam, "", unreal.MaterialProperty.MP_OPACITY)
+        for name, value, prop, y in (("Roughness", 0.04, unreal.MaterialProperty.MP_ROUGHNESS, -100), ("Specular", 0.5, unreal.MaterialProperty.MP_SPECULAR, 0)):
             p = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -400, y)
             p.set_editor_property("parameter_name", name)
             p.set_editor_property("default_value", value)
@@ -498,6 +706,11 @@ def water_material(tex):
             MEL.connect_material_expressions(flat, "", lerp, "B")
             MEL.connect_material_expressions(sat, "", lerp, "Alpha")
             MEL.connect_material_property(lerp, "", unreal.MaterialProperty.MP_NORMAL)
+            # the foam's breakup: the first ripple layer's slope
+            MEL.connect_material_expressions(samples[0], "R", foam, "Noise")
+        if normal is None:
+            zero = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -800, 300)
+            MEL.connect_material_expressions(zero, "", foam, "Noise")
         MEL.recompile_material(mat)
         unreal.EditorAssetLibrary.save_loaded_asset(mat)
         return mat
@@ -527,6 +740,8 @@ def water_instance(parent, name, style):
             MEL.set_material_instance_vector_parameter_value(mi, "Scattering", unreal.LinearColor(sc[0], sc[1], sc[2], 1.0))
             MEL.set_material_instance_vector_parameter_value(mi, "Absorption", unreal.LinearColor(ab[0], ab[1], ab[2], 1.0))
         MEL.set_material_instance_scalar_parameter_value(mi, "Roughness", max(0.02, style["roughness"] * 0.5))
+        MEL.set_material_instance_scalar_parameter_value(mi, "ShoreFoam", float(style.get("shore_foam", 1.0)))
+        MEL.set_material_instance_scalar_parameter_value(mi, "Surf", 1.0 if name == "Ocean" else 0.0)
         unreal.EditorAssetLibrary.save_loaded_asset(mi)
         return mi
     except Exception as e:
@@ -673,6 +888,138 @@ def merge_lods(meshes, variant):
     return lod0
 
 
+WIND_HLSL = r"""
+// Skyfold Studio's wind on trees and plants: the mesh bends more the higher up it is (its own
+// height from its local bounds), a slow sway and gusts push it along the wind, leaves and blades
+// flutter; every instance has its own phase. Wind: direction x, y (Unreal), speed m/s, gustiness.
+float top = max(Bounds.z, 30.0);
+float h = saturate(Local.z / top);
+float bend = h * h;
+float speed = Wind.z;
+float phase = dot(Obj.xy, float2(0.0013, 0.0017));
+float sway = sin(Time * (0.8 + speed * 0.06) + phase) * 0.6 + sin(Time * 2.1 + phase * 1.7) * 0.25;
+float gust = 0.5 + 0.5 * sin(Time * 0.35 + dot(Obj.xy, float2(0.0004, 0.0003)));
+float push = speed * (0.35 + 0.4 * sway + 0.5 * Wind.w * gust);
+float3 dir = float3(Wind.x, Wind.y, 0.0);
+float3 o = dir * push * bend * top * 0.01;
+o += float3(sin(Time * 7.0 + Local.x * 0.05 + phase * 3.0), cos(Time * 6.1 + Local.y * 0.05 + phase), 0.0) * Flutter * speed * 0.2 * h;
+return o;
+"""
+
+WIND_CATEGORIES = ("Trees", "Plants")
+WIND = {}
+
+
+def world_parameters():
+    """MPC_WB_World: what the atmosphere runtime shares with the materials each frame (the wind:
+    direction x, y, speed m/s, gustiness; how wet the ground is). Its defaults are the world's."""
+    if "mpc" in WIND:
+        return WIND["mpc"]
+    mpc = None
+    try:
+        path = DEST + "/Materials/MPC_WB_World"
+        mpc = unreal.load_asset(path) if unreal.EditorAssetLibrary.does_asset_exist(path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset("MPC_WB_World", DEST + "/Materials", unreal.MaterialParameterCollection, unreal.MaterialParameterCollectionFactoryNew())
+        atm = json.load(open(os.path.join(HERE, "Data", "atmosphere.json"))) if os.path.exists(os.path.join(HERE, "Data", "atmosphere.json")) else {}
+        wind = atm.get("world", {}).get("wind", {"dir": [1.0, 0.0], "speed": 0.0, "gustiness": 0.0})
+        d = to_ue([wind["dir"][0], 0.0, wind["dir"][1]])
+        n = max(math.hypot(d.x, d.y), 1e-6)
+        v = unreal.CollectionVectorParameter()
+        v.set_editor_property("parameter_name", "Wind")
+        v.set_editor_property("default_value", unreal.LinearColor(d.x / n, d.y / n, wind["speed"], wind.get("gustiness", 0.0)))
+        w = unreal.CollectionScalarParameter()
+        w.set_editor_property("parameter_name", "Wetness")
+        w.set_editor_property("default_value", 0.0)
+        mpc.set_editor_property("vector_parameters", [v])
+        mpc.set_editor_property("scalar_parameters", [w])
+        unreal.EditorAssetLibrary.save_loaded_asset(mpc)
+    except Exception as e:
+        warn("world parameters: %s" % e)
+    WIND["mpc"] = mpc
+    return mpc
+
+
+def wind_master():
+    """M_WB_Foliage: Interchange's glTF master material with Skyfold Studio's wind as its world
+    position offset (the plants' and trees' material instances move under it)."""
+    if "master" in WIND:
+        return WIND["master"]
+    master = None
+    try:
+        src = "/InterchangeAssets/gltf/M_Default"
+        path = DEST + "/Materials/M_WB_Foliage"
+        if unreal.EditorAssetLibrary.does_asset_exist(path):
+            unreal.EditorAssetLibrary.delete_asset(path)
+        master = unreal.EditorAssetLibrary.duplicate_asset(src, path)
+        mpc = world_parameters()
+        custom = MEL.create_material_expression(master, unreal.MaterialExpressionCustom, -600, 1400)
+        custom.set_editor_property("code", WIND_HLSL)
+        custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+        ins = []
+        for n in ("Local", "Bounds", "Obj", "Time", "Wind", "Flutter"):
+            ci = unreal.CustomInput()
+            ci.set_editor_property("input_name", n)
+            ins.append(ci)
+        custom.set_editor_property("inputs", ins)
+        MEL.connect_material_expressions(MEL.create_material_expression(master, unreal.MaterialExpressionLocalPosition, -1000, 1300), "", custom, "Local")
+        bounds = MEL.create_material_expression(master, unreal.MaterialExpressionObjectLocalBounds, -1000, 1360)
+        MEL.connect_material_expressions(bounds, "Max", custom, "Bounds")
+        MEL.connect_material_expressions(MEL.create_material_expression(master, unreal.MaterialExpressionObjectPositionWS, -1000, 1420), "", custom, "Obj")
+        MEL.connect_material_expressions(MEL.create_material_expression(master, unreal.MaterialExpressionTime, -1000, 1480), "", custom, "Time")
+        wind = MEL.create_material_expression(master, unreal.MaterialExpressionCollectionParameter, -1150, 1540)
+        wind.set_editor_property("collection", mpc)
+        wind.set_editor_property("parameter_name", "Wind")
+        # (a collection vector reads as one float4)
+        MEL.connect_material_expressions(wind, "", custom, "Wind")
+        flutter = MEL.create_material_expression(master, unreal.MaterialExpressionScalarParameter, -1000, 1600)
+        flutter.set_editor_property("parameter_name", "WindFlutter")
+        flutter.set_editor_property("default_value", 0.0)
+        MEL.connect_material_expressions(flutter, "", custom, "Flutter")
+        MEL.connect_material_property(custom, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+        MEL.recompile_material(master)
+        unreal.EditorAssetLibrary.save_loaded_asset(master)
+    except Exception as e:
+        warn("wind material: %s" % e)
+        master = None
+    WIND["master"] = master
+    return master
+
+
+def add_wind(meshes):
+    """Moves the meshes' material instances under the wind master: each Interchange base
+    instance (opaque, masked, two-sided...) gets a twin under it, leaves and blades fluttering."""
+    master = wind_master()
+    if master is None:
+        return 0
+    n = 0
+    for mesh in meshes:
+        try:
+            for slot in mesh.get_editor_property("static_materials"):
+                mi = slot.get_editor_property("material_interface")
+                if not isinstance(mi, unreal.MaterialInstanceConstant):
+                    continue
+                base = mi.get_editor_property("parent")
+                if base is None or not base.get_path_name().startswith("/InterchangeAssets/"):
+                    continue
+                twin = WIND.get(base.get_path_name())
+                if twin is None:
+                    path = DEST + "/Materials/MI_WB_Wind_" + base.get_name()
+                    if unreal.EditorAssetLibrary.does_asset_exist(path):
+                        unreal.EditorAssetLibrary.delete_asset(path)
+                    twin = unreal.EditorAssetLibrary.duplicate_asset(base.get_path_name(), path)
+                    twin.set_editor_property("parent", master)
+                    unreal.EditorAssetLibrary.save_loaded_asset(twin)
+                    WIND[base.get_path_name()] = twin
+                mi.set_editor_property("parent", twin)
+                # (masked materials are leaves, petals and blades)
+                if "Mask" in base.get_name():
+                    MEL.set_material_instance_scalar_parameter_value(mi, "WindFlutter", 1.0)
+                unreal.EditorAssetLibrary.save_loaded_asset(mi)
+                n += 1
+        except Exception as e:
+            warn("wind for %s: %s" % (mesh.get_name(), e))
+    return n
+
+
 def place_models(models=None, folder="WorldBuilder/Instances"):
     total = 0
     for m in DATA["models"] if models is None else models:
@@ -684,6 +1031,8 @@ def place_models(models=None, folder="WorldBuilder/Instances"):
         if not meshes:
             warn("no meshes imported from " + m["file"])
             continue
+        if m.get("category") in WIND_CATEGORIES:
+            add_wind(meshes.values())
         per_variant = {}
         data = m["instances"]
         st = m.get("stretch", [])
@@ -860,12 +1209,35 @@ def build_sky():
     except Exception as e:
         warn("sky light: %s" % e)
     fog = build_fog(l)
-    if l["clouds"] > 0.05:
-        try:
-            spawn(unreal.VolumetricCloud, label="WB Clouds")
-        except Exception as e:
-            warn("clouds: %s" % e)
-    return {"sun": sun, "sky_light": sky, "fog": fog, "look": build_look(l)}
+    return {"sun": sun, "sky_light": sky, "fog": fog, "look": build_look(l), "clouds": build_clouds(l)}
+
+
+# Unreal's stock volumetric clouds (`m_SimpleVolumetricCloud`): their coverage for the editor's
+# cloud cover 0 and 1 (its coverage is an offset; measured side by side), and the layer's depth
+CLOUD_COVERAGE = (-0.6, 0.35)
+CLOUD_LAYER_KM = 4.0
+
+
+def build_clouds(l):
+    """VolumetricCloud at the editor's cloud base with the world's cover (the atmosphere runtime
+    moves the cover and storm cloud with the weather)."""
+    try:
+        a = spawn(unreal.VolumetricCloud, label="WB Clouds")
+        c = a.get_component_by_class(unreal.VolumetricCloudComponent)
+        c.set_editor_property("layer_bottom_altitude", l.get("cloud_base_m", 1500.0) / 1000.0)
+        c.set_editor_property("layer_height", CLOUD_LAYER_KM)
+        stock = c.get_editor_property("material")
+        if stock is not None:
+            mi = new_asset("MI_WB_Clouds", DEST + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+            mi.set_editor_property("parent", stock)
+            cover = CLOUD_COVERAGE[0] + (CLOUD_COVERAGE[1] - CLOUD_COVERAGE[0]) * max(0.0, min(1.0, l["clouds"]))
+            MEL.set_material_instance_scalar_parameter_value(mi, "Cloud_GlobalCoverage", cover)
+            unreal.EditorAssetLibrary.save_loaded_asset(mi)
+            c.set_editor_property("material", mi)
+        return a
+    except Exception as e:
+        warn("clouds: %s" % e)
+        return None
 
 
 # the share of the calibrated haze's clear-air term (`Haze::AIR`) that Unreal's sky atmosphere
@@ -1053,7 +1425,10 @@ def build_atmosphere(scene):
         a.set_editor_property("map_origin", to_ue([-half, 0.0, -half]))
         a.set_editor_property("map_step_i", to_ue([cell, 0.0, 0.0]))
         a.set_editor_property("map_step_j", to_ue([0.0, 0.0, cell]))
-        for key in ("sun", "sky_light", "fog", "look"):
+        a.set_editor_property("parameters", world_parameters())
+        a.set_editor_property("cloud_coverage_clear", CLOUD_COVERAGE[0])
+        a.set_editor_property("cloud_coverage_overcast", CLOUD_COVERAGE[1])
+        for key in ("sun", "sky_light", "fog", "look", "clouds"):
             if scene.get(key) is not None:
                 a.set_editor_property(key, scene[key])
         a.set_editor_property("fog_units_per_metre", 10.0)
@@ -1536,7 +1911,7 @@ def main():
         task.enter_progress_frame(1, "Landscape files and material")
         write_landscape_files()
         tex = import_textures(DATA["landscape"]["layers"])
-        land = create_landscape(landscape_material(DATA["landscape"]["layers"], tex))
+        land = create_landscape(landscape_material(DATA["landscape"]["layers"], tex, build_grass()))
         task.enter_progress_frame(1, "Models and instances")
         placed = place_models()
         task.enter_progress_frame(1, "Water")

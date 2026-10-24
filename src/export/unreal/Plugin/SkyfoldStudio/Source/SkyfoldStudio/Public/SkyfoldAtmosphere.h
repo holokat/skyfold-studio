@@ -16,6 +16,9 @@ class ADirectionalLight;
 class ASkyLight;
 class AExponentialHeightFog;
 class APostProcessVolume;
+class AVolumetricCloud;
+class UMaterialInstanceDynamic;
+class UMaterialParameterCollection;
 class UInstancedStaticMeshComponent;
 class UMaterialInterface;
 class UStaticMesh;
@@ -85,6 +88,17 @@ public:
 	TObjectPtr<AExponentialHeightFog> Fog;
 	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
 	TObjectPtr<APostProcessVolume> Look;
+	/** Shared with the materials each frame: Wind (direction x, y, speed m/s, gustiness) and
+	 * Wetness (0..1). */
+	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
+	TObjectPtr<UMaterialParameterCollection> Parameters;
+	/** The cloud layer: its material's Cloud_GlobalCoverage for the editor's cover 0 and 1. */
+	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
+	TObjectPtr<AVolumetricCloud> Clouds;
+	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
+	float CloudCoverageClear = -0.6f;
+	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
+	float CloudCoverageOvercast = 0.35f;
 	/** Height fog density for 1 / m of the weather's fog (Unreal's density is per 1000 cm). */
 	UPROPERTY(EditAnywhere, Category = "Skyfold Studio|Scene")
 	float FogUnitsPerMetre = 10.f;
@@ -154,6 +168,8 @@ private:
 	FLinearColor BaseFogColor = FLinearColor::Gray;
 	FVector2D Drift = FVector2D::ZeroVector;
 
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> CloudMaterial;
 	UPROPERTY(Transient)
 	TObjectPtr<UInstancedStaticMeshComponent> RainDrops;
 	UPROPERTY(Transient)

@@ -121,6 +121,52 @@ fn write_atmosphere(s: &Snapshot, ctx: &Ctx, light: &core::LightOut, exposure: f
     )
 }
 
+/// One tuft of the editor's meadow grass (`grass::build_patch`'s recipe: blades leaning out from
+/// their roots, curving over, golden-angle azimuths) at the world's blade height, for Unreal's
+/// landscape grass. UV: x across the blade, y from the tip (0) to the root (1).
+fn grass_clump(s: &Snapshot) -> Vec<u8> {
+    let mut rng = crate::noise::Rng::new(0x5EED_6A55);
+    let scale = s.grass_height.clamp(0.3, 2.5);
+    let (mut pos, mut nrm, mut uv, mut idx) = (vec![], vec![], vec![], vec![]);
+    for k in 0..18u32 {
+        let az = k as f32 * 2.399_96 + (rng.f32() - 0.5) * 0.6;
+        let root = 0.13 * rng.f32().sqrt();
+        let lean = 0.12 + 0.45 * rng.f32();
+        let curve = 0.15 + 0.35 * rng.f32();
+        let h = (0.3 + 0.22 * rng.f32()) * scale;
+        let w = 0.016 + 0.008 * rng.f32();
+        let (dx, dz) = (az.cos(), az.sin());
+        // across the blade, square to its lean
+        let (sx, sz) = (-dz, dx);
+        let base = pos.len() as u32;
+        for t in [0.0f32, 0.3, 0.62, 1.0] {
+            let out = (lean.sin() * t + curve * t * t) * h + root;
+            let up = (lean.cos() * t - 0.35 * curve * t * t) * h;
+            let half = w * (1.0 - 0.85 * t) * 0.5;
+            for side in [-1.0f32, 1.0] {
+                pos.push([dx * out + sx * half * side, up, dz * out + sz * half * side]);
+                // (lit from above, as the editor lights its blades)
+                nrm.push([0.0, 1.0, 0.0]);
+                uv.push([(side + 1.0) * 0.5, 1.0 - t]);
+            }
+        }
+        for r in 0..3u32 {
+            let a = base + r * 2;
+            idx.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+        }
+    }
+    let mut g = super::glb::Glb::new();
+    let mut m = super::glb::Material::new("grass_blade");
+    m.double_sided = true;
+    let mat = g.material(&m);
+    let mesh = g.mesh(
+        "grass_clump",
+        &[super::glb::Prim { positions: &pos, normals: Some(&nrm), uvs: Some(&uv), indices: &idx, material: Some(mat), ..Default::default() }],
+    );
+    let node = g.node("grass_clump", mesh, vec![]);
+    g.finish(&[node])
+}
+
 /// The dungeons for the script (Skyfold space: the script converts like everything else): each
 /// one's GLB, objects (instances of the world's models), lights, mood, start and way out (a level
 /// each), the ways in (trigger boxes in the world's level) and the world's portal sheets.
@@ -292,7 +338,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             let lin = |c: [f32; 3]| bevy::color::Color::srgb(c[0], c[1], c[2]).to_linear();
             let c = lin(st.shallow);
             let (ext, ins) = crate::water::water_optics(st);
-            json!({ "shallow_linear": [c.red, c.green, c.blue], "transparency": st.transparency, "roughness": st.roughness, "clarity": st.clarity, "extinct": ext.to_array(), "inscat": ins.to_array() })
+            json!({ "shallow_linear": [c.red, c.green, c.blue], "transparency": st.transparency, "roughness": st.roughness, "clarity": st.clarity, "extinct": ext.to_array(), "inscat": ins.to_array(), "shore_foam": st.shore_foam })
         };
         water = json!({
             "enabled": true,
@@ -328,6 +374,29 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     }
     if let Some(b) = &caves.holes_png {
         ctx.write("Caves/holes.png", b)?;
+    }
+    // meadow grass: the editor's grass map (density, dryness, tint, height per terrain vertex,
+    // rows south) and one tuft for Unreal's landscape grass
+    let mut grass = Value::Null;
+    if o.plants
+        && let Some(g) = core::grass(s, s.terrain.n())
+    {
+        let gn = s.terrain.n() as u32;
+        let px: Vec<u8> = g.into_iter().flatten().collect();
+        ctx.write("Data/grass.png", &core::png_rgba(&image::RgbaImage::from_raw(gn, gn, px).ok_or("grass")?))?;
+        ctx.write("Models/grass_clump.glb", &grass_clump(s))?;
+        // (base, lush tip, dry tip), linear, as the Godot export's grass
+        let colours: [[f32; 3]; 3] = if s.painted {
+            [[0.12, 0.2, 0.04], [0.38, 0.54, 0.1], [0.66, 0.5, 0.16]]
+        } else {
+            [[0.085, 0.115, 0.03], [0.3, 0.42, 0.1], [0.55, 0.45, 0.2]]
+        };
+        grass = json!({
+            "map": "Data/grass.png", "map_vertices": gn, "clump": "Models/grass_clump.glb",
+            "base": colours[0], "tip": colours[1], "dry": colours[2],
+            "amount": s.grass_amount, "lushness": s.grass_lushness.clamp(0.0, 1.0),
+            "reach_m": crate::grass::RANGES[2] * s.detail.clamp(0.65, 1.5),
+        });
     }
     let markers = if o.gameplay { core::markers(s) } else { vec![] };
     if o.gameplay {
@@ -373,6 +442,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         "models": models.iter().zip(&inst).map(|(m, list)| json!({
             "name": s.assets[m.asset].name,
             "safe_name": m.safe,
+            "category": format!("{:?}", s.assets[m.asset].category),
             "file": format!("Models/{}", m.file),
             "generated": m.generated,
             "variants": m.variants.iter().map(|v| json!({ "node": v.node, "lods": v.lods, "collision": v.collision })).collect::<Vec<_>>(),
@@ -386,6 +456,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "stretch": core::stretch_rows(list),
         })).collect::<Vec<_>>(),
         "water": water,
+        "grass": grass,
         "roads": roads,
         "caves": caves_glb,
         "dungeons": dungeons_json,
@@ -404,6 +475,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "fog_density": (light.fog_density_exp(3000.0) * 10.0).clamp(0.000_05, 0.05),
             "fog_color": light.fog_color,
             "clouds": light.clouds,
+            "cloud_base_m": crate::clouds::CLOUD_BASE,
             "exposure": light.exposure,
             "contrast": light.contrast,
             "saturation": light.saturation,

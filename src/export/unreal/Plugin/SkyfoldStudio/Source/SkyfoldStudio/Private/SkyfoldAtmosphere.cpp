@@ -4,6 +4,10 @@
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkyLightComponent.h"
+#include "Components/VolumetricCloudComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Kismet/KismetMaterialLibrary.h"
 #include "Dom/JsonObject.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
@@ -48,6 +52,16 @@ namespace
 		if (O && O->TryGetArrayField(Key, A) && A->Num() >= 3)
 		{
 			return FLinearColor(float((*A)[0]->AsNumber()), float((*A)[1]->AsNumber()), float((*A)[2]->AsNumber()));
+		}
+		return Default;
+	}
+
+	FVector2D Vec2(const FJsonObject* O, const TCHAR* Key, FVector2D Default)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* A = nullptr;
+		if (O && O->TryGetArrayField(Key, A) && A->Num() >= 2)
+		{
+			return FVector2D((*A)[0]->AsNumber(), (*A)[1]->AsNumber());
 		}
 		return Default;
 	}
@@ -148,6 +162,17 @@ void ASkyfoldAtmosphere::BeginPlay()
 	{
 		BaseFog = Fog->GetComponent()->FogDensity;
 		BaseFogColor = Fog->GetComponent()->FogInscatteringLuminance;
+	}
+	if (Clouds)
+	{
+		if (UVolumetricCloudComponent* C = Clouds->FindComponentByClass<UVolumetricCloudComponent>())
+		{
+			if (UMaterialInterface* M = C->GetMaterial())
+			{
+				CloudMaterial = UMaterialInstanceDynamic::Create(M, this);
+				C->SetMaterial(CloudMaterial);
+			}
+		}
 	}
 	if (bPrecipitation && ParticleMesh)
 	{
@@ -337,9 +362,9 @@ void ASkyfoldAtmosphere::Tick(float DeltaSeconds)
 	Speed = Speed * (1.f + Weather.Rain * 0.6f) + Weather.Dim * 5.f * Weather.Rain + Weather.Dust * 9.f;
 	WindSpeed = bFirst ? Speed : FMath::Lerp(WindSpeed, Speed, Ease(DeltaSeconds, 0.8f));
 	{
-		const FLinearColor D = Rgb(Wind, TEXT("dir"), FLinearColor(1, 0, 0));
+		const FVector2D D = Vec2(Wind, TEXT("dir"), FVector2D(1, 0));
 		// (editor x, z on the ground) -> Unreal, through the map's own axes
-		const FVector G = MapStepI.GetSafeNormal() * D.R + MapStepJ.GetSafeNormal() * D.G;
+		const FVector G = MapStepI.GetSafeNormal() * D.X + MapStepJ.GetSafeNormal() * D.Y;
 		const FVector2D T = FVector2D(G.X, G.Y).GetSafeNormal();
 		if (!T.IsNearlyZero())
 		{
@@ -409,6 +434,19 @@ void ASkyfoldAtmosphere::Apply(const FVector& Camera, float DeltaSeconds)
 		Col *= Mood.FogTint * FogLuminance;
 		Col.A = 1.f;
 		Fog->GetComponent()->SetFogInscatteringColor(Col);
+	}
+	// the wind and the wet ground for the materials
+	if (Parameters)
+	{
+		const FJsonObject* Wind = Obj(Section(TEXT("world")), TEXT("wind"));
+		UKismetMaterialLibrary::SetVectorParameterValue(this, Parameters, TEXT("Wind"), FLinearColor(WindDirection.X, WindDirection.Y, WindSpeed, Num(Wind, TEXT("gustiness"), 0.5f)));
+		UKismetMaterialLibrary::SetScalarParameterValue(this, Parameters, TEXT("Wetness"), Wetness);
+	}
+	// the cloud deck: the weather's cover, storm cloud under the dimming
+	if (CloudMaterial)
+	{
+		CloudMaterial->SetScalarParameterValue(TEXT("Cloud_GlobalCoverage"), FMath::Lerp(CloudCoverageClear, CloudCoverageOvercast, FMath::Clamp(W.Clouds, 0.f, 1.f)));
+		CloudMaterial->SetScalarParameterValue(TEXT("StormClouds"), FMath::Clamp((Dim - 0.3f) / 0.5f, 0.f, 1.f));
 	}
 	// rain streaks and snow flakes round the camera
 	Precipitate(RainDrops, RainPos, 6000, W.Rain, Camera, FVector(3500, 3500, 1200), 1100.f, DeltaSeconds, 1.2f, 90.f);
