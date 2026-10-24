@@ -476,8 +476,8 @@ const BOUNCE_INDOOR_SHARE: f32 = 0.2;
 /// the key and the fill stays well under it, so night scenes keep their form and their colours
 /// (2600 of very blue fill against a 1400 lux moon flattened everything into a grey-blue haze);
 /// a brighter moon also brightens the sky it lights, so it only rose a little.
-const MOON_LUX: f32 = 1750.0;
-const NIGHT_FILL: f32 = 1300.0;
+pub(crate) const MOON_LUX: f32 = 1750.0;
+pub(crate) const NIGHT_FILL: f32 = 1300.0;
 /// Exponential-squared fog density (per metre) a zone's full haze & fog adds (`ZoneLight::fog`).
 pub const ZONE_FOG_DENSITY: f32 = 0.002;
 /// Deep in a cave the exposure opens this many stops (by day; less at night), instead of the

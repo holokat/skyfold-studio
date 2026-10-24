@@ -1061,7 +1061,7 @@ fn push_mips(pending: &mut PendingTexWrites, h: &Handle<Image>, data: Arc<Vec<u8
 }
 
 /// Tiling RGBA value noise (each channel a different octave pattern).
-fn noise_texture() -> Image {
+pub(crate) fn noise_texture() -> Image {
     let n = 256usize;
     let mut data = Vec::with_capacity(n * n * 4);
     let periodic = |x: f32, y: f32, p: i32, seed: u32| {
@@ -1149,7 +1149,7 @@ fn rgba8_mipped(base: Vec<u8>, n: usize) -> Image {
 /// local foam coverage, so foam grows, tears into lace and dissolves. Mat-like shapes keep their
 /// contrast in the mips (thin cell walls averaged away into a grey haze).
 ///   R: foam density   G: fine bubbles   B: soft mottling   A: streaks
-fn foam_texture() -> Image {
+pub(crate) fn foam_texture() -> Image {
     const N: usize = 512;
     let hash = |x: i32, y: i32, cells: i32, seed: u32| {
         let h = crate::noise::hash2(x.rem_euclid(cells), y.rem_euclid(cells), seed);

@@ -15,6 +15,18 @@ func _ready() -> void:
 	var data = JSON.parse_string(FileAccess.get_file_as_string(data_path))
 	if typeof(data) != TYPE_DICTIONARY:
 		return
+	# the terrain heights for the water column under every point (global shader uniforms)
+	var hg = data.get("heights")
+	if hg is Dictionary and FileAccess.file_exists(hg["file"]):
+		var n := int(hg["vertices"])
+		var cell := float(hg["cell"])
+		var h := FileAccess.get_file_as_bytes(hg["file"]).to_float32_array()
+		# (stored divided by the cell)
+		for i in h.size():
+			h[i] *= cell
+		var img := Image.create_from_data(n, n, false, Image.FORMAT_RF, h.to_byte_array())
+		RenderingServer.global_shader_parameter_set("wb_heights", ImageTexture.create_from_image(img))
+		RenderingServer.global_shader_parameter_set("wb_hgrid", Vector4((n - 1) * cell * 0.5, cell, float(n), 0.0))
 	for v in data.get("volumes", []):
 		var area := Area3D.new()
 		area.name = (str(v["kind"]) + "_" + str(v["name"])).validate_node_name()
@@ -38,6 +50,8 @@ func _ready() -> void:
 	var scene := load(data["mesh"]) as PackedScene
 	var shader := load(data["shader"]) as Shader
 	var ripples := load(data["normal_map"]) as Texture2D
+	var noise := load(data["noise"]) as Texture2D if data.has("noise") else null
+	var foam := load(data["foam"]) as Texture2D if data.has("foam") else null
 	if scene == null or shader == null:
 		push_error("Skyfold Studio: water files missing")
 		return
@@ -53,6 +67,8 @@ func _ready() -> void:
 		var mat := ShaderMaterial.new()
 		mat.shader = shader
 		mat.set_shader_parameter("ripple_normal", ripples)
+		mat.set_shader_parameter("noise_tex", noise)
+		mat.set_shader_parameter("foam_tex", foam)
 		var params: Dictionary = b["params"]
 		for k in params:
 			mat.set_shader_parameter(k, _value(k, params[k]))
@@ -64,6 +80,8 @@ func _ready() -> void:
 
 
 static func _value(key: String, v):
+	if v is Array and v.size() == 3 and (key == "extinct" or key == "inscat"):
+		return Vector3(v[0], v[1], v[2])
 	if v is Array and v.size() == 3:
 		return Color(v[0], v[1], v[2])
 	if v is Array and v.size() == 2:
