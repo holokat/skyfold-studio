@@ -34,6 +34,13 @@ pub fn register(app: &mut App) {
         run: walk_stop,
     })
     .mcp_tool(McpTool {
+        name: "walk_hide_ui",
+        description: "While walking, hide every bit of UI (walk HUD, crosshair, panels, markers) for clean screenshots, or show it again; the same as pressing H. Leaving walk mode shows the UI again.",
+        input_schema: || json!({"type": "object", "properties": {
+            "hidden": {"type": "boolean", "description": "true hides the UI, false shows it"}}, "required": ["hidden"]}),
+        run: walk_hide_ui,
+    })
+    .mcp_tool(McpTool {
         name: "set_motion_mode",
         description: "While walking, change how the explorer moves: foot, mount (horse, camera only), fly (free-fly noclip; optional speed m/s), swim (float at the surface), dive (go under; optional depth m), walk / run (pace on foot). Returns the resulting state.",
         input_schema: || json!({"type": "object", "properties": {
@@ -161,6 +168,7 @@ fn state(w: &WalkState) -> Value {
         "breath": w.breath,
         "fly_speed": w.fly_speed,
         "underwater": w.submerged > 0.5,
+        "ui_hidden": w.ui_hidden,
         // what the footsteps sound like: the ground, or the material of the object underfoot
         "footsteps": w.surface.map(|s| s.name()),
         // footfalls heard since walking began and the cadence (steps per second; 0 standing still)
@@ -299,6 +307,18 @@ fn walk_stop(world: &mut World, _args: Value) -> Result<Vec<McpContent>, String>
     }
     world.write_message(crate::ui::UiAction::ToggleWalk);
     Ok(vec![McpContent::Text("Leaving walk mode.".into())])
+}
+
+fn walk_hide_ui(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    let hidden: bool = opt_arg(&args, "hidden")?.ok_or("`hidden` is required")?;
+    let mut w = world.resource_mut::<WalkState>();
+    if !w.active {
+        return Err("Not walking: start with walk_start first".into());
+    }
+    w.ui_hidden = hidden;
+    Ok(vec![McpContent::Text(
+        if hidden { "UI hidden (H shows it)." } else { "UI shown." }.into(),
+    )])
 }
 
 /// Put the explorer in the water: floating at the surface or `depth` m under it.

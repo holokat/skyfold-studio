@@ -683,15 +683,8 @@ fn start_build(c: &mut Cx) {
 // ---------------------------------------------------------------------------------------------
 // page 1: AI
 
-fn ai_key(p: &PromptSession) -> bool {
-    !p.api_key.trim().is_empty() || agent::env_api_key().is_some()
-}
-
 fn backend_ready(p: &PromptSession, b: Backend) -> bool {
-    if b == Backend::AnthropicApi {
-        return ai_key(p);
-    }
-    p.status(b).is_some_and(|s| s.ready)
+    p.ready(b)
 }
 
 fn ai_ready(c: &Cx) -> bool {
@@ -703,15 +696,23 @@ fn backend_state(p: &PromptSession, b: Backend) -> (&'static str, Color32, Strin
     let Some(st) = p.status(b) else {
         return ("Checking…", TEXT_DIM, String::new());
     };
-    if b == Backend::AnthropicApi {
-        return if ai_key(p) {
-            ("Ready", GREEN, "API key set".into())
+    if b == Backend::Api {
+        let name = agent::provider(&p.api_base).map_or("your provider", |p| p.name);
+        return if p.ready(b) {
+            ("Ready", GREEN, format!("{name}: {}", st.note))
         } else {
             (
                 "Needs a key",
                 AMBER,
-                "Paste a key from console.anthropic.com below.".into(),
+                "Pick a provider and paste its key below.".into(),
             )
+        };
+    }
+    if b == Backend::ClaudeCode && !st.ready && st.path.is_some() {
+        return if p.login.is_some() {
+            ("Signing in…", AMBER, String::new())
+        } else {
+            ("Not signed in", AMBER, String::new())
         };
     }
     if st.ready {
@@ -731,36 +732,48 @@ fn page_ai(ui: &mut Ui, c: &mut Cx) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             for &b in row {
-                if backend_card(ui, c, b, vec2(cw, 176.0)).clicked() {
+                let card = backend_card(ui, c, b, vec2(cw, 176.0));
+                if card.clicked() {
                     c.prompt.set_backend(b);
                     c.wiz.cards_only = false;
+                }
+                // Claude Code installed but signed out: sign in right on its card
+                let signed_out = c
+                    .prompt
+                    .status(b)
+                    .is_some_and(|st| !st.ready && st.path.is_some());
+                if b == Backend::ClaudeCode && signed_out && c.prompt.login.is_none() {
+                    let r = Rect::from_min_size(
+                        pos2(card.rect.left() + 16.0, card.rect.bottom() - 54.0),
+                        vec2((card.rect.width() - 32.0).min(220.0), 38.0),
+                    );
+                    let btn = egui::Button::new(RichText::new(format!("{}  Sign in with Claude", icon::SIGN_IN)).font(FontId::new(14.0, semibold())).color(ON_ACCENT))
+                        .fill(ACCENT)
+                        .corner_radius(CornerRadius::same(10));
+                    // (a child Ui: drawn over the card without moving the row on)
+                    let mut over = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                    if over
+                        .add_sized(r.size(), btn)
+                        .on_hover_text("Opens claude.ai in your browser to sign in with your Claude account")
+                        .clicked()
+                    {
+                        c.prompt.set_backend(b);
+                        c.wiz.cards_only = false;
+                        c.prompt.start_claude_login();
+                    }
                 }
             }
         });
     }
     ui.add_space(8.0);
-    if c.prompt.backend == Backend::AnthropicApi && !c.wiz.cards_only {
-        let s = &mut *c.prompt;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(icon::KEY).size(16.0).color(TEXT_DIM));
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut s.api_key)
-                    .password(true)
-                    .hint_text("sk-ant-… API key")
-                    .desired_width(320.0),
-            );
-            let mut remember = s.remember_key;
-            let ch = crate::ui::widgets::toggle(
-                ui,
-                &mut remember,
-                RichText::new("Remember on this Mac").small().color(TEXT),
-            )
-            .on_hover_text("Keep the key in a file only you can read, outside the project");
-            if ch.changed() || (r.lost_focus() && s.remember_key) {
-                s.remember_key = remember;
-                s.store_key();
-            }
-        });
+    if c.prompt.backend == Backend::Api && !c.wiz.cards_only {
+        crate::prompt::panel::api_key_row(ui, c.prompt, 320.0);
+        crate::prompt::panel::api_model_row(ui, c.prompt);
+        ui.add_space(6.0);
+    }
+    // (a sign-in in progress, or how it went)
+    if c.prompt.login.is_some() || c.prompt.login_error.is_some() {
+        crate::prompt::panel::claude_signin_row(ui, c.prompt);
         ui.add_space(6.0);
     }
     ui.horizontal(|ui| {
@@ -879,7 +892,7 @@ fn backend_card(ui: &mut Ui, c: &Cx, b: Backend, size: Vec2) -> Response {
     let (glyph, sub) = match b {
         Backend::Codex => (icon::CHAT_CIRCLE_DOTS, "Sign in with ChatGPT"),
         Backend::ClaudeCode => (icon::TERMINAL_WINDOW, "Use your Claude account"),
-        Backend::AnthropicApi => (icon::KEY, "Use an API key"),
+        Backend::Api => (icon::KEY, "OpenRouter, OpenAI and more"),
     };
     let ib = Rect::from_min_size(rect.min + vec2(16.0, 16.0), vec2(42.0, 42.0));
     p.rect_filled(

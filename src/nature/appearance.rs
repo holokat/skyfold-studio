@@ -34,6 +34,63 @@ pub struct ForestDiversity {
     pub layout: ForestLayout,
 }
 
+/// The ground cover (`crate::groundcover`): photo grass tufts in the meadows and forest undergrowth
+/// (ferns and broad-leaved herbs) under the crowns, grown in clumps around the viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GroundCover {
+    /// ferns and herbs under the trees, 0..2 (1: a full woodland floor)
+    #[serde(default = "full")]
+    pub undergrowth: f32,
+    /// the undergrowth's mix, 0 all ferns .. 1 all broad-leaved herbs
+    #[serde(default = "half")]
+    pub herbs: f32,
+    /// photo grass tufts among the meadow blades, 0..2
+    #[serde(default = "full")]
+    pub tufts: f32,
+    /// how much meadow grass still grows under the crowns, 0..1
+    #[serde(default = "grass_under_trees")]
+    pub grass_under_trees: f32,
+    /// 0 an even spread .. 1 dense patches with bare ground between them
+    #[serde(default = "clumping")]
+    pub clumping: f32,
+}
+
+fn half() -> f32 {
+    0.5
+}
+fn grass_under_trees() -> f32 {
+    0.25
+}
+fn clumping() -> f32 {
+    0.6
+}
+
+impl Default for GroundCover {
+    fn default() -> Self {
+        Self {
+            undergrowth: 1.0,
+            herbs: half(),
+            tufts: 1.0,
+            grass_under_trees: grass_under_trees(),
+            clumping: clumping(),
+        }
+    }
+}
+
+impl GroundCover {
+    fn sanitized(self) -> Self {
+        let d = Self::default();
+        let c = |v: f32, def: f32, max: f32| if v.is_finite() { v.clamp(0.0, max) } else { def };
+        Self {
+            undergrowth: c(self.undergrowth, d.undergrowth, 2.0),
+            herbs: c(self.herbs, d.herbs, 1.0),
+            tufts: c(self.tufts, d.tufts, 2.0),
+            grass_under_trees: c(self.grass_under_trees, d.grass_under_trees, 1.0),
+            clumping: c(self.clumping, d.clumping, 1.0),
+        }
+    }
+}
+
 /// A world-level nature appearance. Zone overrides only replace `forest`; grass remains global.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NatureAppearance {
@@ -41,6 +98,16 @@ pub struct NatureAppearance {
     pub forest: ForestDiversity,
     #[serde(default)]
     pub grass_lushness: f32,
+    /// Shade under the trees (`shade`): 0 keeps the open sky's light under the crowns, 1 a real
+    /// forest's.
+    #[serde(default = "full")]
+    pub canopy_shade: f32,
+    #[serde(default)]
+    pub ground: GroundCover,
+}
+
+fn full() -> f32 {
+    1.0
 }
 
 impl Default for NatureAppearance {
@@ -48,6 +115,8 @@ impl Default for NatureAppearance {
         Self {
             forest: ForestDiversity::default(),
             grass_lushness: 0.0,
+            canopy_shade: 1.0,
+            ground: GroundCover::default(),
         }
     }
 }
@@ -61,6 +130,12 @@ impl NatureAppearance {
             } else {
                 0.0
             },
+            canopy_shade: if self.canopy_shade.is_finite() {
+                self.canopy_shade.clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            ground: self.ground.sanitized(),
             ..self
         }
     }
@@ -86,7 +161,14 @@ mod tests {
                 layout: ForestLayout::Mixed,
             },
             grass_lushness: f32::INFINITY,
+            canopy_shade: f32::NAN,
+            ground: GroundCover {
+                undergrowth: 9.0,
+                ..GroundCover::default()
+            },
         };
+        assert_eq!(appearance.sanitized().ground.undergrowth, 2.0);
+        assert_eq!(appearance.sanitized().canopy_shade, 1.0);
         assert_eq!(appearance.sanitized().grass_lushness, 0.0);
         assert_eq!(
             serde_json::to_value(appearance.forest).unwrap()["layout"],

@@ -240,6 +240,13 @@ pub(super) fn paint_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut, tex: &Ui
         pick_material(s, &m);
     }
     replace_card(ui, s);
+    section_fold(ui, "paint_grass", "Grass blades", "", |ui| {
+        super::grass_dials(ui, s);
+        hint_small(
+            ui,
+            "Lush green grounds (Lush Green Lawn, Green Meadow…) keep their blades; other materials paint them away.",
+        );
+    });
     // the world's 12 slots, most used first
     let u = usage(&ctx, s);
     let used = u.iter().filter(|v| **v > 1e-4).count();

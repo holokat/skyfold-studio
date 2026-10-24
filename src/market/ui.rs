@@ -303,9 +303,7 @@ pub fn pack_chips(ui: &mut egui::Ui, s: &mut UiState) {
     let packs: Vec<&Pack> = m
         .packs()
         .iter()
-        .filter(|p| {
-            (style.is_empty() || p.style == style) && p.installed > 0 && price.keeps_pack(p)
-        })
+        .filter(|p| (style.is_empty() || p.style == style) && p.listed() && price.keeps_pack(p))
         .collect();
     if packs.is_empty() {
         s.market.filter.clear();
@@ -473,6 +471,15 @@ fn packs_window(ctx: &egui::Context, s: &mut UiState) {
                     .clicked()
                 {
                     s.market.refresh = true;
+                }
+                if m.packs().iter().any(|p| p.listing_id.is_some())
+                    && s.market.site.is_signed_in()
+                    && ui
+                        .button("Restore purchases")
+                        .on_hover_text("Find the packs your Skyfold account bought and install any missing here")
+                        .clicked()
+                {
+                    s.market.site.restore(m.packs().to_vec());
                 }
             });
         });
@@ -695,7 +702,33 @@ fn card_window(ctx: &egui::Context, s: &mut UiState) {
             }
         }
         ui.add_space(8.0);
+        let working = s.market.site.working.contains(&p.id);
         match state {
+            // bought, but its files aren't on this computer (a new computer, a reinstall)
+            PackState::Owned if m.owned.contains(&p.id) && p.installed == 0 => {
+                ui.label(
+                    RichText::new(format!("{}  Owned: download it to use it here.", icon::CHECK_CIRCLE))
+                        .color(GREEN),
+                );
+                ui.add_space(2.0);
+                if working {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0));
+                        dim(ui, "Downloading and installing…");
+                    });
+                } else if p.listing_id.is_some()
+                    && primary_button(ui, &format!("{}  Download pack", icon::DOWNLOAD_SIMPLE)).clicked()
+                {
+                    if s.market.site.is_signed_in() {
+                        s.market.site.reinstall(p);
+                    } else {
+                        s.market.browse = Browse::Packs;
+                        s.market.site.signing_in = true;
+                        close = true;
+                        s.ed.toast("Sign in with the Skyfold account that bought it, then press Download pack");
+                    }
+                }
+            }
             PackState::Owned => {
                 ui.label(
                     RichText::new(format!(
@@ -717,6 +750,12 @@ fn card_window(ctx: &egui::Context, s: &mut UiState) {
                 );
             }
             PackState::Locked if p.unlisted => dim(ui, "This pack isn't for sale yet."),
+            PackState::Locked if working => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    dim(ui, "Finish paying on the checkout page in your browser: it installs here by itself.");
+                });
+            }
             PackState::Locked => {
                 if primary_button(
                     ui,
@@ -727,7 +766,7 @@ fn card_window(ctx: &egui::Context, s: &mut UiState) {
                     get_pack(s, p);
                 }
                 ui.add_space(2.0);
-                dim(ui, "Bought it already? Refresh in Asset packs.");
+                dim(ui, "Bought it already? Restore purchases in Asset packs.");
             }
         }
     });
@@ -740,8 +779,25 @@ fn card_window(ctx: &egui::Context, s: &mut UiState) {
     }
 }
 
-/// "Get pack": the marketplace page in the browser, or (no store yet) a note.
+/// "Get pack": the pack's listing on skyfoldstudio.com (Checkout in the browser, then it
+/// installs here), else its marketplace page in the browser, or (no store yet) a note.
 fn get_pack(s: &mut UiState, p: &Pack) {
+    if p.listing_id.is_some() {
+        if !s.market.site.is_signed_in() {
+            // the sign-in card is in Objects › Packs
+            s.market.browse = Browse::Packs;
+            s.market.site.signing_in = true;
+            s.market.card = None;
+            s.market.open = false;
+            s.ed.toast(format!(
+                "Sign in with your Skyfold account to buy {}, then press Get pack again",
+                p.name
+            ));
+        } else {
+            s.market.site.buy_pack(p);
+        }
+        return;
+    }
     match p.purchase_url.as_deref() {
         Some(url) if open_url(url) => s.ed.toast(format!(
             "Opening {} in your browser — come back and Refresh once it's yours",
@@ -822,6 +878,14 @@ fn site_inbox(ctx: &egui::Context, s: &mut UiState, out: &mut crate::ui::UiOut) 
             }
             Event::Note(msg) => s.ed.toast(msg),
             Event::Checkout { title } => s.ed.toast(format!("Finish buying {title} on the checkout page in your browser — it downloads here once it's paid")),
+            Event::Owned { pack } => {
+                // (the snapshot reads the recorded purchase on its next refresh: now)
+                s.market.refresh = true;
+                let _ = pack;
+            }
+            Event::PackInstalled { pack, title } => {
+                out.actions.write(crate::ui::UiAction::PackInstalled { pack, title });
+            }
             Event::SignedIn(Ok(())) => {
                 site.signed_in = Some(true);
                 site.signing_in = false;
@@ -975,7 +1039,7 @@ fn account_card(ui: &mut egui::Ui, s: &mut UiState) {
         }
         ui.label(RichText::new("Sign in with an API key").strong());
         ui.add_space(2.0);
-        ui.label(RichText::new("1. Open your account's API keys page and choose Create API key (the default permissions are right).").small().color(TEXT_DIM));
+        ui.label(RichText::new("1. Open your account's API keys page and choose Create API key. Also tick Prepare paid purchases, so you can buy paid listings.").small().color(TEXT_DIM));
         if ui.small_button(format!("{}  Open API keys", icon::ARROW_SQUARE_OUT)).clicked() {
             open_keys = true;
         }
@@ -1035,7 +1099,11 @@ fn listing_row(ui: &mut egui::Ui, s: &mut UiState, l: &super::site::Listing) {
             });
             let mut meta = vec![];
             if !l.by().is_empty() {
-                meta.push(format!("by {}", l.by()));
+                meta.push(if l.official() {
+                    format!("by {} {} Official", l.by(), icon::SEAL_CHECK)
+                } else {
+                    format!("by {}", l.by())
+                });
             }
             meta.push(if l.kind == "pack" {
                 "Pack".into()

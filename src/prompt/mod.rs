@@ -6,7 +6,7 @@
 //! - `selection`: the lasso, the outline on the ground and the feathered mask raster;
 //! - `mask`: the systemic edit mask (every edit stays inside the selection);
 //! - `tools`: the selection, `area_edit` and `terrain_feature` MCP tools; `features`: landforms;
-//! - `agent`: the backends (Codex CLI, Claude Code CLI, Anthropic API);
+//! - `agent`: the backends (Codex CLI, Claude Code CLI, an OpenAI-compatible API key);
 //! - here: a run's lifecycle — a private MCP endpoint offering only the area tools, the step
 //!   feed, undo grouping, stop and timeout; `panel`: the floating prompt panel;
 //! - `eval`: the measurement harness (`WB_PROMPT_EVAL=<cases.json>`).
@@ -19,7 +19,7 @@ pub mod agent;
 mod eval;
 pub mod features;
 pub mod mask;
-mod panel;
+pub(crate) mod panel;
 pub mod selection;
 pub mod tools;
 
@@ -263,6 +263,12 @@ pub struct PromptSession {
     detect_rx: Option<Mutex<Receiver<Vec<BackendStatus>>>>,
     pub api_key: String,
     pub remember_key: bool,
+    /// The API backend's provider (an OpenAI-compatible base URL, `agent::PROVIDERS`).
+    pub api_base: String,
+    /// Sign in with Claude, while it runs (and its last error).
+    pub login: Option<agent::ClaudeLogin>,
+    pub login_code: String,
+    pub login_error: Option<String>,
     pub state: RunState,
     run: Option<ActiveRun>,
     pub feed: Vec<FeedItem>,
@@ -284,15 +290,27 @@ pub struct PromptSession {
 
 impl Default for PromptSession {
     fn default() -> Self {
-        let backend = crate::prefs::get("prompt_backend")
-            .and_then(|v| v.as_str().and_then(Backend::from_id))
+        // (`WB_PROMPT_BACKEND=<id>`: screenshots of a backend's controls)
+        let backend = std::env::var("WB_PROMPT_BACKEND")
+            .ok()
+            .and_then(|b| Backend::from_id(&b))
+            .or_else(|| {
+                crate::prefs::get("prompt_backend")
+                    .and_then(|v| v.as_str().and_then(Backend::from_id))
+            })
             .unwrap_or(Backend::Codex);
         let models = Backend::ALL
             .into_iter()
             .map(|b| {
                 let saved = crate::prefs::get(&format!("prompt_model_{}", b.id()))
                     .and_then(|v| v.as_str().map(str::to_string));
-                (b, saved.unwrap_or(b.models()[0].to_string()))
+                (
+                    b,
+                    // (the API backend's come from its provider: none until picked)
+                    saved.unwrap_or_else(|| {
+                        b.models().first().map(|m| m.to_string()).unwrap_or_default()
+                    }),
+                )
             })
             .collect();
         let efforts = Backend::ALL
@@ -318,6 +336,10 @@ impl Default for PromptSession {
             detect_rx: None,
             api_key: saved_key().unwrap_or_default(),
             remember_key: saved_key().is_some(),
+            api_base: saved_base(),
+            login: None,
+            login_code: String::new(),
+            login_error: None,
             state: RunState::Idle,
             run: None,
             feed: vec![],
@@ -342,26 +364,100 @@ impl Default for PromptSession {
 fn key_file() -> Option<PathBuf> {
     Some(
         PathBuf::from(std::env::var("HOME").ok()?)
-            .join("Library/Application Support/WorldBuilder/anthropic_api_key"),
+            .join("Library/Application Support/WorldBuilder/api_key"),
     )
 }
 
-fn saved_key() -> Option<String> {
-    std::fs::read_to_string(key_file()?)
+/// (where it was kept when the API backend was Anthropic's only)
+fn old_key_file() -> Option<PathBuf> {
+    Some(key_file()?.with_file_name("anthropic_api_key"))
+}
+
+fn read_key(f: Option<PathBuf>) -> Option<String> {
+    std::fs::read_to_string(f?)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn saved_key() -> Option<String> {
+    read_key(key_file()).or_else(|| read_key(old_key_file()))
+}
+
+/// The saved provider; a key kept from before is an Anthropic one.
+fn saved_base() -> String {
+    if let Some(b) = crate::prefs::get("api_base").and_then(|v| v.as_str().map(str::to_string)) {
+        return b;
+    }
+    let p = if read_key(key_file()).is_none() && read_key(old_key_file()).is_some() {
+        2
+    } else {
+        0
+    };
+    agent::PROVIDERS[p].base.to_string()
 }
 
 impl PromptSession {
     /// Re-checks which backends are installed and logged in (in the background).
     pub fn detect(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let key = !self.api_key.trim().is_empty() || agent::env_api_key().is_some();
+        let api = self.api_conn();
         std::thread::spawn(move || {
-            let _ = tx.send(agent::detect(key));
+            let _ = tx.send(agent::detect(api));
         });
         self.detect_rx = Some(Mutex::new(rx));
+    }
+
+    /// The API backend's provider and key (the panel's, else the provider's environment variable).
+    pub fn api_conn(&self) -> agent::ApiConn {
+        let base = self.api_base.trim().to_string();
+        let key = Some(self.api_key.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .or_else(|| agent::env_api_key(&base));
+        agent::ApiConn { base, key }
+    }
+
+    /// Whether this backend can run now (the API's readiness is its key, which may have been
+    /// typed in since the last check).
+    pub fn ready(&self, b: Backend) -> bool {
+        if b == Backend::Api {
+            return self.api_conn().ready();
+        }
+        self.status(b).is_some_and(|st| st.ready)
+    }
+
+    pub fn set_api_base(&mut self, base: &str) {
+        self.api_base = base.trim().to_string();
+        crate::prefs::set("api_base", json!(self.api_base));
+        self.detect();
+    }
+
+    /// Starts Sign in with Claude (`claude auth login`: the browser opens).
+    pub fn start_claude_login(&mut self) {
+        self.login_error = None;
+        self.login_code.clear();
+        match agent::ClaudeLogin::start() {
+            Ok(l) => self.login = Some(l),
+            Err(e) => self.login_error = Some(e),
+        }
+    }
+
+    /// Follows a running sign-in; once signed in, checks the backends again.
+    fn poll_login(&mut self) {
+        let Some(l) = self.login.as_mut() else { return };
+        l.poll();
+        match l.done.take() {
+            Some(Ok(())) => {
+                self.login = None;
+                self.detect();
+            }
+            Some(Err(e)) => {
+                self.login = None;
+                self.login_error = Some(e);
+                self.detect();
+            }
+            None => {}
+        }
     }
 
     pub fn status(&self, b: Backend) -> Option<&BackendStatus> {
@@ -380,8 +476,11 @@ impl PromptSession {
         {
             return st.models.clone();
         }
-        self.backend
-            .models()
+        let fallback = match self.backend {
+            Backend::Api => agent::provider(&self.api_base).map_or(&[][..], |p| p.models),
+            b => b.models(),
+        };
+        fallback
             .iter()
             .map(|m| agent::ModelInfo {
                 slug: m.to_string(),
@@ -396,12 +495,20 @@ impl PromptSession {
     /// The model a run uses: the chosen one if it's still offered, else the best offered.
     pub fn model(&self) -> String {
         let opts = self.model_options();
+        // (any model id the provider has: its list is only suggestions)
+        if self.backend == Backend::Api {
+            return match self.models.get(&self.backend) {
+                Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => opts.first().map(|o| o.slug.clone()).unwrap_or_default(),
+            };
+        }
         match self.models.get(&self.backend) {
             Some(m) if opts.iter().any(|o| o.slug == *m) => m.clone(),
             _ => opts
                 .first()
                 .map(|o| o.slug.clone())
-                .unwrap_or_else(|| self.backend.models()[0].to_string()),
+                .or_else(|| self.backend.models().first().map(|m| m.to_string()))
+                .unwrap_or_default(),
         }
     }
 
@@ -452,6 +559,10 @@ impl PromptSession {
     /// Saves (or forgets) the API key on this computer.
     pub fn store_key(&mut self) {
         let Some(f) = key_file() else { return };
+        // (the old file goes either way: the key now lives in one place)
+        if let Some(old) = old_key_file() {
+            let _ = std::fs::remove_file(old);
+        }
         if self.remember_key && !self.api_key.trim().is_empty() {
             if let Some(d) = f.parent() {
                 let _ = std::fs::create_dir_all(d);
@@ -899,10 +1010,7 @@ pub fn ai_ready(s: &PromptSession) -> Option<&'static str> {
     if agent::stub_path().is_some() {
         return Some("Test stub");
     }
-    let ready = s.status(s.backend).is_some_and(|st| st.ready)
-        || (s.backend == Backend::AnthropicApi
-            && (!s.api_key.trim().is_empty() || agent::env_api_key().is_some()));
-    ready.then_some(s.backend.name())
+    s.ready(s.backend).then_some(s.backend.name())
 }
 
 /// The request's note on attached reference images (the copies the agent sees, and the
@@ -970,16 +1078,13 @@ fn start_run_as(
     if text.is_empty() {
         return Err("Describe what you want in the area".into());
     }
-    let (backend, model, status, api_key, turns, messages, resume) = {
+    let (backend, model, status, api, turns, messages, resume) = {
         let s = world.resource::<PromptSession>();
-        let key = Some(s.api_key.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .or_else(agent::env_api_key);
         (
             s.backend,
             (s.model(), s.effort()),
             s.status(s.backend).cloned(),
-            key,
+            s.api_conn(),
             if refine { s.turns.clone() } else { vec![] },
             if refine {
                 s.api_messages.clone()
@@ -995,15 +1100,20 @@ fn start_run_as(
     };
     // (the API's readiness is the key, which may have been typed in since the check)
     let stub = agent::stub_path().is_some();
-    if backend != Backend::AnthropicApi
+    if backend != Backend::Api
         && !stub
         && let Some(st) = &status
         && !st.ready
     {
         return Err(format!("{}: {}", backend.name(), st.note));
     }
-    if backend == Backend::AnthropicApi && api_key.is_none() && !stub {
-        return Err("Enter an Anthropic API key first".into());
+    if backend == Backend::Api && !stub {
+        if !api.ready() {
+            return Err("Add an API key first".into());
+        }
+        if model.0.is_empty() {
+            return Err("Pick a model for the API first".into());
+        }
     }
     // the agent's tools, on an endpoint of its own (a dungeon's in an underground dungeon)
     let dungeon = world.resource::<crate::dungeons::DungeonMap>().interior();
@@ -1083,7 +1193,7 @@ fn start_run_as(
         .to_string(),
         prompt,
         port: endpoint.port,
-        api_key,
+        api: Some(api),
         messages,
         resume,
         timeout: RUN_TIMEOUT,
@@ -1277,6 +1387,7 @@ fn first_line(out: &[Out]) -> Option<String> {
 fn poll_run(world: &mut World) {
     {
         let mut s = world.resource_mut::<PromptSession>();
+        s.poll_login();
         let got = s
             .detect_rx
             .as_ref()

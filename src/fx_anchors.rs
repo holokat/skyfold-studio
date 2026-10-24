@@ -101,7 +101,7 @@ impl FxAnchors {
     pub fn load(dir: &Path) -> FxAnchors {
         let mut out = FxAnchors::default();
         for lib in crate::objects::model_libraries(dir) {
-            let path = dir.join(&lib.folder).join("models.json");
+            let path = lib.dir.join("models.json");
             out.stamps.push((path.clone(), modified(&path)));
             let Some(doc) = std::fs::read_to_string(&path)
                 .ok()

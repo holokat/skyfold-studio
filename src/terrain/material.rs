@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::{ShaderDefVal, ShaderRef};
 
 use super::layers::{LAYER_COUNT, Layer};
@@ -120,6 +121,9 @@ pub struct TerrainExt {
     pub rule0: Handle<Image>,
     #[texture(116)]
     pub rule1: Handle<Image>,
+    /// The shade under the trees (`nature::shade`).
+    #[storage(120, read_only)]
+    pub canopy: Handle<ShaderBuffer>,
     /// Draw with the reference shading (`terrain_reference.wesl`, see `ab`); A/B tests only.
     pub reference: bool,
     /// Evaluate the rules' noise per pixel instead of reading the baked maps (see `ab`); A/B tests only.
@@ -166,6 +170,9 @@ impl MaterialExtension for TerrainExt {
                 f.shader_defs
                     .push(ShaderDefVal::Bool("RULE_NOISE_MAPS".into(), true));
             }
+            // and the shade under the trees (binding 120)
+            f.shader_defs
+                .push(ShaderDefVal::Bool("CANOPY_SHADE".into(), true));
         }
         // (only the main pass's fragment shader is the terrain's own)
         if key.bind_group_data.reference

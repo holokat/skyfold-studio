@@ -115,6 +115,8 @@ pub struct Previews {
     stale: Vec<Handle<Image>>,
     /// asked for over MCP: treated as on screen until done
     pinned: Vec<Subject>,
+    /// pictures shipped with the app (`cache::shipped`), read instead of the cache
+    shipped: HashMap<Subject, std::path::PathBuf>,
     turntable: preview::Turntable,
 }
 
@@ -140,6 +142,14 @@ impl Previews {
     /// while asked for every frame.
     pub fn turntable(&mut self, s: &Subject) -> Option<egui::TextureId> {
         self.turntable.ask(s)
+    }
+    /// Where the subject's picture with key `stamp` is on disk: the picture shipped with the
+    /// app, or the cache's.
+    fn file(&self, s: &Subject, stamp: u64) -> std::path::PathBuf {
+        self.shipped
+            .get(s)
+            .cloned()
+            .unwrap_or_else(|| cache::path(s, stamp))
     }
 }
 
@@ -267,10 +277,12 @@ fn preview_tool(world: &mut World, args: serde_json::Value) -> Result<Vec<McpCon
         match state {
             Some((_, true)) => Some(Err(format!("{} couldn't be pictured", s.key()))),
             // the file is written in the background just after the shot
-            Some((Some(stamp), false)) if cache::path(&s, stamp).is_file() => Some(
-                cache::flattened_png(&cache::path(&s, stamp), s.size())
-                    .map(|png| vec![McpContent::Png(png)]),
-            ),
+            Some((Some(stamp), false)) if w.resource::<Previews>().file(&s, stamp).is_file() => {
+                Some(
+                    cache::flattened_png(&w.resource::<Previews>().file(&s, stamp), s.size())
+                        .map(|png| vec![McpContent::Png(png)]),
+                )
+            }
             _ if frames > 1800 => Some(Err(format!("{}: still rendering, try again", s.key()))),
             _ => None,
         }
@@ -319,6 +331,18 @@ fn spawn_model(
         .and_then(|t| Some((t, t.variants.last()?.lods.first()?.clone())));
     if (e.tree.is_some() && tree.is_none())
         || (e.tree.is_none() && e.meshes.is_empty() && e.import_path.is_none())
+    {
+        return None;
+    }
+    // a paid pack's model this app has only the picture of (`crate::objects::PREVIEWS`): nothing
+    // to load
+    if e.tree.is_none()
+        && e.meshes.is_empty()
+        && e.scene.is_none()
+        && crate::objects::preview_thumb(e).is_some()
+        && e.import_path
+            .as_deref()
+            .is_some_and(|p| !crate::asset_file(p).is_file())
     {
         return None;
     }
@@ -610,6 +634,15 @@ fn check_cache(
         .cloned()
         .collect();
     for s in wanted.into_iter().chain(rest) {
+        // a paid pack's model this app only has the picture of
+        if let Some((file, stamp)) = cache::shipped(&s, lib.as_deref()) {
+            p.shipped.insert(s.clone(), file);
+            if let Some(t) = p.thumbs.get_mut(&s) {
+                t.state = State::OnDisk(stamp);
+            }
+            continue;
+        }
+        p.shipped.remove(&s);
         let Some(stamp) = cache::stamp(&s, lib.as_deref(), &meshes, s.size()) else {
             continue;
         };
@@ -626,7 +659,12 @@ fn check_cache(
             break;
         }
         if let (true, State::OnDisk(stamp)) = (t.wanted, &t.state) {
-            let (stamp, path, size) = (*stamp, cache::path(s, *stamp), s.size());
+            let path = p
+                .shipped
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| cache::path(s, *stamp));
+            let (stamp, size) = (*stamp, s.size());
             t.state = State::Loading(
                 stamp,
                 IoTaskPool::get().spawn(async move { cache::load(&path, size) }),

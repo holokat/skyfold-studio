@@ -13,7 +13,8 @@
 //!   Objects › Imported.
 //!
 //! The token is an API key of the account (Account › API keys on the website; the default
-//! permissions, read + acquire, are enough), kept in the prefs (`market_token`). No MCP tool of
+//! permissions, read + acquire, plus "Prepare paid purchases" (`prepare`) for paid ones), kept
+//! in the prefs (`market_token`). No MCP tool of
 //! this editor can buy or read the token.
 //!
 //! The website serves a listing's file only to an account that has acquired it, so a free
@@ -95,6 +96,9 @@ pub struct Creator {
     pub display_name: String,
     #[serde(default)]
     pub username: String,
+    /// one of the studio's own accounts (an Official badge on its listings)
+    #[serde(default)]
+    pub official: bool,
 }
 
 impl Listing {
@@ -126,6 +130,10 @@ impl Listing {
                 }
             })
             .unwrap_or_default()
+    }
+    /// From one of the studio's own accounts.
+    pub fn official(&self) -> bool {
+        self.creator.as_ref().is_some_and(|c| c.official)
     }
     pub fn page_url(&self, base: &str) -> String {
         format!("{base}/listing/{}", enc(&self.id))
@@ -221,6 +229,10 @@ pub fn parse_mcp(body: &[u8]) -> Result<Value, String> {
         if let Some(u) = e["data"]["acceptanceUrl"].as_str() {
             return Err(format!("{TERMS}{u}"));
         }
+        // a key without "Prepare paid purchases" can't buy
+        if e["code"].as_i64() == Some(-32003) {
+            return Err("this API key can't buy paid listings: make a new one with Prepare paid purchases ticked (Account › API keys) and sign in with it".into());
+        }
         return Err(e["message"]
             .as_str()
             .unwrap_or("the website refused")
@@ -269,6 +281,15 @@ pub enum Event {
     },
     /// the Checkout page is open: the purchase finishes there
     Checkout {
+        title: String,
+    },
+    /// a catalog pack is now owned (paid, or found among the account's purchases)
+    Owned {
+        pack: String,
+    },
+    /// a bought pack's library is installed (`super::install`): its models go in the library
+    PackInstalled {
+        pack: String,
         title: String,
     },
     /// the API key was checked: Ok (saved) or why it was turned down
@@ -420,6 +441,223 @@ impl SiteUi {
     }
 }
 
+impl SiteUi {
+    /// "Get pack" for a catalog pack sold as a website listing: Checkout in the browser, then,
+    /// once it's paid, owned for good and installed.
+    pub fn buy_pack(&mut self, pack: &super::Pack) {
+        let Some(listing) = pack.listing_id.clone() else {
+            return;
+        };
+        if !self.working.insert(pack.id.clone()) {
+            return;
+        }
+        let (inbox, id, name) = (self.inbox.clone(), pack.id.clone(), pack.name.clone());
+        let token = token();
+        self.busy += 1;
+        std::thread::spawn(move || {
+            let base = base();
+            let r = (|| {
+                let token = token.ok_or("sign in with your Skyfold account to buy this pack")?;
+                let l = Listing {
+                    id: listing.clone(),
+                    title: name.clone(),
+                    ..Default::default()
+                };
+                // bought before (another computer, a reinstall)? never charge twice
+                let pack = super::snapshot().pack(&id).cloned();
+                if let Some(p) = &pack
+                    && let Ok(mut found) = restore_orders(&base, &token, std::slice::from_ref(p), &inbox)
+                    && let Some(order) = found.remove(&id)
+                {
+                    return install_order(&base, &token, &id, &name, &order, &inbox);
+                }
+                let order = acquire(&base, &token, &l, &inbox)?;
+                // paid: it's theirs now, whatever happens to the download
+                own(&id, &listing, &order, &inbox);
+                install_order(&base, &token, &id, &name, &order, &inbox)
+            })();
+            if let Err(e) = r {
+                Self::send(&inbox, Event::Failed(format!("{name}: {e}")));
+            }
+            Self::send(&inbox, Event::Done(Some(id)));
+        });
+    }
+
+    /// Downloads and installs an owned pack again (a new computer, or files removed).
+    pub fn reinstall(&mut self, pack: &super::Pack) {
+        if !self.working.insert(pack.id.clone()) {
+            return;
+        }
+        let (inbox, p) = (self.inbox.clone(), pack.clone());
+        let token = token();
+        self.busy += 1;
+        std::thread::spawn(move || {
+            let base = base();
+            let r = (|| {
+                let token = token.ok_or("sign in with the Skyfold account that bought it")?;
+                let order = match purchases().get(&p.id).and_then(|r| r["order"].as_str()) {
+                    Some(o) => o.to_string(),
+                    None => restore_orders(&base, &token, std::slice::from_ref(&p), &inbox)?
+                        .remove(&p.id)
+                        .ok_or("this account hasn't bought or created it (check you're signed in with the account that did)")?,
+                };
+                install_order(&base, &token, &p.id, &p.name, &order, &inbox)
+            })();
+            if let Err(e) = r {
+                Self::send(&inbox, Event::Failed(format!("{}: {e}", p.name)));
+            }
+            Self::send(&inbox, Event::Done(Some(p.id.clone())));
+        });
+    }
+
+    /// Restore purchases: every catalog pack this account bought becomes owned here, and the
+    /// ones not installed yet are downloaded.
+    pub fn restore(&mut self, packs: Vec<super::Pack>) {
+        let inbox = self.inbox.clone();
+        let token = token();
+        self.busy += 1;
+        std::thread::spawn(move || {
+            let base = base();
+            let r = (|| {
+                let token = token.ok_or("sign in with your Skyfold account first")?;
+                let found = restore_orders(&base, &token, &packs, &inbox)?;
+                if found.is_empty() {
+                    Self::send(
+                        &inbox,
+                        Event::Note("No asset packs bought or created with this account yet".into()),
+                    );
+                }
+                for p in packs.iter().filter(|p| found.contains_key(&p.id)) {
+                    if p.installed == 0
+                        && let Err(e) = install_order(&base, &token, &p.id, &p.name, &found[&p.id], &inbox)
+                    {
+                        Self::send(&inbox, Event::Failed(format!("{}: {e}", p.name)));
+                    }
+                }
+                Ok::<(), String>(())
+            })();
+            if let Err(e) = r {
+                Self::send(&inbox, Event::Failed(e));
+            }
+            Self::send(&inbox, Event::Done(None));
+        });
+    }
+}
+
+/// The packs bought on this computer (prefs `market_purchases`): pack id → its listing and
+/// order, so it can be downloaded again.
+pub fn purchases() -> serde_json::Map<String, Value> {
+    crate::prefs::get("market_purchases")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// A pack is paid for (or this account created it): owned for good on this computer, and its
+/// order kept for downloads.
+fn own(pack: &str, listing: &str, order: &str, inbox: &Arc<Mutex<Vec<Event>>>) {
+    backend::record_owned(pack);
+    let mut all = purchases();
+    all.insert(
+        pack.to_string(),
+        json!({ "listing": listing, "order": order, "at": backend::now() }),
+    );
+    crate::prefs::set("market_purchases", Value::Object(all));
+    SiteUi::send(inbox, Event::Owned { pack: pack.to_string() });
+}
+
+/// The account's completed orders for these catalog packs (by their listings): each found pack
+/// is recorded as owned. Pack id → order id.
+fn restore_orders(
+    base: &str,
+    token: &str,
+    packs: &[super::Pack],
+    inbox: &Arc<Mutex<Vec<Event>>>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let r = mcp(base, token, "list_purchases", json!({})).map_err(|e| {
+        if e.contains("Unknown tool") {
+            "skyfoldstudio.com can't list purchases yet: download it from your purchases on skyfoldstudio.com".to_string()
+        } else {
+            e
+        }
+    })?;
+    let mut found = std::collections::HashMap::new();
+    for o in r["purchases"].as_array().into_iter().flatten() {
+        let status = o["status"].as_str().unwrap_or("");
+        let (Some(asset), Some(order)) = (o["assetId"].as_str(), o["id"].as_str()) else {
+            continue;
+        };
+        if status != "fulfilled" {
+            continue;
+        }
+        let listing = asset.strip_prefix("listing:").unwrap_or(asset);
+        for p in packs {
+            if p.listing_id.as_deref() == Some(listing) && !found.contains_key(&p.id) {
+                own(&p.id, listing, order, inbox);
+                found.insert(p.id.clone(), order.to_string());
+            }
+        }
+    }
+    // a creator owns the packs they list (drafts too) without buying them; an older website
+    // without the tool just has none
+    let created = match mcp(base, token, "list_my_listings", json!({})) {
+        Ok(r) => r,
+        Err(e) if e.contains("Unknown tool") => Value::Null,
+        Err(e) => return Err(e),
+    };
+    for l in created["listings"].as_array().into_iter().flatten() {
+        let Some(listing) = l["id"].as_str() else {
+            continue;
+        };
+        if !l["downloadAvailable"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        for p in packs {
+            if p.listing_id.as_deref() == Some(listing) && !found.contains_key(&p.id) {
+                let order = format!("{CREATOR}{listing}");
+                own(&p.id, listing, &order, inbox);
+                found.insert(p.id.clone(), order);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The "order" of a pack this account created: its listing, downloaded from the creator's own
+/// files (`/api/me/listings/<id>/download`) instead of a purchase.
+const CREATOR: &str = "creator:";
+
+/// A created pack's download path (None: a real order, asked of `get_download`).
+fn creator_download(order: &str) -> Option<String> {
+    order
+        .strip_prefix(CREATOR)
+        .map(|listing| format!("/api/me/listings/{}/download", enc(listing)))
+}
+
+/// Downloads an order's files and installs them as `pack`.
+fn install_order(
+    base: &str,
+    token: &str,
+    pack: &str,
+    name: &str,
+    order: &str,
+    inbox: &Arc<Mutex<Vec<Event>>>,
+) -> Result<(), String> {
+    SiteUi::send(
+        inbox,
+        Event::Note(format!("Downloading {name}… it installs by itself")),
+    );
+    let bytes = order_bytes(base, token, order)?;
+    super::install::install(&bytes, pack)?;
+    SiteUi::send(
+        inbox,
+        Event::PackInstalled {
+            pack: pack.to_string(),
+            title: name.to_string(),
+        },
+    );
+    Ok(())
+}
+
 /// A free listing: its file straight from the website, or acquired with the account first.
 fn get_free(
     base: &str,
@@ -539,10 +777,21 @@ fn acquire(
 
 /// The bought (or acquired) file.
 fn fetch_order(base: &str, token: &str, l: &Listing, order: &str) -> Result<Saved, String> {
-    let d = mcp(base, token, "get_download", json!({ "orderId": order }))?;
-    let url = d["downloadUrl"]
-        .as_str()
-        .ok_or("the website gave no download")?;
+    save(l, &order_bytes(base, token, order)?)
+}
+
+/// An order's download.
+fn order_bytes(base: &str, token: &str, order: &str) -> Result<Vec<u8>, String> {
+    let url = match creator_download(order) {
+        Some(path) => path,
+        None => {
+            let d = mcp(base, token, "get_download", json!({ "orderId": order }))?;
+            d["downloadUrl"]
+                .as_str()
+                .ok_or("the website gave no download")?
+                .to_string()
+        }
+    };
     let full = if url.starts_with("http") {
         url.to_string()
     } else {
@@ -552,7 +801,7 @@ fn fetch_order(base: &str, token: &str, l: &Listing, order: &str) -> Result<Save
     if !(200..300).contains(&code) {
         return Err(format!("the download answered {code}"));
     }
-    save(l, &body)
+    Ok(body)
 }
 
 /// What a download turned out to be.
@@ -642,10 +891,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn created_packs_download_from_the_creators_own_files() {
+        assert_eq!(
+            creator_download("creator:48b999a0-a171-4d02-b904-236f83d3eb05").as_deref(),
+            Some("/api/me/listings/48b999a0-a171-4d02-b904-236f83d3eb05/download")
+        );
+        assert_eq!(creator_download("creator:../x").as_deref(), Some("/api/me/listings/..%2Fx/download"));
+        assert_eq!(creator_download("6f1c0000-0000-4000-8000-000000000001"), None);
+    }
+
+    #[test]
     fn reads_the_websites_listings_and_tool_answers() {
-        let page = br#"{"listings":[{"id":"a1","ownerId":"u","title":"Old Well","description":"d","kind":"asset","category":"props","license":"CC0","priceCents":499,"currency":"USD","coverUrl":"/api/media/b1","creator":{"id":"u","username":"kim","displayName":"Kim"},"ratingAverage":4.5,"ratingCount":2},{"id":"a2","title":"Free Rocks","kind":"pack"}],"nextCursor":"c2"}"#;
+        let page = br#"{"listings":[{"id":"a1","ownerId":"u","title":"Old Well","description":"d","kind":"asset","category":"props","license":"CC0","priceCents":499,"currency":"USD","coverUrl":"/api/media/b1","creator":{"id":"u","username":"kim","displayName":"Kim"},"ratingAverage":4.5,"ratingCount":2},{"id":"a2","title":"Free Rocks","kind":"pack","creator":{"id":"s","username":"skyfold","displayName":"Skyfold Studio","official":true}}],"nextCursor":"c2"}"#;
         let (l, next) = parse_listings(page).unwrap();
         assert_eq!((l.len(), next.as_deref()), (2, Some("c2")));
+        // the studio's own listings carry the Official badge
+        assert!(!l[0].official() && l[1].official() && l[1].by() == "Skyfold Studio");
         assert_eq!(
             (
                 l[0].price_label().as_str(),

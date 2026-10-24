@@ -14,12 +14,15 @@ use bevy::camera::visibility::NoAutoAabb;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, encase,
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat, encase,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
@@ -28,6 +31,7 @@ use crate::camera::MainCamera;
 use crate::noise::Rng;
 use crate::terrain::gpu::{PendingTexWrites, TexWrite};
 use crate::terrain::layers::Layer;
+use crate::terrain::layers::LAYER_COUNT;
 use crate::terrain::material::TerrainGpu;
 use crate::terrain::{GridRect, Terrain};
 use crate::water::WaterBodies;
@@ -90,15 +94,22 @@ struct GrassBounds {
     scan_extra: f32,
 }
 
-fn grass_bounds(grass_lushness: f32) -> GrassBounds {
+fn grass_bounds(grass_lushness: f32, grass_height: f32) -> GrassBounds {
     let l = lushness(grass_lushness);
+    // (longer blades reach proportionally higher and lean further in the wind)
+    let h = blade_height(grass_height).max(1.0);
     GrassBounds {
         // Preserve legacy culling exactly at zero, then linearly reserve the rich-tip envelope.
-        aabb_top: 1.6 + 4.4 * l,
-        horizontal_margin: 0.6 + 5.4 * l,
-        lod_top: 1.0 + 5.0 * l,
-        scan_extra: 5.4 * l,
+        aabb_top: (1.6 + 4.4 * l) * h,
+        horizontal_margin: (0.6 + 5.4 * l) * h,
+        lod_top: (1.0 + 5.0 * l) * h,
+        scan_extra: 5.4 * l * h,
     }
+}
+
+/// The world's blade length multiplier, kept to what the bounds and meshes allow.
+fn blade_height(value: f32) -> f32 {
+    if value.is_finite() { value.clamp(0.3, 2.5) } else { 1.0 }
 }
 
 pub type GrassMaterial = ExtendedMaterial<StandardMaterial, GrassExt>;
@@ -186,6 +197,9 @@ pub struct GrassExt {
     #[texture(102)]
     #[sampler(103)]
     pub density: Handle<Image>,
+    /// The shade under the trees (`nature::shade`).
+    #[storage(120, read_only)]
+    pub canopy: Handle<ShaderBuffer>,
 }
 
 impl Default for GrassExt {
@@ -194,6 +208,7 @@ impl Default for GrassExt {
             params: GRASS_PARAMS,
             height: Handle::default(),
             density: Handle::default(),
+            canopy: crate::nature::shade::CANOPY_SHADE,
         }
     }
 }
@@ -210,6 +225,15 @@ impl MaterialExtension for GrassExt {
     /// against each other: meadows went dark and speckled.)
     fn enable_prepass() -> bool {
         false
+    }
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::nature::shade::shader_def(descriptor);
+        Ok(())
     }
 }
 
@@ -557,6 +581,13 @@ fn patch_mesh(blades: &[Blade], lod: usize, realistic: bool) -> Mesh {
     m
 }
 
+/// The three patch meshes (near, mid, far) of the meadow as the editor draws them, for the game
+/// engine exports (Godot rebuilds the same blades with a port of `grass.wesl`).
+pub(crate) fn export_patch_meshes(realistic: bool) -> [Mesh; 3] {
+    let patch = build_patch(2024);
+    [0, 1, 2].map(|lod| patch_mesh(&patch, lod, realistic))
+}
+
 /// Grass density, dryness, tint and height for one terrain vertex, from the final ground
 /// materials and the biome map.
 fn density_at(
@@ -565,6 +596,7 @@ fn density_at(
     roads: &crate::roads::Roads,
     styles: &[GrassStyle; 16],
     realistic: bool,
+    green_slots: &[bool; LAYER_COUNT],
     i: usize,
     j: usize,
 ) -> [u8; 4] {
@@ -579,10 +611,13 @@ fn density_at(
         }
     }
     let w = t.final_weights(i, j);
-    let g = w[Layer::Grass as usize];
-    let d = w[Layer::DryGrass as usize];
-    let f = w[Layer::ForestFloor as usize];
-    let dirt = w[Layer::Dirt as usize];
+    // (a lush green library grass grows blades in whichever slot it was given)
+    let green: f32 = (0..w.len()).filter(|k| green_slots[*k]).map(|k| w[k]).sum();
+    let at = |l: Layer| if green_slots[l as usize] { 0.0 } else { w[l as usize] };
+    let g = at(Layer::Grass) + green;
+    let d = at(Layer::DryGrass);
+    let f = at(Layer::ForestFloor);
+    let dirt = at(Layer::Dirt);
     // Roads already paint their core and shoulders into the terrain splat. Keep their historic
     // weak forest-floor contribution even in realistic mode, while natural forest floor can grow
     // a denser understory. Dirt intentionally remains sparse so painted bare paths stay legible.
@@ -623,7 +658,22 @@ impl GrassField {
     }
 }
 
+/// Library ground materials that are lush green grass: painting them recolours the ground and
+/// keeps the blades, whichever paint slot they were given (others grow by their slot).
+const GREEN_GRASS: [&str; 4] = [
+    "lush_green_lawn",
+    "green_meadow",
+    "lush_grass_soil",
+    "meadow_grass_twigs",
+];
+
+/// Which paint slots hold a lush green library grass.
+fn green_slots(choices: &crate::terrain::textures::TerrainLayerChoices) -> [bool; LAYER_COUNT] {
+    std::array::from_fn(|k| GREEN_GRASS.contains(&choices.get(k)))
+}
+
 /// Recompute the density map where the terrain changed (whole map for a new world).
+#[allow(clippy::too_many_arguments)]
 fn update_density(
     mut field: ResMut<GrassField>,
     mut terrain: ResMut<Terrain>,
@@ -636,6 +686,7 @@ fn update_density(
     holes: Res<crate::terrain::holes::TerrainHoles>,
     roads: Res<crate::roads::Roads>,
     meta: Res<crate::world::WorldMeta>,
+    choices: Res<crate::terrain::textures::TerrainLayerChoices>,
 ) {
     let n = terrain.n();
     let fresh = field.generation != Some(terrain.generation) || field.n != n;
@@ -653,7 +704,7 @@ fn update_density(
     let painted = meta.art_style.painted();
     let style_changed = field.density_painted != Some(painted);
     field.density_painted = Some(painted);
-    if (water.is_changed() || style_changed) && !fresh {
+    if (water.is_changed() || style_changed || choices.is_changed()) && !fresh {
         terrain.dirty_grass = Some(GridRect {
             x0: 0,
             z0: 0,
@@ -674,6 +725,7 @@ fn update_density(
     let zs: Vec<usize> = (rect.z0..=rect.z1).collect();
     let styles = &field.styles;
     let realistic = !painted;
+    let green = &green_slots(&choices);
     let rows: Vec<(usize, Vec<[u8; 4]>)> = std::thread::scope(|s| {
         let chunk = zs.len().div_ceil(8).max(1);
         let handles: Vec<_> = zs
@@ -687,7 +739,9 @@ fn update_density(
                             (
                                 j,
                                 (rect.x0..=rect.x1)
-                                    .map(|i| density_at(t, water, roads, styles, realistic, i, j))
+                                    .map(|i| {
+                                        density_at(t, water, roads, styles, realistic, green, i, j)
+                                    })
                                     .collect::<Vec<_>>(),
                             )
                         })
@@ -852,7 +906,7 @@ fn place_cells(
     let grass_lushness = lushness(appearance.grass_lushness);
     // Lushness changes vertical and wind-displaced reach even when the mesh recipe itself stays
     // the same, so refresh pooled cell bounds before the stationary-camera early return.
-    if appearance.is_changed() {
+    if appearance.is_changed() || amounts.is_changed() {
         field.dirty_cells = true;
     }
     let mesh_style = mesh_style(meta.art_style.painted(), grass_lushness);
@@ -868,7 +922,7 @@ fn place_cells(
     }
     let eye = cam.translation();
     let rg = ranges(&graphics);
-    let bounds = grass_bounds(grass_lushness);
+    let bounds = grass_bounds(grass_lushness, amounts.grass_height);
     let lod_mode = grass_lod_mode(eye, &orbit, terrain.height_at(eye.x, eye.z), rg[2]);
     let p = grass_lod_origin(eye, &orbit, lod_mode);
     if graphics.is_changed() {
@@ -1077,7 +1131,7 @@ fn update_params(
             eye.y,
             ranges(&graphics)[2] - 20.0,
             ranges(&graphics)[2] - 2.0,
-            1.0,
+            blade_height(amounts.grass_height),
         ),
         base: lin(base),
         tip: lin(tip),
@@ -1152,7 +1206,7 @@ mod tests {
     #[test]
     fn lush_grass_bounds_cover_displacement_without_changing_the_legacy_envelope() {
         assert_eq!(
-            grass_bounds(0.0),
+            grass_bounds(0.0, 1.0),
             GrassBounds {
                 aabb_top: 1.6,
                 horizontal_margin: 0.6,
@@ -1161,7 +1215,7 @@ mod tests {
             }
         );
         assert_eq!(
-            grass_bounds(1.0),
+            grass_bounds(1.0, 1.0),
             GrassBounds {
                 aabb_top: 6.0,
                 horizontal_margin: 6.0,

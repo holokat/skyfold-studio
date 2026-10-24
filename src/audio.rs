@@ -1,12 +1,18 @@
 //! Sound: automatic footstep-surface classification and playback, zone ambience beds with
-//! day/night layers and weather. The ambience beds are recorded Emberfall audio; the footsteps are
-//! Skyfold's own (`tools/audio/gen_footsteps.py`): one walker in soft leather boots, every take at
-//! the same loudness, so the level of each surface and gait is set here.
+//! day/night layers and weather. The wind, rain, running water, surf, fire, cave drips and the sea
+//! heard from under water are synthesised live (`synth`), following the weather; the other beds and
+//! the footsteps are recordings in `assets/audio` (every take of a surface at the same loudness, so
+//! the level of each surface and gait is set here).
+
+mod synth;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use bevy::audio::{AudioSink, AudioSinkPlayback, PlaybackMode, Volume};
+use bevy::audio::{AddAudioSource, AudioSink, AudioSinkPlayback, Volume};
 use bevy::prelude::*;
+
+pub use synth::{Synth, Voice};
 
 use crate::objects::{Library, ObjectStore};
 use crate::sky::SkyState;
@@ -42,7 +48,17 @@ impl Default for AudioSettings {
 pub struct AudioLib {
     steps: HashMap<Surface, Vec<Handle<AudioSource>>>,
     loops: HashMap<String, Handle<AudioSource>>,
+    /// the synthesised voices, by the stem they play as
+    synths: HashMap<&'static str, Handle<Synth>>,
+    /// the weather they follow (set by `update_ambience`)
+    controls: Arc<synth::Controls>,
     pub ui: HashMap<String, Handle<AudioSource>>,
+}
+
+impl AudioLib {
+    pub fn synth(&self, voice: Voice) -> Option<Handle<Synth>> {
+        self.synths.get(voice.stem()).cloned()
+    }
 }
 
 /// Play a one-shot footstep / UI sound.
@@ -181,12 +197,24 @@ impl Plugin for AudioPlugin {
             .init_resource::<AudioLib>()
             .init_resource::<AmbienceState>()
             .add_message::<SoundEvent>()
+            .add_audio_source::<Synth>()
             .add_systems(Startup, load_audio)
             .add_systems(Update, (play_one_shots, update_ambience));
     }
 }
 
-fn load_audio(mut lib: ResMut<AudioLib>, server: Res<AssetServer>) {
+fn load_audio(
+    mut lib: ResMut<AudioLib>,
+    server: Res<AssetServer>,
+    mut synths: ResMut<Assets<Synth>>,
+) {
+    for voice in Voice::ALL {
+        let h = synths.add(Synth {
+            voice,
+            controls: lib.controls.clone(),
+        });
+        lib.synths.insert(voice.stem(), h);
+    }
     let dir = std::path::PathBuf::from(crate::assets_path()).join("audio/steps");
     for s in Surface::ALL {
         // as many takes as there are files (step_<stem>_0, _1, ...); the usual count if none are found
@@ -218,6 +246,8 @@ fn load_audio(mut lib: ResMut<AudioLib>, server: Res<AssetServer>) {
     }
     stems.sort();
     stems.dedup();
+    // (the synthesised voices' loop files are only for exports)
+    stems.retain(|s| Voice::from_stem(s).is_none());
     for stem in stems {
         lib.loops.insert(
             stem.to_string(),
@@ -452,11 +482,8 @@ fn update_ambience(
             .map(|i| (i.amount, i.cave))
             .unwrap_or((0.0, 0.0));
         let shelter = (1.0 - 0.8 * inside) * (1.0 - cave);
-        let (w, g) = wind_mix(
-            wind.speed * wind.gust(time.elapsed_secs()) * exposure,
-            gusts,
-            wind.gustiness,
-        );
+        let heard = wind.speed * wind.gust(time.elapsed_secs()) * exposure;
+        let (w, g) = wind_mix(heard, gusts, wind.gustiness);
         // a blizzard howls (dust storms already blow harder: see wind::WindState)
         let blizzard = if exposure > 0.0 && sky.weather.snow > 0.2 {
             0.5 * sky.weather.snow.min(1.0)
@@ -465,6 +492,8 @@ fn update_ambience(
         };
         *want.entry(WIND_LOOP.to_string()).or_default() += (w + blizzard) * base * shelter;
         *want.entry(GUST_LOOP.to_string()).or_default() += g * base * shelter;
+        // the synthesised wind brightens as it blows harder; the rain thickens
+        lib.controls.set((heard / 14.0).max(blizzard), wet);
         // waterfalls, rivers and lava nearby
         for (stem, v) in crate::visuals::near_water_sounds(&water, sky.viewer_pos) {
             *want.entry(stem.to_string()).or_default() += v * base;
@@ -490,23 +519,30 @@ fn update_ambience(
         existing.push(l.stem.clone());
     }
     for (stem, v) in want {
-        if v > 0.001
-            && !existing.contains(&stem)
-            && let Some(h) = lib.loops.get(&stem)
-        {
+        if v <= 0.001 || existing.contains(&stem) {
+            continue;
+        }
+        let name = Name::new(format!("Ambience {stem}"));
+        let silent = Volume::Linear(0.0);
+        let layer = AmbienceLayer {
+            stem: stem.clone(),
+            target: v,
+            current: 0.0,
+        };
+        if let Some(h) = lib.synths.get(stem.as_str()) {
+            // an endless stream: played once, it never ends
             commands.spawn((
-                Name::new(format!("Ambience {stem}")),
-                AmbienceLayer {
-                    stem,
-                    target: v,
-                    current: 0.0,
-                },
+                name,
+                layer,
                 AudioPlayer(h.clone()),
-                PlaybackSettings {
-                    mode: PlaybackMode::Loop,
-                    volume: Volume::Linear(0.0),
-                    ..default()
-                },
+                PlaybackSettings::ONCE.with_volume(silent),
+            ));
+        } else if let Some(h) = lib.loops.get(&stem) {
+            commands.spawn((
+                name,
+                layer,
+                AudioPlayer(h.clone()),
+                PlaybackSettings::LOOP.with_volume(silent),
             ));
         }
     }

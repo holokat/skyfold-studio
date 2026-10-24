@@ -49,6 +49,7 @@ TREES = (
     "src",
     "crates/ez_tree",
     "crates/particle_fluids",
+    "crates/autorig",
     "assets/shaders",
     "docs/screenshots",
     "docs/readme",

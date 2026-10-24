@@ -1,7 +1,7 @@
 //! The Halo shell (HANDOFF › Layout): floating glass islands over the full-bleed world.
 //! Top-left the world capsule (name, size, saved state, undo / redo, File ▾), top-centre the
 //! environment pill (play the day, time + day speed, time slider, motion preview, Look ▾),
-//! top-right the actions (⌘K search, Prompt an area, MCP, Walk ▾); the rail on the left
+//! top-right the actions (⌘K search, Prompt an area, Fly-through, MCP, Walk ▾); the rail on the left
 //! (groups 1–9, mute, help); the status line with scale and compass bottom-left; toasts.
 
 use bevy::prelude::*;
@@ -311,6 +311,12 @@ fn world_capsule(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
             menu_hr(ui);
             if menu_row(ui, "Agent", "Connect an agent (MCP)…", "", false).clicked() {
                 s.mcp.show_panel = true;
+            }
+            if crate::updates::available() {
+                menu_hr(ui);
+                if menu_row(ui, "CloudDownload", "Check for Updates…", "", false).clicked() {
+                    crate::updates::check_now();
+                }
             }
         });
     });
@@ -633,6 +639,14 @@ fn actions(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
             if r.clicked() {
                 crate::prompt::button_clicked(&mut s.prompt);
             }
+            // Fly-through: camera paths and demo videos (also under Walk ▾)
+            let r = action_island(ui, "halo_flythrough", false, |ui| {
+                paint_slot_icon(ui, "Video", TEXT);
+                ui.label(egui::RichText::new("Fly-through").font(FontId::new(13.0, semibold())).color(TEXT));
+            });
+            if r.on_hover_text("Make a demo: click places to fly over (or keyframe a camera path), preview it and capture a video.").clicked() {
+                out.motion.write(crate::motion::MotionAction::OpenPanel(crate::motion::PanelTab::Paths));
+            }
             // MCP
             let now = s.real_time.elapsed_secs();
             let (dot, mcp_tip, listening) = crate::mcp::status_info(&s.mcp, now);
@@ -773,7 +787,7 @@ fn walk_split(ui: &mut Ui, out: &mut UiOut) {
             out.motion.write(crate::motion::MotionAction::Playtest);
         }
         menu_hr(ui);
-        if menu_row(ui, "Video", "Camera paths & flythrough…", "", false).on_hover_text("Keyframe a camera path, preview it and capture a video").clicked() {
+        if menu_row(ui, "Video", "Fly-through & camera paths…", "", false).on_hover_text("Make a demo: click places to fly over (or keyframe a camera path), preview it and capture a video").clicked() {
             out.motion.write(crate::motion::MotionAction::OpenPanel(crate::motion::PanelTab::Paths));
         }
         if menu_row(ui, "AnimatePath", "Playtest sessions…", "", false).on_hover_text("Recorded routes, heat map, summaries and export").clicked() {
@@ -794,6 +808,7 @@ pub fn group_icon(g: TabGroup) -> &'static str {
         TabGroup::Gameplay => "Sword",
         TabGroup::Atmosphere => "CloudySun",
         TabGroup::Review => "Stethoscope",
+        TabGroup::Characters => "User",
     }
 }
 

@@ -283,6 +283,9 @@ pub struct Npc {
     pub poi: Option<u32>,
     #[serde(default)]
     pub notes: String,
+    /// Its character, behavior, attitude, dialogue and moves (Labs: `crate::characters::npc`).
+    #[serde(default, skip_serializing_if = "crate::characters::npc::NpcLife::is_plain")]
+    pub life: crate::characters::npc::NpcLife,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -306,6 +309,9 @@ pub struct CreatureType {
     pub elite: bool,
     #[serde(default)]
     pub notes: String,
+    /// The library character it looks like (Labs: `crate::characters`; `None`: a marker only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

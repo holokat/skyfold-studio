@@ -107,6 +107,14 @@ pub fn user_assets_dir() -> PathBuf {
     }
 }
 
+/// Bought asset packs (`crate::market::install`), laid out like `assets/` (a pack's library in
+/// `models/stylepacks/<style>`). They live with the user's data, outside the app, so updating or
+/// reinstalling Skyfold Studio never removes them; anything the bundle lacks is read from here
+/// (the default asset source and `asset_file`).
+pub fn packs_dir() -> PathBuf {
+    user_data_dir().join("packs")
+}
+
 /// Make an AssetServer path that resolves through the writable user-asset source.
 pub fn user_asset_path(path: &str) -> String {
     if path.starts_with(&format!("{USER_ASSET_SOURCE}://")) {
@@ -116,18 +124,25 @@ pub fn user_asset_path(path: &str) -> String {
     }
 }
 
-fn asset_file_from(path: &str, bundled: &Path, user_assets: &Path) -> PathBuf {
+fn asset_file_from(path: &str, bundled: &Path, user_assets: &Path, packs: &Path) -> PathBuf {
     let path = path.split('#').next().unwrap_or(path);
     if let Some(relative) = path.strip_prefix(&format!("{USER_ASSET_SOURCE}://")) {
-        user_assets.join(relative)
-    } else {
-        bundled.join(path)
+        return user_assets.join(relative);
     }
+    let file = bundled.join(path);
+    if !file.exists() {
+        // a bought pack's file (the shipped app doesn't bundle paid packs)
+        let bought = packs.join(path);
+        if bought.exists() {
+            return bought;
+        }
+    }
+    file
 }
 
 /// Resolve an AssetServer path to the filesystem path needed by exporters and validators.
 pub fn asset_file(path: &str) -> PathBuf {
-    asset_file_from(path, &bundled_assets_dir(), &user_assets_dir())
+    asset_file_from(path, &bundled_assets_dir(), &user_assets_dir(), &packs_dir())
 }
 
 #[cfg(test)]
@@ -172,13 +187,42 @@ mod tests {
 
         let bundled = Path::new("/Applications/Skyfold Studio.app/Contents/Resources/assets");
         let user_assets = data.join("assets");
+        let packs = data.join("packs");
         assert_eq!(
-            asset_file_from("models/inn.gltf", bundled, &user_assets),
+            asset_file_from("models/inn.gltf", bundled, &user_assets, &packs),
             bundled.join("models/inn.gltf")
         );
         assert_eq!(
-            asset_file_from("user://imported/cabin.gltf#Scene0", bundled, &user_assets),
+            asset_file_from(
+                "user://imported/cabin.gltf#Scene0",
+                bundled,
+                &user_assets,
+                &packs
+            ),
             user_assets.join("imported/cabin.gltf")
         );
+    }
+
+    #[test]
+    fn bought_pack_files_fill_in_for_the_bundle() {
+        let root = std::env::temp_dir().join(format!("skyfold-packs-{}", fastrand::u64(..)));
+        let (bundled, user, packs) = (root.join("app"), root.join("user"), root.join("packs"));
+        std::fs::create_dir_all(bundled.join("models/stylepacks/handpainted/inn")).unwrap();
+        std::fs::create_dir_all(packs.join("models/stylepacks/handpainted/well")).unwrap();
+        std::fs::write(bundled.join("models/stylepacks/handpainted/inn/inn.gltf"), "{}").unwrap();
+        std::fs::write(packs.join("models/stylepacks/handpainted/inn/inn.gltf"), "{}").ok();
+        std::fs::write(packs.join("models/stylepacks/handpainted/well/well.gltf"), "{}").unwrap();
+        let f = |p: &str| asset_file_from(p, &bundled, &user, &packs);
+        // the bundle wins; the pack fills in what it lacks; neither has it: the bundle's path
+        assert_eq!(
+            f("models/stylepacks/handpainted/inn/inn.gltf"),
+            bundled.join("models/stylepacks/handpainted/inn/inn.gltf")
+        );
+        assert_eq!(
+            f("models/stylepacks/handpainted/well/well.gltf#Scene0"),
+            packs.join("models/stylepacks/handpainted/well/well.gltf")
+        );
+        assert_eq!(f("models/none.gltf"), bundled.join("models/none.gltf"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

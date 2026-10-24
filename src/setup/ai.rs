@@ -48,29 +48,26 @@ pub fn start(world: &mut World) {
     if plan.description.trim().is_empty() {
         return fail(world, "Describe your world first".into());
     }
-    let (backend, model, effort, status, key) = {
+    let (backend, model, effort, status, api) = {
         let s = world.resource::<crate::prompt::PromptSession>();
-        let key = Some(s.api_key.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .or_else(agent::env_api_key);
         (
             s.backend,
             s.model(),
             s.effort(),
             s.status(s.backend).cloned(),
-            key,
+            s.api_conn(),
         )
     };
-    if backend != Backend::AnthropicApi
+    if backend != Backend::Api
         && let Some(st) = &status
         && !st.ready
     {
         return fail(world, format!("{}: {}", backend.name(), st.note));
     }
-    if backend == Backend::AnthropicApi && key.is_none() {
+    if backend == Backend::Api && (!api.ready() || model.is_empty()) {
         return fail(
             world,
-            "Enter an Anthropic API key first (or connect Codex or Claude Code)".into(),
+            "Add an API key and pick a model first (or connect Codex or Claude Code)".into(),
         );
     }
     let endpoint = match crate::mcp::PrivateEndpoint::open(&[]) {
@@ -117,7 +114,7 @@ pub fn start(world: &mut World) {
         instructions: INSTRUCTIONS.to_string(),
         prompt,
         port: endpoint.port,
-        api_key: key,
+        api: Some(api),
         messages: vec![],
         resume: None,
         timeout: Duration::from_secs(180),

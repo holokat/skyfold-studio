@@ -188,8 +188,8 @@ impl Music {
     }
 }
 
-/// A demo track that ships with the app (`audio/music/music.json`, made by
-/// tools/audio/gen_dungeon_music.py): one per layout and realm (`kind` "layout") and one per mood
+/// A demo track that ships with the app (`audio/music/music.json`, CC0 or Skyfold's own:
+/// tools/audio/open/build_music.py): one per layout and realm (`kind` "layout") and one per mood
 /// ("mood"); `suits` names which.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DemoTrack {

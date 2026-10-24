@@ -13,6 +13,7 @@ mod bounce_light;
 mod camera;
 mod camera_fx;
 mod caves;
+mod characters;
 mod clouds;
 mod debug;
 mod dialogs;
@@ -30,6 +31,7 @@ mod fx_anchors;
 mod gameplay;
 mod gpu_watchdog;
 mod grass;
+mod groundcover;
 mod haze;
 mod history;
 mod io;
@@ -72,6 +74,7 @@ mod tools;
 mod towns;
 mod trees;
 mod ui;
+mod updates;
 mod visuals;
 mod volumetrics;
 mod walk;
@@ -101,7 +104,16 @@ fn main() {
         warn!("could not create user asset directory {user_assets:?}: {error}");
     }
     let user_assets = user_assets.to_string_lossy().into_owned();
+    // the default source: the bundled assets, then bought packs for what the bundle lacks
+    // (market::install); watched like the platform default
+    let (bundled, packs) = (paths::bundled_assets_dir(), paths::packs_dir());
     App::new()
+        .register_asset_source(
+            bevy::asset::io::AssetSourceId::Default,
+            AssetSourceBuilder::platform_default(&assets_path(), None).with_reader(move || {
+                Box::new(market::install::OverlayReader::new(&bundled, &packs))
+            }),
+        )
         .register_asset_source(
             paths::USER_ASSET_SOURCE,
             AssetSourceBuilder::platform_default(&user_assets, None),
@@ -153,6 +165,7 @@ fn main() {
         )
         .add_plugins(EguiPlugin::default())
         .add_systems(Update, dock_icon)
+        .add_plugins(updates::UpdatesPlugin)
         .init_resource::<world::Zones>()
         .init_resource::<world::WorldMeta>()
         .insert_resource(initial_terrain())
@@ -208,7 +221,9 @@ fn main() {
         .add_plugins(analysis::AnalysisPlugin)
         .add_plugins(worldmap::WorldMapPlugin)
         .add_plugins(export::ExportPlugin)
+        .add_plugins(characters::CharactersPlugin)
         .add_plugins((scale::ScalePlugin, nature::NaturePlugin))
+        .add_plugins(groundcover::GroundCoverPlugin)
         .add_plugins(bigworld::BigWorldPlugin)
         .add_plugins(refmap::RefMapPlugin)
         .add_plugins(prompt::PromptPlugin)

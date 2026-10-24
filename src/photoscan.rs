@@ -204,57 +204,7 @@ pub fn build(
             continue;
         }
         texels += l.albedo.width() * l.albedo.height();
-        let mat = foliage.add(FoliageMaterial {
-            base: StandardMaterial {
-                base_color: Color::WHITE,
-                base_color_texture: Some(images.add(l.albedo)),
-                normal_map_texture: l.normal.map(|n| images.add(n)),
-                perceptual_roughness: l.roughness,
-                reflectance: 0.3,
-                // fronds, petals and blades are single cut-out sheets seen from both sides
-                alpha_mode: if l.cutout {
-                    AlphaMode::Mask(0.5)
-                } else {
-                    AlphaMode::Opaque
-                },
-                cull_mode: if l.cutout {
-                    None
-                } else {
-                    Some(bevy::render::render_resource::Face::Back)
-                },
-                double_sided: l.cutout && !l.cards,
-                diffuse_transmission: if l.cutout { 0.3 } else { 0.0 },
-                ..default()
-            },
-            extension: FoliageExt::default(),
-        });
-        let variants = l
-            .variants
-            .into_iter()
-            .map(|(lods, height, width, min_y)| TreeVariant {
-                lods: lods
-                    .into_iter()
-                    .map(|m| {
-                        tris += m.indices().map_or(0, |i| i.len() / 3);
-                        (meshes.add(m), None)
-                    })
-                    .collect(),
-                cell: None,
-                height,
-                width,
-                min_y,
-                trunk: None,
-            })
-            .collect();
-        parts.insert(
-            p.kind,
-            TreeParts {
-                variants,
-                bark: mat.clone(),
-                leaves: mat,
-                ranges: p.ranges,
-            },
-        );
+        parts.insert(p.kind, parts_of(l, p.ranges, meshes, foliage, images, &mut tris));
     }
     let tile = (|| {
         Ok::<_, String>((
@@ -319,6 +269,82 @@ pub fn build(
         texels as f32 / 1e6,
         t0.elapsed()
     );
+}
+
+/// The library-facing shape of one loaded prop: its meshes and its one material.
+fn parts_of(
+    l: Loaded,
+    ranges: [f32; 4],
+    meshes: &mut Assets<Mesh>,
+    foliage: &mut Assets<FoliageMaterial>,
+    images: &mut Assets<Image>,
+    tris: &mut usize,
+) -> TreeParts {
+    let mat = foliage.add(FoliageMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(images.add(l.albedo)),
+            normal_map_texture: l.normal.map(|n| images.add(n)),
+            perceptual_roughness: l.roughness,
+            reflectance: 0.3,
+            // fronds, petals and blades are single cut-out sheets seen from both sides
+            alpha_mode: if l.cutout {
+                AlphaMode::Mask(0.5)
+            } else {
+                AlphaMode::Opaque
+            },
+            cull_mode: if l.cutout {
+                None
+            } else {
+                Some(bevy::render::render_resource::Face::Back)
+            },
+            double_sided: l.cutout && !l.cards,
+            diffuse_transmission: if l.cutout { 0.3 } else { 0.0 },
+            ..default()
+        },
+        extension: FoliageExt::default(),
+    });
+    let variants = l
+        .variants
+        .into_iter()
+        .map(|(lods, height, width, min_y)| TreeVariant {
+            lods: lods
+                .into_iter()
+                .map(|m| {
+                    *tris += m.indices().map_or(0, |i| i.len() / 3);
+                    (meshes.add(m), None)
+                })
+                .collect(),
+            cell: None,
+            height,
+            width,
+            min_y,
+            trunk: None,
+        })
+        .collect();
+    TreeParts {
+        variants,
+        bark: mat.clone(),
+        leaves: mat,
+        ranges,
+    }
+}
+
+/// One photoscanned set outside the library (`assets/models/photoscan/<file>.*`): the ground
+/// cover's herbs and grass tufts (`crate::groundcover`). `ranges` as in `TreeParts`.
+pub fn load_set(
+    file: &str,
+    ranges: [f32; 4],
+    meshes: &mut Assets<Mesh>,
+    foliage: &mut Assets<FoliageMaterial>,
+    images: &mut Assets<Image>,
+    formats: Option<&CompressedImageFormatSupport>,
+) -> Option<TreeParts> {
+    let bc = formats.is_some_and(|f| f.0.contains(CompressedImageFormats::BC));
+    let l = load(&dir(), file, bc)
+        .map_err(|e| warn!("photoscan {file}: {e}"))
+        .ok()?;
+    Some(parts_of(l, ranges, meshes, foliage, images, &mut 0))
 }
 
 fn load(dir: &Path, file: &str, bc: bool) -> Result<Loaded, String> {

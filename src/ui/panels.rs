@@ -264,6 +264,8 @@ fn left_tab(ui: &mut egui::Ui, s: &mut UiState, out: &mut UiOut, tex: &UiTexture
         Tab::Dungeons => crate::dungeons::ui::dungeons_left(ui, s),
         Tab::DungeonLook => crate::dungeons::ui::look_left(ui, s),
         Tab::DungeonLights => crate::dungeons::ui::lights_left(ui, s),
+        // (its own big window: crate::characters::view)
+        Tab::Characters => {}
     }
 }
 
@@ -392,6 +394,7 @@ pub fn right_panel(
         Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => {
             crate::dungeons::ui::dungeons_inspector(s)
         }
+        Tab::Characters => None,
     };
     let Some((title, header)) = hook else {
         return false;
@@ -414,6 +417,7 @@ pub fn right_panel(
         Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => {
             crate::dungeons::ui::dungeons_right(ui, s)
         }
+        Tab::Characters => {}
     });
     true
 }
@@ -563,6 +567,22 @@ fn meters(v: f32) -> String {
 
 // ------------------------------------------------------------------ Land
 
+/// How long and how much grass grows, world-wide (Land's nature dials and Paint's grass).
+pub fn grass_dials(ui: &mut egui::Ui, s: &mut UiState) {
+    let mut appearance = *s.appearance;
+    slider_row(ui, "Grass lushness", &mut appearance.grass_lushness, 0.0..=1.0, pct)
+        .on_hover_text("Fullness: fine blades filling the gaps and taller meadow tufts (0% keeps the plain short grass).");
+    if appearance != *s.appearance {
+        crate::nature::set_appearance(&mut s.appearance, &mut s.history, appearance);
+        s.meta.dirty = true;
+    }
+    slider_row(ui, "Grass height", &mut s.amounts.grass_height, 0.3..=2.5, |v| format!("{v:.1}×"))
+        .on_hover_text("How long every blade grows: short turf at 0.5×, knee-high meadow at 2×.");
+    slider_row(ui, "Grass amount", &mut s.amounts.grass, 0.0..=2.0, pct).on_hover_text(
+        "Controls ground coverage wherever grass can grow. 0% removes it; 200% fills the meadow more densely.",
+    );
+}
+
 /// The world-wide nature dials (instant).
 pub fn nature_dials(ui: &mut egui::Ui, s: &mut UiState) {
     let before_appearance = *s.appearance;
@@ -582,16 +602,29 @@ pub fn nature_dials(ui: &mut egui::Ui, s: &mut UiState) {
             }
         });
     }
+    slider_row(ui, "Shade under trees", &mut appearance.canopy_shade, 0.0..=1.0, pct)
+        .on_hover_text("How much of the sky light the crowns hold back: forest floors and the insides of crowns darken like a real wood (0% lights them like open ground).");
     ui.add_space(6.0);
-    slider_row(ui, "Grass lushness", &mut appearance.grass_lushness, 0.0..=1.0, pct)
-        .on_hover_text("Controls grass height, fullness and the mix of fine blades and taller meadow tufts. 0% keeps the shorter grass.");
+    ui.label(RichText::new("Ground cover").color(TEXT_DIM));
+    let g = &mut appearance.ground;
+    slider_row(ui, "Undergrowth", &mut g.undergrowth, 0.0..=2.0, pct)
+        .on_hover_text("Ferns and broad-leaved herbs under the trees, knee-high and in clumps (0% leaves the forest floor bare).");
+    if g.undergrowth > 0.0 {
+        slider_row(ui, "Ferns ↔ herbs", &mut g.herbs, 0.0..=1.0, pct)
+            .on_hover_text("The undergrowth's mix: 0% all ferns, 100% all broad-leaved herbs (nettles, weed rosettes, leafy stalks), each in patches of its own.");
+    }
+    slider_row(ui, "Grass tufts", &mut g.tufts, 0.0..=2.0, pct)
+        .on_hover_text("Photographed grass tufts among the meadow blades, in clumps.");
+    slider_row(ui, "Grass under trees", &mut g.grass_under_trees, 0.0..=1.0, pct)
+        .on_hover_text("How much meadow grass still grows under the crowns, where the undergrowth takes over.");
+    slider_row(ui, "Clumping", &mut g.clumping, 0.0..=1.0, pct)
+        .on_hover_text("0% spreads the cover evenly; 100% grows it in dense patches with bare ground between them.");
     if appearance != before_appearance {
         crate::nature::set_appearance(&mut s.appearance, &mut s.history, appearance);
         s.meta.dirty = true;
     }
-    slider_row(ui, "Grass amount", &mut s.amounts.grass, 0.0..=2.0, pct).on_hover_text(
-        "Controls ground coverage wherever grass can grow. 0% removes it; 200% fills the meadow more densely.",
-    );
+    ui.add_space(6.0);
+    grass_dials(ui, s);
     toggle(ui, &mut s.motion.preview, "Preview wind while editing")
         .on_hover_text("Animates grass, leaves and the rest of the world while editing. Walking always enables motion. Wind speed is in the Wind controls.");
     let lush = s.layer_choices.get(0) == crate::terrain::textures::LUSH_GRASS;
@@ -653,7 +686,9 @@ pub fn nature_dials(ui: &mut egui::Ui, s: &mut UiState) {
             "Fallen logs, stumps, roots and branches, world-wide (instant).",
         ),
     ] {
-        slider_row(ui, label, v, 0.0..=2.0, pct).on_hover_text(hint);
+        // (trees go to 500 %: a forest can grow far denser than the rules' own)
+        let max = if label == "Trees" { 5.0 } else { 2.0 };
+        slider_row(ui, label, v, 0.0..=max, pct).on_hover_text(hint);
     }
 }
 
@@ -723,40 +758,7 @@ fn mat_swatch(ctx: &egui::Context, m: &GroundMat) -> Option<egui::TextureId> {
         .map(|t| t.id())
 }
 
-/// How much of the world each slot covers (fractions of the land, painted or automatic).
-fn layer_usage(t: &crate::terrain::Terrain) -> [f32; LAYER_COUNT] {
-    let mut sum = [0.0f32; LAYER_COUNT];
-    let n = t.n();
-    let step = (n / 256).max(1);
-    let mut count: f32 = 0.0;
-    for j in (0..n).step_by(step) {
-        for i in (0..n).step_by(step) {
-            let w = t.final_weights(i, j);
-            for k in 0..LAYER_COUNT {
-                sum[k] += w[k];
-            }
-            count += 1.0;
-        }
-    }
-    sum.map(|v| v / count.max(1.0))
-}
-
-/// Slots the automatic style is least likely to need, first: a free one of these takes a new
-/// material.
-const FREE_ORDER: [Layer; LAYER_COUNT] = [
-    Layer::Ice,
-    Layer::Cobblestone,
-    Layer::DarkRock,
-    Layer::Mud,
-    Layer::DryGrass,
-    Layer::ForestFloor,
-    Layer::Gravel,
-    Layer::Dirt,
-    Layer::Snow,
-    Layer::Sand,
-    Layer::Rock,
-    Layer::Grass,
-];
+use crate::terrain::textures::{FREE_ORDER, layer_usage};
 
 /// Paint with a material: its slot if it's already in the world, else a free slot (one the world
 /// doesn't use at all), else ask which one to replace.
@@ -1851,12 +1853,6 @@ fn world_art(ui: &mut egui::Ui, s: &mut UiState) {
             a.name().to_lowercase()
         ));
     }
-    if s.meta.art_style.painted() && !crate::art_style::painted_usable() {
-        hint_small(
-            ui,
-            "The painted surfaces come with the Hand-painted Fantasy pack: until it's unlocked (Objects › Asset packs) the ground and materials stay realistic.",
-        );
-    }
 }
 
 /// Style › Fine-tune › Shuffle: new values for every fine-tune setting at each press, round the
@@ -2103,12 +2099,13 @@ fn tint_row(ui: &mut egui::Ui, label: &str, tint: &mut [f32; 3]) -> bool {
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [f32; 3]) {
-    ui.horizontal(|ui| {
+    let r = ui.horizontal(|ui| {
         ui.label(RichText::new(label).color(TEXT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.color_edit_button_rgb(c);
         });
     });
+    super::search::mark(ui, r.response.rect, label);
 }
 
 fn style_right(ui: &mut egui::Ui, s: &mut UiState) {

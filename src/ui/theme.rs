@@ -10,8 +10,8 @@ use bevy_egui::egui::{
 };
 
 // surfaces
-/// Panels, rail, top islands, dock (~0.56).
-pub const GLASS: Color32 = Color32::from_rgba_unmultiplied_const(16, 19, 25, 143);
+/// Panels, rail, top islands, dock (~0.72: solid enough to read over bright terrain).
+pub const GLASS: Color32 = Color32::from_rgba_unmultiplied_const(16, 19, 25, 184);
 /// Menus, palette, windows (~0.94).
 pub const GLASS_SOLID: Color32 = Color32::from_rgba_unmultiplied_const(18, 21, 27, 240);
 /// 1 px rim / separators (0.10).

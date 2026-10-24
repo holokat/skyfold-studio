@@ -662,7 +662,7 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3]) {
 
 /// A colour row: the swatch button, the label, the hex value on the right.
 fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [f32; 3]) {
-    ui.horizontal(|ui| {
+    let r = ui.horizontal(|ui| {
         ui.spacing_mut().interact_size = vec2(26.0, 22.0);
         color_button(ui, c);
         ui.add_space(2.0);
@@ -676,6 +676,7 @@ fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [f32; 3]) {
             );
         });
     });
+    crate::ui::search::mark(ui, r.response.rect, label);
 }
 
 // ------------------------------------------------------------------ tool panel
@@ -1149,26 +1150,40 @@ pub fn water_right(ui: &mut egui::Ui, s: &mut UiState) {
                 -50.0..=50.0,
                 |v| format!("{v:.1} m"),
             );
-            let level = (s.water_style.waves * 1.6).clamp(0.0, 4.0);
+            // the sea in a few sliders: how rough, how much white water, how fast
+            let mut level = (s.water_style.waves * 1.6).clamp(0.0, 4.0);
             let states = &crate::ocean::SEA_STATES;
-            let cur = (0..states.len()).find(|i| (level - *i as f32).abs() < 0.5);
-            let mut pick = None;
-            dropdown_row(
-                ui,
-                "Sea state",
-                "ocean_sea_state",
-                cur.map_or("Custom", |i| states[i].0),
-                |ui| {
-                    for (i, (name, _)) in states.iter().enumerate() {
-                        if menu_check(ui, cur == Some(i), *name).clicked() {
-                            pick = Some(i);
-                        }
-                    }
-                },
-            );
-            if let Some(i) = pick {
-                s.water_style.waves = i as f32 / 1.6;
+            let name = states[(level.round() as usize).min(states.len() - 1)].0;
+            let hs = crate::ocean::SeaState::at(level).hs();
+            let mut sea = s.water_style.waves;
+            let mut foam = s.water_style.foam;
+            let mut speed = s.water_style.wave_speed;
+            let mut changed = slider_row(ui, "Sea", &mut level, 0.0..=4.0, move |_| {
+                format!("{name} · {hs:.1} m")
+            })
+            .on_hover_text("Glassy → Calm → Fair → Heavy → Storm: wave height, choppiness, whitecaps and spray together")
+            .changed();
+            if changed {
+                sea = level / 1.6;
+            }
+            changed |= slider_row(ui, "Whitecaps & foam", &mut foam, 0.0..=1.0, pct)
+                .on_hover_text("White water on the crests and streaks blown off them (rough seas make more)")
+                .changed();
+            changed |= slider_row(ui, "Wave speed", &mut speed, 0.2..=2.5, |v| {
+                format!("{v:.2}×")
+            })
+            .changed();
+            if changed {
+                s.water_style.waves = sea;
+                s.water_style.foam = foam;
+                s.water_style.wave_speed = speed;
+                s.water_style.preset = "custom".into();
                 s.meta.dirty = true;
+            }
+            toggle(ui, &mut s.motion.preview, "Animate the sea while editing")
+                .on_hover_text("Waves always move while walking; on, they move in the editor too (it costs some frame rate)");
+            if level > 2.5 && !s.motion.preview {
+                hint_small(ui, "Turn on Animate the sea to see the storm roll in. Rain and dark skies raise the sea further.");
             }
             let mut ang = s.wind.dir.y.atan2(s.wind.dir.x).to_degrees();
             if slider_row(ui, "Wind direction", &mut ang, -180.0..=180.0, |v| {

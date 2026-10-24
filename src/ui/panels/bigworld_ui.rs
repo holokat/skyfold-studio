@@ -463,12 +463,6 @@ pub fn new_world_contents(ui: &mut egui::Ui, s: &mut UiState, out: &mut UiOut) -
             (crate::art_style::ArtStyle::HandPainted, "Hand-painted"),
         ],
     );
-    if s.ed.new_world_art_style.painted() && !crate::art_style::painted_usable() {
-        hint_small(
-            ui,
-            "Hand-painted surfaces need the Hand-painted Fantasy pack. Until it is unlocked, the new world uses realistic surfaces.",
-        );
-    }
     ui.add_space(8.0);
     section(ui, "World size");
     let bw = &mut s.bigworld;

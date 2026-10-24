@@ -24,8 +24,8 @@
 //! forest is painted trees and bushes over painted forest floor and grass, rock shows as the
 //! ground's own painted rock layer.
 //!
-//! The painted surfaces belong to the Hand-painted Fantasy pack (`crate::market`): where the pack
-//! is locked they aren't used (`painted_usable`) and the world keeps the realistic surfaces.
+//! The painted surfaces are part of the free, open-source studio (they ship with the app): any
+//! world can be hand-painted. Only the hand-painted models are sold (`crate::market`).
 //!
 //! MCP: `world_set_art_style` (one undo step); `world_info` reports `art_style`.
 
@@ -50,7 +50,7 @@ pub enum ArtStyle {
     #[default]
     #[serde(rename = "photoreal", alias = "realistic")]
     Realistic,
-    /// the Hand-painted Fantasy pack
+    /// the studio's free painted surfaces
     #[serde(rename = "handpainted", alias = "hand_painted", alias = "hand-painted")]
     HandPainted,
 }
@@ -122,21 +122,10 @@ fn set_current(a: ArtStyle) {
     CURRENT.store(a.painted() as u8, Ordering::Relaxed);
 }
 
-/// The style the engine paints with: the world's, unless the painted surfaces can't be used.
+/// The style the engine paints with: the world's (the painted surfaces are free for every
+/// world).
 pub fn surfaces(a: ArtStyle) -> ArtStyle {
-    if a.painted() && painted_usable() {
-        ArtStyle::HandPainted
-    } else {
-        ArtStyle::Realistic
-    }
-}
-
-/// Whether the painted surfaces may be used: they belong to the Hand-painted Fantasy pack, so
-/// they need it unlocked (owned, free or the developer unlock).
-pub fn painted_usable() -> bool {
-    let m = crate::market::snapshot();
-    m.pack_of("hp:_")
-        .is_none_or(|p| m.state(p) != crate::market::PackState::Locked)
+    a
 }
 
 fn textures_root() -> PathBuf {
@@ -350,7 +339,7 @@ impl Plugin for ArtStylePlugin {
             .add_systems(Update, (apply_undo, sync_place_style));
         app.mcp_tool(McpTool {
             name: "world_set_art_style",
-            description: "Set the world's art style: `photoreal` (Realistic: CC0 photoscanned ground, rock, bark and materials) or `handpainted` (Hand-painted: the Hand-painted Fantasy pack's painted ground, rock, bark, leaves, materials and ore surfaces). \
+            description: "Set the world's art style: `photoreal` (Realistic: CC0 photoscanned ground, rock, bark and materials) or `handpainted` (Hand-painted: the studio's free painted ground, rock, bark, leaves, materials and ore surfaces). \
 The terrain, roads, built objects, trees and ore deposits repaint at once; objects_library, the Objects tab and the Nature tab then offer only that style's assets (imported models and the procedural trees, bushes, palms, cacti, reeds and lily pads fit both). \
 In a hand-painted world biome nature uses painted trees, bushes, grass, wildflowers, lavender, mushrooms and berry plants; photographic ferns, grass tufts, rocks and dead wood are excluded. \
 An untouched Natural look also gets a painted baseline with the switch (soft tone curve, richer colour, softened textures, a touch of painterly; switching back takes it off); an edited or saved look is left alone. One undo step. Town, dungeon and encounter tools default to this style.",
@@ -434,9 +423,6 @@ fn mcp_set(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
         );
     } else {
         note.push_str(" The terrain, roads, objects, trees and ores repaint over the next moments; the builder now offers this style's assets.");
-    }
-    if art.painted() && !painted_usable() {
-        note.push_str(" Note: the Hand-painted Fantasy pack isn't unlocked on this account, so the surfaces stay realistic until the user gets it (Objects › Asset packs).");
     }
     Ok(vec![McpContent::Json(
         json!({ "art_style": art.id(), "name": art.name(), "changed": changed, "note": note }),

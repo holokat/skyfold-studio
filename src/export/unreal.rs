@@ -3,13 +3,15 @@
 //! meshes, and `import_world.py` (Python Editor Script Plugin, UE 5.4+) that imports the meshes,
 //! places hierarchical instanced static meshes, builds sky / sun / fog / post process, water,
 //! roads and markers, creates the landscape material and orients the landscape files. Unreal's
-//! Python API has no documented way to create a landscape from heightmap files (only to
-//! overwrite an existing landscape's heights from a render target), so that one step stays
-//! manual: one import, or a World Partition tiled import for big worlds (`tiles`).
+//! Python API can't create a landscape from heightmap files (only overwrite an existing one's
+//! heights from a render target): the plugin below does, else it's a manual import (and for now
+//! always for World Partition tiled big worlds, `tiles`).
 //!
-//! The script is written against the documented UE Python API but can't be run here: it is
-//! defensive (every step logs and carries on). It measures how the glTF importer maps axes with a
-//! probe mesh (`Data/axis_probe.glb`) instead of assuming it.
+//! The Skyfold Studio plugin (`Plugins/SkyfoldStudio`, C++ source the project compiles) creates
+//! the landscape from those files and carries the runtime: zone / biome weather and atmosphere,
+//! the explorer (the editor's walk mode), portals and fires. The script is defensive (every step
+//! logs and carries on, and without the plugin it builds the static world). It measures how the
+//! glTF importer maps axes with a probe mesh (`Data/axis_probe.glb`) instead of assuming it.
 
 use bevy::math::Vec3;
 use serde_json::{Value, json};
@@ -19,6 +21,23 @@ use super::generic::clean;
 use super::glb::{Glb, Material, Prim};
 
 const SCRIPT: &str = include_str!("unreal/import_world.py");
+
+/// The Skyfold Studio plugin (source; Unreal compiles it with the project): what the import
+/// script can't do from Python, such as creating the Landscape.
+const PLUGIN: &[(&str, &str)] = &[
+    ("SkyfoldStudio.uplugin", include_str!("unreal/Plugin/SkyfoldStudio/SkyfoldStudio.uplugin")),
+    ("Source/SkyfoldStudioEditor/SkyfoldStudioEditor.Build.cs", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudioEditor/SkyfoldStudioEditor.Build.cs")),
+    ("Source/SkyfoldStudioEditor/Public/SkyfoldStudioLibrary.h", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudioEditor/Public/SkyfoldStudioLibrary.h")),
+    ("Source/SkyfoldStudioEditor/Private/SkyfoldStudioLibrary.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudioEditor/Private/SkyfoldStudioLibrary.cpp")),
+    ("Source/SkyfoldStudioEditor/Private/SkyfoldStudioEditorModule.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudioEditor/Private/SkyfoldStudioEditorModule.cpp")),    ("Source/SkyfoldStudio/SkyfoldStudio.Build.cs", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/SkyfoldStudio.Build.cs")),
+    ("Source/SkyfoldStudio/Public/SkyfoldAtmosphere.h", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Public/SkyfoldAtmosphere.h")),
+    ("Source/SkyfoldStudio/Public/SkyfoldCharacter.h", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Public/SkyfoldCharacter.h")),
+    ("Source/SkyfoldStudio/Public/SkyfoldPortal.h", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Public/SkyfoldPortal.h")),
+    ("Source/SkyfoldStudio/Private/SkyfoldStudioModule.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Private/SkyfoldStudioModule.cpp")),
+    ("Source/SkyfoldStudio/Private/SkyfoldAtmosphere.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Private/SkyfoldAtmosphere.cpp")),
+    ("Source/SkyfoldStudio/Private/SkyfoldCharacter.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Private/SkyfoldCharacter.cpp")),
+    ("Source/SkyfoldStudio/Private/SkyfoldPortal.cpp", include_str!("unreal/Plugin/SkyfoldStudio/Source/SkyfoldStudio/Private/SkyfoldPortal.cpp")),
+];
 
 /// A tetrahedron with corners at 1 m on X, 2 m on Y and 3 m on Z: its imported bounding box shows
 /// where each glTF axis lands in Unreal.
@@ -62,6 +81,90 @@ fn landscape_values(t: &TerrainOut) -> ([f32; 3], [f32; 3], usize) {
         [t.cell * 100.0, t.cell * 100.0, z_scale],
         (t.n - 1) / 126,
     )
+}
+
+/// The weather and play runtime's data (the plugin's `ASkyfoldAtmosphere`, as Godot's
+/// `wb_atmosphere.gd`): the zone and biome maps (one byte per terrain vertex, rows south), the
+/// weathers, zones (weather, clouds, wind, haze, mood, play rules) and biomes, the world's
+/// weather and wind, and the fog colours under Unreal's exposure.
+fn write_atmosphere(s: &Snapshot, ctx: &Ctx, light: &core::LightOut, exposure: f32) -> Result<(), String> {
+    let t = &s.terrain;
+    let l = &s.lighting;
+    let lk = &s.look;
+    ctx.write("Data/zones.r8", &t.zones)?;
+    ctx.write("Data/biomes.r8", &t.biomes)?;
+    let (weathers, zones, biomes) = super::godot::weather_tables(s);
+    let id = |w: crate::world::Weather| format!("{w:?}").to_lowercase();
+    ctx.write_json(
+        "Data/atmosphere.json",
+        &json!({
+            "grid": { "vertices": t.n(), "cell": t.cell, "zones": "Data/zones.r8", "biomes": "Data/biomes.r8" },
+            "sea_level": t.sea_level,
+            "fade_seconds": crate::look::ZONE_FADE,
+            "weathers": weathers,
+            "world": {
+                "clouds": l.cloud_coverage,
+                "cloud_speed": l.cloud_speed,
+                "precipitation": l.precipitation,
+                "lightning": l.rain.lightning,
+                "override": l.weather_override.map(id),
+                "haze_enabled": light.haze_enabled,
+                "haze": l.haze,
+                "night": light.night,
+                "wind": { "dir": [s.wind[0], s.wind[1]], "speed": s.wind[2], "gustiness": s.wind[3] },
+            },
+            "look": { "haze": lk.haze, "color_haze": lk.color_haze, "haze_distance": lk.haze_distance, "air": lk.air, "sunbeams": lk.sunbeams, "mist": lk.mist },
+            "fog": super::godot::atmosphere_fog(s, light, exposure),
+            "zones": zones,
+            "biomes": biomes,
+        }),
+    )
+}
+
+/// One tuft of the editor's meadow grass (`grass::build_patch`'s recipe: blades leaning out from
+/// their roots, curving over, golden-angle azimuths) at the world's blade height, for Unreal's
+/// landscape grass. UV: x across the blade, y from the tip (0) to the root (1).
+fn grass_clump(s: &Snapshot) -> Vec<u8> {
+    let mut rng = crate::noise::Rng::new(0x5EED_6A55);
+    let scale = s.grass_height.clamp(0.3, 2.5);
+    let (mut pos, mut nrm, mut uv, mut idx) = (vec![], vec![], vec![], vec![]);
+    for k in 0..18u32 {
+        let az = k as f32 * 2.399_96 + (rng.f32() - 0.5) * 0.6;
+        let root = 0.13 * rng.f32().sqrt();
+        let lean = 0.12 + 0.45 * rng.f32();
+        let curve = 0.15 + 0.35 * rng.f32();
+        let h = (0.3 + 0.22 * rng.f32()) * scale;
+        let w = 0.016 + 0.008 * rng.f32();
+        let (dx, dz) = (az.cos(), az.sin());
+        // across the blade, square to its lean
+        let (sx, sz) = (-dz, dx);
+        let base = pos.len() as u32;
+        for t in [0.0f32, 0.3, 0.62, 1.0] {
+            let out = (lean.sin() * t + curve * t * t) * h + root;
+            let up = (lean.cos() * t - 0.35 * curve * t * t) * h;
+            let half = w * (1.0 - 0.85 * t) * 0.5;
+            for side in [-1.0f32, 1.0] {
+                pos.push([dx * out + sx * half * side, up, dz * out + sz * half * side]);
+                // (lit from above, as the editor lights its blades)
+                nrm.push([0.0, 1.0, 0.0]);
+                uv.push([(side + 1.0) * 0.5, 1.0 - t]);
+            }
+        }
+        for r in 0..3u32 {
+            let a = base + r * 2;
+            idx.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+        }
+    }
+    let mut g = super::glb::Glb::new();
+    let mut m = super::glb::Material::new("grass_blade");
+    m.double_sided = true;
+    let mat = g.material(&m);
+    let mesh = g.mesh(
+        "grass_clump",
+        &[super::glb::Prim { positions: &pos, normals: Some(&nrm), uvs: Some(&uv), indices: &idx, material: Some(mat), ..Default::default() }],
+    );
+    let node = g.node("grass_clump", mesh, vec![]);
+    g.finish(&[node])
 }
 
 /// The dungeons for the script (Skyfold space: the script converts like everything else): each
@@ -146,7 +249,9 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "Roads",
             "Caves",
             "Data",
+            "Look",
             "import_world.py",
+            "Plugins",
             "README.md",
             "CREDITS.md",
             "manifest.json",
@@ -232,7 +337,8 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         let style = |st: &crate::water::WaterStyle| {
             let lin = |c: [f32; 3]| bevy::color::Color::srgb(c[0], c[1], c[2]).to_linear();
             let c = lin(st.shallow);
-            json!({ "shallow_linear": [c.red, c.green, c.blue], "transparency": st.transparency, "roughness": st.roughness, "clarity": st.clarity })
+            let (ext, ins) = crate::water::water_optics(st);
+            json!({ "shallow_linear": [c.red, c.green, c.blue], "transparency": st.transparency, "roughness": st.roughness, "clarity": st.clarity, "extinct": ext.to_array(), "inscat": ins.to_array(), "shore_foam": st.shore_foam })
         };
         water = json!({
             "enabled": true,
@@ -262,12 +368,35 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         ctx.write_glb("Caves/caves.glb", b.clone())?;
         ctx.write_json(
             "Data/caves.json",
-            &json!({ "caves": caves.json, "holes": caves.holes }),
+            &json!({ "caves": caves.json, "holes": caves.holes, "holes_grid": s.terrain.res }),
         )?;
         caves_glb = "Caves/caves.glb";
     }
     if let Some(b) = &caves.holes_png {
         ctx.write("Caves/holes.png", b)?;
+    }
+    // meadow grass: the editor's grass map (density, dryness, tint, height per terrain vertex,
+    // rows south) and one tuft for Unreal's landscape grass
+    let mut grass = Value::Null;
+    if o.plants
+        && let Some(g) = core::grass(s, s.terrain.n())
+    {
+        let gn = s.terrain.n() as u32;
+        let px: Vec<u8> = g.into_iter().flatten().collect();
+        ctx.write("Data/grass.png", &core::png_rgba(&image::RgbaImage::from_raw(gn, gn, px).ok_or("grass")?))?;
+        ctx.write("Models/grass_clump.glb", &grass_clump(s))?;
+        // (base, lush tip, dry tip), linear, as the Godot export's grass
+        let colours: [[f32; 3]; 3] = if s.painted {
+            [[0.12, 0.2, 0.04], [0.38, 0.54, 0.1], [0.66, 0.5, 0.16]]
+        } else {
+            [[0.085, 0.115, 0.03], [0.3, 0.42, 0.1], [0.55, 0.45, 0.2]]
+        };
+        grass = json!({
+            "map": "Data/grass.png", "map_vertices": gn, "clump": "Models/grass_clump.glb",
+            "base": colours[0], "tip": colours[1], "dry": colours[2],
+            "amount": s.grass_amount, "lushness": s.grass_lushness.clamp(0.0, 1.0),
+            "reach_m": crate::grass::RANGES[2] * s.detail.clamp(0.65, 1.5),
+        });
     }
     let markers = if o.gameplay { core::markers(s) } else { vec![] };
     if o.gameplay {
@@ -276,6 +405,16 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     let navmesh = super::nav::write(ctx, &s.navmesh, "Data/Navmesh")?;
     let light = core::lighting(s);
     ctx.write_json("Data/lighting.json", &light.json(s))?;
+    // the look: exposure with the editor's night opening, the haze as the Godot and Unity exports
+    // calibrate it, the post-tonemap grade as Unreal's 256 x 16 colour grading LUT
+    let night = super::godot::Night::of(s, &light);
+    let ev = light.exposure + night.ev;
+    let haze = super::godot::Haze::of(s, &light, 2f32.powf(ev));
+    write_atmosphere(s, ctx, &light, 2f32.powf(ev))?;
+    ctx.write(
+        "Look/grade_lut.png",
+        &core::png_rgb(&super::godot::look::grade_lut_sized(&s.look, 16)),
+    )?;
     ctx.write("Data/axis_probe.glb", &axis_probe())?;
     // dungeons: a level each (built by the script), triggers at their ways in
     let (dungeons_json, ways_json, sheets) = dungeons(s, ctx, &models)?;
@@ -303,6 +442,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         "models": models.iter().zip(&inst).map(|(m, list)| json!({
             "name": s.assets[m.asset].name,
             "safe_name": m.safe,
+            "category": format!("{:?}", s.assets[m.asset].category),
             "file": format!("Models/{}", m.file),
             "generated": m.generated,
             "variants": m.variants.iter().map(|v| json!({ "node": v.node, "lods": v.lods, "collision": v.collision })).collect::<Vec<_>>(),
@@ -316,6 +456,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "stretch": core::stretch_rows(list),
         })).collect::<Vec<_>>(),
         "water": water,
+        "grass": grass,
         "roads": roads,
         "caves": caves_glb,
         "dungeons": dungeons_json,
@@ -334,11 +475,16 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "fog_density": (light.fog_density_exp(3000.0) * 10.0).clamp(0.000_05, 0.05),
             "fog_color": light.fog_color,
             "clouds": light.clouds,
+            "cloud_base_m": crate::clouds::CLOUD_BASE,
             "exposure": light.exposure,
             "contrast": light.contrast,
             "saturation": light.saturation,
             "bloom": light.bloom * 4.0,
             "vignette": light.vignette,
+            "ev": ev,
+            "haze_density": if light.haze_enabled { haze.density } else { 0.0 },
+            "haze_color": haze.color,
+            "lut": "Look/grade_lut.png",
         },
         // instances are placed as one HISM actor per model variant and world cell of this size
         "cell_m": super::tiles::CELL_M,
@@ -346,6 +492,9 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     });
     ctx.write_json("Data/worldbuilder_unreal.json", &doc)?;
     ctx.write("import_world.py", SCRIPT.as_bytes())?;
+    for (path, text) in PLUGIN {
+        ctx.write(&format!("Plugins/SkyfoldStudio/{path}"), text.as_bytes())?;
+    }
     ctx.write("CREDITS.md", core::credits(s, &layers).as_bytes())?;
     let (loc, scale, comps) = landscape_values(&t);
     let counts = core::counts(s, &models, &inst);
@@ -386,11 +535,34 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
 
 const README: &str = r#"# {name} — Unreal Engine 5 export
 
-Exported from Skyfold Studio for **Unreal Engine 5.4 or newer**. The import script is written
-against Unreal's documented Python API but was not run in Unreal when this export was made: it
-works defensively and logs every step (Output Log, filter `WorldBuilder`).
+Exported from Skyfold Studio for **Unreal Engine 5.4 or newer** (tested with 5.8): the world,
+its nature, props, water, sky and look, its weather and zones, its dungeons and an explorer that
+walks it as Skyfold Studio's walk mode does. Everything logs to the Output Log (filter
+`WorldBuilder` and `SkyfoldStudio`).
 
-## 1. Run the import script
+## 1. Add the Skyfold Studio plugin
+
+Copy `Plugins/SkyfoldStudio` into your project's `Plugins` folder and open the project: Unreal
+offers to build it (it's source, like any code plugin: Xcode on macOS, Visual Studio on Windows).
+It creates the **Landscape** for the import script (Unreal's Python can't) and brings the world's
+runtime:
+
+- **SkyfoldAtmosphere**: the zone under the camera sets the weather (a zone's own weather, else
+  the painted biome's), its lighting mood and haze, eased in as Skyfold Studio does: rain and
+  snow round the camera, weather fog, the sun dimmed and the eye opened under storm cloud,
+  lightning, wind, wet ground; the zone's play rules (flying, mounts, rested area, temperature)
+  and entry banner for game code (`OnZoneChanged`);
+- **SkyfoldGameMode** / **SkyfoldCharacter** (set on the level: press Play): Skyfold Studio's walk
+  mode — WASD, mouse look, Shift sprint, Alt walk, C crouch, Space jump, F fly, R ride, swimming
+  with breath in the water volumes, the zone banner (`bEnforceZoneRules` keeps the zones' flying
+  and riding rules);
+- **SkyfoldPortal**: the ways into the dungeons and back (OpenLevel, arriving where the editor's
+  way in does); **SkyfoldFire**: the flame flipbooks with their flickering lights.
+
+Without the plugin the script still builds everything static and tells you what's missing (the
+landscape is then a manual import: section 3).
+
+## 2. Run the import script
 
 1. *Edit ▸ Plugins*: enable **Python Editor Script Plugin** (and keep **Interchange** / glTF
    import on, the default). Restart the editor.
@@ -399,6 +571,8 @@ works defensively and logs every step (Output Log, filter `WorldBuilder`).
 
 It imports everything into `/Game/WorldBuilder/{world}/` and:
 
+- creates the **Landscape** (heights, the world's ground layers weight-blended with their
+  photoscan textures at their real tiling, the cave mouths cut open with the visibility layer);
 - measures how the glTF importer maps axes (`Data/axis_probe.glb`) and converts every position
   and rotation accordingly;
 - imports every model GLB and places all trees, plants, rocks and props as **hierarchical
@@ -410,37 +584,43 @@ It imports everything into `/Game/WorldBuilder/{world}/` and:
   centimetres) as complex collision used as simple, trunk prisms for trees, none for plants;
   a **PhysicalMaterial** per footstep surface; lightmap UVs on for buildings;
 - builds **SkyAtmosphere**, the **sun** (DirectionalLight, atmosphere sun light) at the world's
-  time of day, a real-time **SkyLight**, **ExponentialHeightFog** matching the world's haze,
-  **VolumetricCloud** when the world has clouds and an unbound **PostProcessVolume** with the
-  world's grade (exposure, contrast, saturation, bloom, vignette);
-- creates `M_WB_Water` and places the ocean plane at sea level and the lake / river / waterfall
-  surfaces with per-body instances, and **water volumes** (PhysicsVolumes with Water Volume on:
+  time of day, a real-time **SkyLight**, **ExponentialHeightFog** with the world's haze (as the
+  Godot and Unity exports calibrate it), **VolumetricCloud** when the world has clouds and an
+  unbound **PostProcessVolume** with the world's look: manual exposure at the editor's, bloom,
+  vignette and its colour grade (saturation, contrast, split toning, lift, foliage hue,
+  vibrance) as a colour grading LUT (`Look/grade_lut.png`); the **SkyfoldAtmosphere** over them,
+  the **fires** and the **SkyfoldGameMode** (with the plugin);
+- creates `M_WB_Water` (Single Layer Water with each style's optics from Skyfold Studio: its
+  scattering and absorption, so the bed shows through the shallows and deep water takes the depth
+  colour) and places the ocean plane at sea level and the lake / river / waterfall surfaces with
+  per-body instances, and **water volumes** (PhysicsVolumes with Water Volume on:
   characters swim) for lakes, river stretches and the ocean; places the **roads** (no collision)
   the **dungeons** (a level each, `Dungeons/L_<name>`, made next to your level once your level
   is saved). Each dungeon level has:
   - its architecture with complex collision;
   - its lights in lumens (hazy ones scatter in the volumetric fog);
   - its objects, its fog and fill light;
-  - a PlayerStart, and a TriggerBox back to your level.
+  - a PlayerStart, and a portal back to your level.
 
-  Your level gets the portal sheets and a TriggerBox at each way in. The triggers are tagged
-  `wb_portal`, `wb_level=<level>` and `wb_arrive=…`; travel is your game's (OpenLevel the
-  `wb_level` tag's level on overlap). Also `Dungeons/<folder>/dungeon.json` for each dungeon's
-  lights, mood, rooms and doorways;
+  Your level gets the portal sheets and a portal at each way in: with the plugin SkyfoldPortals
+  that open the level and put the explorer where the editor's way in does, else TriggerBoxes for
+  your game's travel. Both are tagged `wb_portal`, `wb_level=<level>` and `wb_arrive=…`. Also
+  `Dungeons/<folder>/dungeon.json` for each dungeon's lights, mood, rooms and doorways;
   and the **caves** (rock with complex collision, crystal point lights; caves, mines,
-  sinkholes, rock arches as static meshes — after the landscape is in, open its cave mouths with
-  Landscape mode › Sculpt › Visibility over the white cells of `Caves/holes.png` (one pixel per
-  landscape quad, north-west corner first) and give the landscape material an opacity mask);
+  sinkholes, rock arches as static meshes — the landscape's cave mouths are cut open with the
+  plugin; by hand, paint Landscape mode › Sculpt › Visibility over the white cells of
+  `Caves/holes.png` (one pixel per landscape quad, north-west corner first));
 - spawns a **PlayerStart** and **TargetPoint** markers (POIs, NPCs, spawn regions, resource
   nodes, fishing spots; details in the actor tags and `Data/gameplay.json`);
 - places a **NavMeshBoundsVolume** over the world: Unreal builds its navmesh from the collision
   (*Build ▸ Build Paths*; for big worlds turn on World Partitioned navmesh in the project's
   navigation settings). `Data/Navmesh/` has Skyfold Studio's own navmesh for game servers;
 - creates the landscape material `M_WB_Landscape` (weight-blended layers with the world's
-  photoscan textures at their real tiling, roughness and AO from their mask maps) and writes
-  `Landscape/heightmap_ue.png` plus `Landscape/weights_ue/*.png` oriented for this editor's axes.
+  photoscan textures at their real tiling, roughness and AO from their mask maps, the cave mouths'
+  opacity mask) and writes `Landscape/heightmap_ue.png` plus `Landscape/weights_ue/*.png`
+  oriented for this editor's axes.
 
-## 2. Import the landscape (manual)
+## 3. The landscape by hand (without the plugin, or World Partition tiles)
 
 Landscape mode (Shift+2) ▸ **Manage ▸ New ▸ Import from File**:
 
@@ -478,6 +658,10 @@ and `Z = 100 × min + 32768 × ScaleZ / 128`.
 first), weightmaps and layer textures; `Models/` one GLB per asset (variant nodes `<asset>_vN`
 with LOD children `<asset>_vN_LODk`); `Water/`, `Roads/`; `Data/worldbuilder_unreal.json`
 (everything the script reads), `gameplay.json` (the documented server format,
-`docs/server-data.md`), `lighting.json`, `Navmesh/`; `Textures/` the model textures, written once
-and referred to by the GLBs; `manifest.json`; `CREDITS.md`.
+`docs/server-data.md`), `lighting.json`, `atmosphere.json` with `zones.r8` / `biomes.r8` (the
+weather runtime's data: weathers, zones with their weather, mood and play rules, biomes; the zone
+and biome maps, one byte per terrain vertex, north-west corner first), `Navmesh/`; `Look/` the
+colour grading LUT; `Flames/` the flame flipbooks; `Plugins/SkyfoldStudio` the plugin (source);
+`Textures/` the model textures, written once and referred to by the GLBs; `manifest.json`;
+`CREDITS.md`.
 "#;

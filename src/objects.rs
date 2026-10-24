@@ -9,9 +9,13 @@ use bevy::asset::uuid_handle;
 use bevy::camera::visibility::VisibilityRange;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+};
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
@@ -305,7 +309,7 @@ fn prop_entries() -> Vec<LibraryEntry> {
     // buildings and village props, and the style packs
     let mut out: Vec<LibraryEntry> = model_libraries(&dir)
         .iter()
-        .flat_map(|l| model_library(&dir, l))
+        .flat_map(model_library)
         .collect();
     out.extend(food.into_iter().map(|it| {
         let (w, h, d) = (
@@ -352,14 +356,46 @@ pub struct ModelLibrary {
     pub pack: String,
     /// the marketplace pack its models are sold in (`crate::market`)
     pub pack_id: String,
+    /// where its `models.json` is on disk: `<dir>/<folder>`, or a bought pack's install
+    /// (`crate::paths::packs_dir()`, read through the same `models/<folder>` asset paths)
+    pub dir: std::path::PathBuf,
+    /// a shipped preview of a paid style pack (`PREVIEWS`): every model listed with its picture,
+    /// but only the free samples' files are there
+    pub preview: bool,
+}
+
+/// Where the shipped app keeps previews of paid style packs it doesn't include:
+/// `models/stylepack_previews/<style>/` holds the pack's whole `models.json`, a picture of every
+/// model (`thumbs/<id>.png`, the thumbnail studio's own, `crate::thumbs`) and the files of its
+/// free samples and hero only (`tools/release/package_macos.py` makes it). It is listed only
+/// while neither the bundle nor a bought install (`crate::market::install`) has that style's
+/// library, so buying the pack replaces it whole; the bundle's `models/stylepacks/` paths, which
+/// the towns, set pieces and dungeons check for the pack, stay absent.
+pub const PREVIEWS: &str = "stylepack_previews";
+
+/// The shipped picture of a preview library's model (`PREVIEWS`), as an assets path.
+pub fn preview_thumb(e: &LibraryEntry) -> Option<String> {
+    let rest = e.import_path.as_deref()?.strip_prefix("models/")?;
+    let rest = rest.strip_prefix(PREVIEWS)?.strip_prefix('/')?;
+    let style = rest.split('/').next().filter(|s| !s.is_empty())?;
+    let (_, local) = e.id.split_once(':')?;
+    Some(format!("models/{PREVIEWS}/{style}/thumbs/{local}.png"))
 }
 
 /// The bundled model libraries under `dir` (`assets/models`): Poly Haven (`ph:`) and Skyborn
 /// (`sb:`), both photoreal, then every style pack `stylepacks/<pack>/models.json` (ids
 /// `<pack>:<id>`; the hand-painted pack is `hp:`), in name order. A manifest may name its
 /// `"style"` and marketplace `"pack"` id; without `"style"` its `"pack"` is the style (the first
-/// manifests) and the pack id comes from `default_pack_id`.
+/// manifests) and the pack id comes from `default_pack_id`. Style packs bought and installed
+/// (`crate::market::install`) are listed too when the bundle lacks them.
 pub fn model_libraries(dir: &std::path::Path) -> Vec<ModelLibrary> {
+    model_libraries_in(dir, &crate::paths::packs_dir().join("models"))
+}
+
+pub(crate) fn model_libraries_in(
+    dir: &std::path::Path,
+    bought: &std::path::Path,
+) -> Vec<ModelLibrary> {
     #[derive(Deserialize)]
     struct Head {
         #[serde(default)]
@@ -367,8 +403,8 @@ pub fn model_libraries(dir: &std::path::Path) -> Vec<ModelLibrary> {
         #[serde(default)]
         pack: Option<String>,
     }
-    let lib = |folder: &str, prefix: &str, style: &str| {
-        let head = std::fs::read_to_string(dir.join(folder).join("models.json"))
+    let lib = |root: &std::path::Path, folder: &str, prefix: &str, style: &str, preview: bool| {
+        let head = std::fs::read_to_string(root.join(folder).join("models.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<Head>(&s).ok());
         let (style, pack_id) = match head {
@@ -383,23 +419,46 @@ pub fn model_libraries(dir: &std::path::Path) -> Vec<ModelLibrary> {
             prefix: prefix.into(),
             pack: style,
             pack_id,
+            dir: root.join(folder),
+            preview,
         }
     };
     let mut out = vec![
-        lib("polyhaven", "ph", PHOTOREAL),
-        lib("skyborn", "sb", PHOTOREAL),
+        lib(dir, "polyhaven", "ph", PHOTOREAL, false),
+        lib(dir, "skyborn", "sb", PHOTOREAL, false),
     ];
-    let mut packs: Vec<String> = std::fs::read_dir(dir.join("stylepacks"))
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().join("models.json").is_file())
-                .filter_map(|e| e.file_name().to_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let styles_in = |root: &std::path::Path, base: &str| -> Vec<String> {
+        std::fs::read_dir(root.join(base))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().join("models.json").is_file())
+                    .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // (style, where, base folder): the bundle's first, then bought ones it doesn't have, then
+    // shipped previews of the rest
+    let mut packs: Vec<(String, &std::path::Path, &str)> = styles_in(dir, "stylepacks")
+        .into_iter()
+        .map(|p| (p, dir, "stylepacks"))
+        .collect();
+    for (root, base) in [(bought, "stylepacks"), (dir, PREVIEWS)] {
+        for p in styles_in(root, base) {
+            if !packs.iter().any(|(q, ..)| *q == p) {
+                packs.push((p, root, base));
+            }
+        }
+    }
     packs.sort();
-    for p in packs {
-        out.push(lib(&format!("stylepacks/{p}"), pack_prefix(&p), &p));
+    for (p, root, base) in packs {
+        out.push(lib(
+            root,
+            &format!("{base}/{p}"),
+            pack_prefix(&p),
+            &p,
+            base == PREVIEWS,
+        ));
     }
     out
 }
@@ -414,7 +473,11 @@ pub fn pack_prefix(pack: &str) -> &str {
 
 /// The marketplace pack a bundled library's models belong to when its manifest doesn't say.
 fn default_pack_id(folder: &str) -> String {
-    match folder {
+    // (a shipped preview is of the pack its full library is sold in)
+    let full = folder
+        .strip_prefix(PREVIEWS)
+        .map(|style| format!("stylepacks{style}"));
+    match full.as_deref().unwrap_or(folder) {
         "polyhaven" => "polyhaven_scans".into(),
         "skyborn" => "skyborn_village".into(),
         "stylepacks/handpainted" => "skyfold_studio".into(),
@@ -445,9 +508,9 @@ pub fn pack_label(pack: &str) -> String {
     }
 }
 
-/// A bundled model library, `models/<folder>/models.json` (one schema for all of them): its
-/// models become library entries `<prefix>:<id>` of its style pack.
-fn model_library(dir: &std::path::Path, lib: &ModelLibrary) -> Vec<LibraryEntry> {
+/// A model library, `models/<folder>/models.json` (one schema for all of them; bundled or a
+/// bought pack's install): its models become library entries `<prefix>:<id>` of its style pack.
+pub fn model_library(lib: &ModelLibrary) -> Vec<LibraryEntry> {
     let (folder, prefix) = (lib.folder.as_str(), lib.prefix.as_str());
     #[derive(Deserialize)]
     struct Model {
@@ -476,7 +539,7 @@ fn model_library(dir: &std::path::Path, lib: &ModelLibrary) -> Vec<LibraryEntry>
     struct Models {
         models: Vec<Model>,
     }
-    let models = std::fs::read_to_string(dir.join(folder).join("models.json"))
+    let models = std::fs::read_to_string(lib.dir.join("models.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<Models>(&s).ok())
         .map(|d| d.models)
@@ -628,16 +691,26 @@ pub const FOLIAGE_WIND: Handle<ShaderBuffer> = uuid_handle!("6f1c3a52-9d0e-4b7a-
 pub struct FoliageExt {
     #[storage(100, read_only)]
     pub wind: Handle<ShaderBuffer>,
+    /// The shade under the trees (`nature::shade`), shared like the wind.
+    #[storage(120, read_only)]
+    pub canopy: Handle<ShaderBuffer>,
 }
 
 impl Default for FoliageExt {
     fn default() -> Self {
-        Self { wind: FOLIAGE_WIND }
+        Self {
+            wind: FOLIAGE_WIND,
+            canopy: crate::nature::shade::CANOPY_SHADE,
+        }
     }
 }
 
 impl MaterialExtension for FoliageExt {
     fn vertex_shader() -> ShaderRef {
+        "shaders/foliage.wesl".into()
+    }
+    /// Standard PBR, with the sky light the crowns above hold back.
+    fn fragment_shader() -> ShaderRef {
         "shaders/foliage.wesl".into()
     }
     /// The depth prepass and shadows use the same wind (alpha-tested leaves then shade once per
@@ -648,6 +721,54 @@ impl MaterialExtension for FoliageExt {
     fn prepass_fragment_shader() -> ShaderRef {
         "shaders/forest_prepass.wesl".into()
     }
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        crate::nature::shade::shader_def(descriptor);
+        equal_depth_main_pass(descriptor, key.mesh_key);
+        Ok(())
+    }
+}
+
+/// Alpha-tested foliage after a depth prepass: the prepass already kept exactly the leaf pixels
+/// in front (same vertex wind, same cut-out), so the main pass draws only where its depth equals
+/// the prepass's and needs no discard of its own. A shader that may discard turns off the GPU's
+/// hidden-surface removal (Apple's tile renderers shade every overlapping leaf); without it each
+/// pixel is shaded once. Identical pixels; ~9 % faster in a dense forest (`WB_NOEQUALDEPTH=1`
+/// turns it off, for comparisons).
+pub fn equal_depth_main_pass(
+    descriptor: &mut RenderPipelineDescriptor,
+    mesh_key: bevy::pbr::MeshPipelineKey,
+) {
+    use bevy::pbr::MeshPipelineKey;
+    use bevy::render::render_resource::CompareFunction;
+    use bevy::shader::ShaderDefVal;
+    if std::env::var("WB_NOEQUALDEPTH").is_ok() {
+        return;
+    }
+    let Some(frag) = descriptor.fragment.as_mut() else {
+        return;
+    };
+    let is_prepass = frag
+        .shader_defs
+        .iter()
+        .any(|d| matches!(d, ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE"));
+    if is_prepass
+        || !mesh_key.contains(MeshPipelineKey::DEPTH_PREPASS)
+        || !mesh_key.contains(MeshPipelineKey::MAY_DISCARD)
+    {
+        return;
+    }
+    let Some(ds) = descriptor.depth_stencil.as_mut() else {
+        return;
+    };
+    frag.shader_defs
+        .retain(|d| !matches!(d, ShaderDefVal::Bool(n, _) if n == "MAY_DISCARD"));
+    ds.depth_compare = Some(CompareFunction::Equal);
+    ds.depth_write_enabled = Some(false);
 }
 
 #[derive(Resource)]
@@ -1856,6 +1977,8 @@ fn spawn_object(
 #[derive(Resource, Clone, Debug, PartialEq, Serialize)]
 pub struct NatureAmounts {
     pub grass: f32,
+    /// Blade length multiplier world-wide (1 = as grown; 0.5 short turf … 2.5 tall meadow).
+    pub grass_height: f32,
     pub plants: f32,
     /// World-wide flora family amounts. Older worlds use their saved `plants` value for each.
     pub flowers: f32,
@@ -1874,6 +1997,7 @@ impl Default for NatureAmounts {
     fn default() -> Self {
         Self {
             grass: 1.0,
+            grass_height: 1.0,
             plants: 1.0,
             flowers: 1.0,
             mushrooms: 1.0,
@@ -1902,6 +2026,7 @@ impl<'de> Deserialize<'de> for NatureAmounts {
         #[serde(default)]
         struct Saved {
             grass: Option<f32>,
+            grass_height: Option<f32>,
             plants: Option<f32>,
             flowers: Option<f32>,
             mushrooms: Option<f32>,
@@ -1916,6 +2041,7 @@ impl<'de> Deserialize<'de> for NatureAmounts {
         let plants = saved.plants.unwrap_or(defaults.plants);
         Ok(Self {
             grass: saved.grass.unwrap_or(defaults.grass),
+            grass_height: saved.grass_height.unwrap_or(defaults.grass_height),
             plants,
             // Worlds saved before the separate flora dials retain their exact plants value,
             // including zero, for every family.
@@ -2342,6 +2468,101 @@ fn follow_ground(
 mod tests {
     use super::*;
 
+    /// A shipped preview of a paid pack (`PREVIEWS`) is listed only until the pack itself is
+    /// there (bundled or bought), and its entries point at the shipped pictures.
+    #[test]
+    fn a_shipped_preview_gives_way_to_the_full_pack() {
+        let root = std::env::temp_dir().join(format!("wb-previews-{}", fastrand::u64(..)));
+        let (bundle, bought) = (root.join("bundle/models"), root.join("packs/models"));
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("models.json"), body).unwrap();
+        };
+        let model = |id: &str, gltf: &str| {
+            format!(
+                r#"{{"id":"{id}","name":"{id}","category":"props","size_m":[1,1,1],"gltf":"{gltf}"}}"#
+            )
+        };
+        write(
+            &bundle.join(PREVIEWS).join("handpainted"),
+            &format!(
+                r#"{{"style":"handpainted","pack":"skyfold_studio","preview":true,"models":[{},{}]}}"#,
+                model("well", "well/well.gltf"),
+                model("inn", "inn/inn.gltf")
+            ),
+        );
+        let hp = |libs: &[ModelLibrary]| {
+            let v: Vec<ModelLibrary> = libs.iter().filter(|l| l.prefix == "hp").cloned().collect();
+            assert_eq!(v.len(), 1, "one hand-painted library: {v:?}");
+            v.into_iter().next().unwrap()
+        };
+        // not bought: the preview, under its own folder (not models/stylepacks/, which the town
+        // and set-piece builders take as "the pack is here")
+        let lib = hp(&model_libraries_in(&bundle, &bought));
+        assert!(lib.preview);
+        assert_eq!(
+            (lib.folder.as_str(), lib.pack.as_str(), lib.pack_id.as_str()),
+            (
+                "stylepack_previews/handpainted",
+                "handpainted",
+                "skyfold_studio"
+            )
+        );
+        let entries = model_library(&lib);
+        assert_eq!(entries.len(), 2, "every model is listed");
+        let well = entries.iter().find(|e| e.id == "hp:well").unwrap();
+        assert_eq!(
+            well.import_path.as_deref(),
+            Some("models/stylepack_previews/handpainted/well/well.gltf")
+        );
+        assert_eq!(
+            preview_thumb(well).as_deref(),
+            Some("models/stylepack_previews/handpainted/thumbs/well.png")
+        );
+        assert_eq!(well.pack, "handpainted");
+        // (a manifest without its own pack id is still the pack its full library is sold in)
+        assert_eq!(
+            default_pack_id("stylepack_previews/handpainted"),
+            "skyfold_studio"
+        );
+        // bought: the installed full library replaces the preview whole
+        write(
+            &bought.join("stylepacks/handpainted"),
+            &format!(
+                r#"{{"pack":"handpainted","models":[{},{},{}]}}"#,
+                model("well", "well/well.gltf"),
+                model("inn", "inn/inn.gltf"),
+                model("bank", "bank/bank.gltf")
+            ),
+        );
+        let lib = hp(&model_libraries_in(&bundle, &bought));
+        assert!(!lib.preview);
+        assert_eq!(lib.dir, bought.join("stylepacks/handpainted"));
+        let entries = model_library(&lib);
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|e| preview_thumb(e).is_none()));
+        assert_eq!(
+            entries[0].import_path.as_deref(),
+            Some("models/stylepacks/handpainted/well/well.gltf")
+        );
+        // a bundle with the full pack (the developer checkout) wins over both
+        write(
+            &bundle.join("stylepacks/handpainted"),
+            &format!(
+                r#"{{"pack":"handpainted","models":[{}]}}"#,
+                model("well", "well/well.gltf")
+            ),
+        );
+        let lib = hp(&model_libraries_in(&bundle, &bought));
+        assert!(!lib.preview && lib.dir == bundle.join("stylepacks/handpainted"));
+        // pictures only for preview entries
+        let mut e = model_library(&lib).remove(0);
+        assert!(preview_thumb(&e).is_none());
+        e.import_path = None;
+        assert!(preview_thumb(&e).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn style_packs_load_with_their_pack() {
         let dir = std::path::PathBuf::from(crate::assets_path()).join("models");
@@ -2368,7 +2589,7 @@ mod tests {
                 ("stylepacks/handpainted", "hp")
             );
             assert_eq!(hp.pack_id, "skyfold_studio");
-            let entries = model_library(&dir, hp);
+            let entries = model_library(hp);
             assert!(entries.len() >= 70, "{} hand-painted models", entries.len());
             assert!(
                 entries
@@ -2409,7 +2630,7 @@ mod tests {
                 }
             }
         }
-        let ph = model_library(&dir, &libs[0]);
+        let ph = model_library(&libs[0]);
         assert!(
             !ph.is_empty()
                 && ph

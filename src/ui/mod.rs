@@ -6,6 +6,7 @@ pub mod icons;
 pub mod palette;
 mod panels;
 pub mod pictures;
+pub mod search;
 pub mod shell;
 pub mod theme;
 pub mod tips;
@@ -76,6 +77,11 @@ pub enum UiAction {
     ImportFiles {
         files: Vec<std::path::PathBuf>,
         from: String,
+    },
+    /// a bought asset pack was installed (`crate::market::install`): its models join the library
+    PackInstalled {
+        pack: String,
+        title: String,
     },
     ToggleWalk,
     ErodeWorld,
@@ -211,7 +217,7 @@ impl Plugin for UiPlugin {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn editor_ui(
+pub(crate) fn editor_ui(
     // native file dialogs (exports, imports) must open on the main thread on macOS
     _main: bevy::ecs::system::NonSendMarker,
     mut contexts: EguiContexts,
@@ -261,9 +267,16 @@ fn editor_ui(
     shell::tab_key(&ctx);
     shell::top(&ctx, &mut s, &mut out, screen);
     shell::rail(&ctx, &mut s, &mut out, screen);
-    panels::left_panel(&ctx, &mut s, &mut out, &tex, screen);
-    let inspector = panels::right_panel(&ctx, &mut s, &mut out, &tex, screen);
-    panels::dock(&ctx, &mut s, &tex, screen, inspector);
+    search::poll(&ctx, &mut s);
+    // (the Characters lab draws one big window of its own: crate::characters::view)
+    let inspector = if s.ed.tab == crate::editor::Tab::Characters {
+        false
+    } else {
+        panels::left_panel(&ctx, &mut s, &mut out, &tex, screen);
+        let inspector = panels::right_panel(&ctx, &mut s, &mut out, &tex, screen);
+        panels::dock(&ctx, &mut s, &tex, screen, inspector);
+        inspector
+    };
     panels::poll(&mut s);
     let _ = &diagnostics;
     crate::caves::ui::inside_bar(&ctx, &mut s, screen);
@@ -271,7 +284,9 @@ fn editor_ui(
     crate::dungeons::ui::guide_bar(&ctx, &mut s);
     if let Ok((cam, cam_t)) = camera.single() {
         zone_labels::draw(&ctx, &s, cam, cam_t, inspector);
-        shell::status(&ctx, &s, cam, cam_t, screen);
+        if s.ed.tab != crate::editor::Tab::Characters {
+            shell::status(&ctx, &s, cam, cam_t, screen);
+        }
         coast_preview(&ctx, &s, cam, cam_t);
     }
     brush_tooltip(&ctx, &s);

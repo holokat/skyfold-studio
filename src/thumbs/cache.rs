@@ -153,6 +153,24 @@ pub fn stamp(
     ]))
 }
 
+/// The picture a preview library ships for `s` (`crate::objects::PREVIEWS`: a paid pack's model
+/// this app has no files for) and its key. It is the studio's own thumbnail, made when the app
+/// was packaged, so it is loaded like a cached one and never shot (or cached) here.
+pub fn shipped(s: &Subject, lib: Option<&Library>) -> Option<(PathBuf, u64)> {
+    let Subject::Asset(id) = s else { return None };
+    let file = crate::asset_file(&crate::objects::preview_thumb(lib?.get(id)?)?);
+    let source = file_stamp(&file);
+    (!source.is_empty()).then(|| {
+        let stamp = hash(&[
+            s.key().as_bytes(),
+            b"shipped",
+            &source,
+            &VERSION.to_le_bytes(),
+        ]);
+        (file, stamp)
+    })
+}
+
 /// The file name prefix of a subject (its key with anything unsafe replaced).
 fn prefix(s: &Subject) -> String {
     s.key()
@@ -293,6 +311,47 @@ pub fn image(size: UVec2, rgba: Vec<u8>) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview set as the app ships it (`package_macos.py --previews-only DIR`):
+    /// `SKYFOLD_PREVIEW_SET=DIR cargo test a_shipped_preview_set -- --ignored`
+    #[test]
+    #[ignore]
+    fn a_shipped_preview_set_has_every_picture_and_only_the_samples() {
+        let dir = std::path::PathBuf::from(std::env::var("SKYFOLD_PREVIEW_SET").unwrap());
+        let models = dir.join("models");
+        let libs = crate::objects::model_libraries_in(&models, &dir.join("no-packs"));
+        let hp = libs
+            .iter()
+            .find(|l| l.prefix == "hp")
+            .expect("the preview library");
+        assert!(hp.preview && hp.pack_id == "skyfold_studio");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(hp.dir.join("models.json")).unwrap())
+                .unwrap();
+        let samples: Vec<String> = doc["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| format!("hp:{}", s.as_str().unwrap()))
+            .collect();
+        let entries = crate::objects::model_library(hp);
+        assert!(entries.len() >= 500, "{} models", entries.len());
+        let (mut with_files, mut pictures) = (0, 0);
+        for e in &entries {
+            let thumb = dir.join(crate::objects::preview_thumb(e).expect("a preview entry"));
+            assert!(
+                load(&thumb, UVec2::splat(192)).is_some(),
+                "{}: its picture",
+                e.id
+            );
+            pictures += 1;
+            let model = dir.join(e.import_path.as_ref().unwrap());
+            assert_eq!(model.is_file(), samples.contains(&e.id), "{}: files", e.id);
+            with_files += model.is_file() as usize;
+        }
+        assert_eq!(with_files, 11, "the hero and 10 free samples");
+        eprintln!("{pictures} pictures, {with_files} models with files");
+    }
 
     #[test]
     fn saving_replaces_older_versions() {

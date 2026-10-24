@@ -376,8 +376,13 @@ pub fn section_box<R>(
 
 fn fold_header(ui: &mut Ui, id: Id, title: &str, note: &str) -> bool {
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    if !open && super::search::wants_open(ui, title) {
+        open = true;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click());
+    super::search::mark(ui, rect, title);
     if resp.clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
@@ -597,6 +602,7 @@ fn slider_row_impl(
     let head_h = look.label_size + 4.0;
     let h = head_h + look.gap + 16.0;
     let (rect, row) = ui.allocate_exact_size(vec2(look.width, h), Sense::hover());
+    super::search::mark(ui, rect, label);
     let track_rect = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 16.0), rect.max);
     let mut v = *value as f64;
     let track = track_at(
@@ -961,6 +967,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>) -> Respo
         .as_ref()
         .map(|g| g.text().to_owned())
         .unwrap_or_default();
+    super::search::mark(ui, rect, &text);
     resp.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, &text));
     if ui.is_rect_visible(rect) {
         let t = ui.ctx().animate_bool_responsive(resp.id, *on);
@@ -1794,15 +1801,16 @@ pub fn dropdown_row<R>(
     selected: impl Into<WidgetText>,
     menu: impl FnOnce(&mut Ui) -> R,
 ) -> Response {
-    ui.horizontal(|ui| {
+    let r = ui.horizontal(|ui| {
         ui.label(RichText::new(label).color(TEXT_DIM));
         egui::ComboBox::from_id_salt(id_salt)
             .width(ui.available_width())
             .selected_text(selected)
             .dropdown_ui(ui, menu)
             .response
-    })
-    .inner
+    });
+    super::search::mark(ui, r.response.rect, label);
+    r.inner
 }
 
 // ------------------------------------------------------------------ chips
@@ -1962,6 +1970,7 @@ pub fn list_row(
 pub fn stat_row(ui: &mut Ui, label: &str, value: &str) -> Response {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+    super::search::mark(ui, rect, label);
     let p = ui.painter();
     let vg = p.layout_no_wrap(value.to_owned(), FontId::new(12.0, mono()), TEXT);
     let lg = one_line(
@@ -2049,6 +2058,7 @@ fn button_icon_impl(
         + icon_w;
     let w = width.unwrap_or(natural);
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+    super::search::mark(ui, rect, text);
     if ui.is_rect_visible(rect) {
         let down = resp.is_pointer_button_down_on();
         let fill = match (kind, resp.hovered(), down) {

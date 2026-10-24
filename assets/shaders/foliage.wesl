@@ -6,15 +6,21 @@
 //  2. branches sway on top of it, weighted by the hierarchy. The sway phase only changes over
 //     metres, so a branch and every leaf on it move together as one piece — no per-leaf motion.
 // Costs a couple of noise taps and a handful of sines per vertex (foliage_sway.wesl, shared with
-// the prepass). The fragment is standard PBR.
+// the prepass). The fragment is standard PBR, with the sky light the crowns around hold back
+// (canopy_shade.wesl): lower and inner leaves, trunks and plants under the trees darken.
 
 import bevy_pbr::render::{
     mesh_functions,
-    forward_io::{Vertex, VertexOutput, decompress_vertex},
+    forward_io::{Vertex, VertexOutput, FragmentOutput, decompress_vertex},
     view_transformations::position_world_to_clip,
     mesh_view_bindings::globals,
+    pbr_fragment::pbr_input_from_standard_material,
+    pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 };
+@if(VISIBILITY_RANGE_DITHER)
+import bevy_pbr::render::pbr_functions::visibility_range_dither;
 import super::foliage_sway::foliage_sway;
+import super::canopy_shade::canopy_sky;
 
 struct FoliageParams {
     // xy: wind direction (world xz), z: wind speed (m/s), w: gustiness 0..1
@@ -50,5 +56,24 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
 @if(VISIBILITY_RANGE_DITHER)
     out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
         vertex_in.instance_index, world_from_local[3]);
+    return out;
+}
+
+@fragment
+fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+@if(VISIBILITY_RANGE_DITHER)
+    visibility_range_dither(in.position, in.visibility_range_dither);
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color,
+    );
+    let sky = canopy_sky(in.world_position.xyz);
+    pbr_input.diffuse_occlusion *= sky;
+    pbr_input.specular_occlusion *= sky;
+    var out: FragmentOutput;
+    out.color = apply_pbr_lighting(pbr_input);
+    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

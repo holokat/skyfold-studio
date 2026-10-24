@@ -45,7 +45,7 @@ fn listings(_world: &mut World, args: Value) -> Result<Vec<McpContent>, String> 
                     json!({
                         "id": l.id, "title": l.title, "kind": if l.kind.is_empty() { "asset" } else { l.kind.as_str() }, "category": l.category,
                         "description": l.description, "price": if l.is_free() { Value::Null } else { json!({ "label": l.price_label(), "amount_minor": l.price_cents, "currency": l.currency }) },
-                        "creator": l.by(), "rating": if l.rating_count > 0 { json!({ "average": l.rating_average, "count": l.rating_count }) } else { Value::Null },
+                        "creator": l.by(), "official": l.official(), "rating": if l.rating_count > 0 { json!({ "average": l.rating_average, "count": l.rating_count }) } else { Value::Null },
                         "page": l.page_url(&base),
                     })
                 })

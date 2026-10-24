@@ -157,6 +157,7 @@ mod tests {
                 cloud_cover: Handle::default(),
                 rule0: Handle::default(),
                 rule1: Handle::default(),
+                canopy: crate::nature::shade::CANOPY_SHADE,
                 reference: false,
                 per_pixel_rules: false,
             },

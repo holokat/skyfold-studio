@@ -14,7 +14,7 @@ pub mod assets;
 pub mod auto;
 pub(crate) mod mcp;
 pub mod plants;
-mod render;
+pub mod render;
 pub mod ui;
 
 use std::sync::Arc;

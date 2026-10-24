@@ -1197,17 +1197,18 @@ fn blossom_texture(pink: bool, art: crate::art_style::ArtStyle) -> Image {
         .expect("known blossom generator")
         .into_raw();
     let lut = srgb_to_lin_lut();
-    let mut out = Image::new(
+    // (with its mip chain: `Image::new` checks the data is the base level only)
+    let mut out = Image::new_uninit(
         Extent3d {
             width: N,
             height: N,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        cutout_mips(&base, N, &lut),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
+    out.data = Some(cutout_mips(&base, N, &lut));
     out.texture_descriptor.mip_level_count = N.trailing_zeros() + 1;
     out.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         mag_filter: ImageFilterMode::Linear,
@@ -1227,17 +1228,18 @@ fn ginkgo_texture(art: crate::art_style::ArtStyle) -> Image {
         .expect("known ginkgo generator")
         .into_raw();
     let lut = srgb_to_lin_lut();
-    let mut out = Image::new(
+    // (with its mip chain: `Image::new` checks the data is the base level only)
+    let mut out = Image::new_uninit(
         Extent3d {
             width: N,
             height: N,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        cutout_mips(&base, N, &lut),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
+    out.data = Some(cutout_mips(&base, N, &lut));
     out.texture_descriptor.mip_level_count = N.trailing_zeros() + 1;
     out.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         mag_filter: ImageFilterMode::Linear,

@@ -33,10 +33,12 @@ pub enum Tab {
     Dungeons,
     DungeonLook,
     DungeonLights,
+    /// Labs: import, rig and animate characters (`crate::characters`)
+    Characters,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 19] = [
+    pub const ALL: [Tab; 20] = [
         Tab::Land,
         Tab::Sculpt,
         Tab::Paint,
@@ -56,6 +58,7 @@ impl Tab {
         Tab::Dungeons,
         Tab::DungeonLook,
         Tab::DungeonLights,
+        Tab::Characters,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -78,6 +81,7 @@ impl Tab {
             Tab::Dungeons => "Dungeons",
             Tab::DungeonLook => "Dungeon look",
             Tab::DungeonLights => "Dungeon lights",
+            Tab::Characters => "Characters",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -119,6 +123,9 @@ impl Tab {
             Tab::DungeonLights => {
                 "Torches, braziers, candles, crystals, shafts of light: by Auto-light or by hand"
             }
+            Tab::Characters => {
+                "Import a character, rig it automatically, preview animations and place it in the world"
+            }
         }
     }
     pub fn group(self) -> TabGroup {
@@ -131,6 +138,7 @@ impl Tab {
             Tab::Lighting | Tab::Weather | Tab::Style | Tab::Audio => TabGroup::Atmosphere,
             Tab::Analyze | Tab::Map => TabGroup::Review,
             Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => TabGroup::Dungeons,
+            Tab::Characters => TabGroup::Characters,
         }
     }
 }
@@ -146,6 +154,8 @@ pub enum TabGroup {
     Atmosphere,
     Review,
     Dungeons,
+    /// Labs (testing flag)
+    Characters,
 }
 
 impl TabGroup {
@@ -180,7 +190,11 @@ impl TabGroup {
             );
             v
         } else {
-            Self::ALL.to_vec()
+            let mut v = Self::ALL.to_vec();
+            if crate::characters::labs_enabled() {
+                v.push(TabGroup::Characters);
+            }
+            v
         }
     }
     pub fn name(self) -> &'static str {
@@ -194,6 +208,7 @@ impl TabGroup {
             TabGroup::Review => "Review",
             TabGroup::Dungeons if crate::dungeons::in_dungeon() => "Dungeon",
             TabGroup::Dungeons => "Dungeons",
+            TabGroup::Characters => "Characters",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -209,6 +224,7 @@ impl TabGroup {
                 "This dungeon: its layout, look, lights; Back to world"
             }
             TabGroup::Dungeons => "Dungeons: maps of their own behind portals, doors and cave ends",
+            TabGroup::Characters => "Labs: characters, rigged for you and animated",
         }
     }
     /// Its tabs, in sub-tab order.
@@ -229,6 +245,7 @@ impl TabGroup {
                 &[Tab::Dungeons, Tab::DungeonLook, Tab::DungeonLights]
             }
             TabGroup::Dungeons => &[Tab::Dungeons],
+            TabGroup::Characters => &[Tab::Characters],
         }
     }
     /// What the sub-tab of `t` is called inside this group.

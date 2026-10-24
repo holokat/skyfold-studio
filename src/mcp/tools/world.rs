@@ -126,6 +126,91 @@ Default folder: <project>/exports/<world name>; `dir` must be an absolute path."
         },
         run: |w, a| run(w, view, a),
     });
+    app.mcp_tool(McpTool {
+        name: "settings_search",
+        description: "Find where a setting, tool or section lives in the editor (the ⌘K search): every labelled control in every tab's panel, inspector and dock, with its path, e.g. \"thunder\" → Atmosphere › Weather › Rain. \
+settings_open takes the person there.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "words in the setting's name or path" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+                },
+                "required": ["query"]
+            })
+        },
+        run: |_, a| settings_search(a),
+    });
+    app.mcp_tool(McpTool {
+        name: "settings_open",
+        description: "Take the person to a setting, as clicking it in the ⌘K search does: switches to its tab and tool, opens its sections, scrolls to it and rings it for a moment. \
+`query` opens the best settings_search match, or pass a result's `index`. With `palette` true it opens the ⌘K search with the query typed instead.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "index": { "type": "integer", "minimum": 0 },
+                    "palette": { "type": "boolean", "default": false }
+                }
+            })
+        },
+        run: |_, a| settings_open(a),
+    });
+    app.mcp_tool(McpTool {
+        name: "app_update_check",
+        description: "Check for a newer Skyfold Studio, like File › Check for Updates…: Sparkle shows the person what it finds (release notes, Install Update, then Install and Relaunch, which saves the world first). \
+Only the packaged app updates itself; a development build says so.",
+        input_schema: || json!({ "type": "object", "properties": {} }),
+        run: |_, _| {
+            if crate::updates::check_now() {
+                text("Checking for updates: Sparkle's window shows the result.")
+            } else {
+                text("This build doesn't update itself (only the packaged app from skyfoldstudio.com does).")
+            }
+        },
+    });
+}
+
+fn settings_search(args: Value) -> R {
+    use crate::ui::search::{SETTINGS, find};
+    let q = opt_str(&args, "query")?.ok_or("missing `query`")?;
+    let limit = opt_num(&args, "limit")?.unwrap_or(10.0).clamp(1.0, 50.0) as usize;
+    let hits = find(q);
+    let list: Vec<Value> = hits
+        .iter()
+        .take(limit)
+        .map(|&i| {
+            let st = &SETTINGS[i];
+            json!({ "index": i, "label": st.label, "kind": st.kind, "path": st.path() })
+        })
+        .collect();
+    Ok(vec![McpContent::Json(
+        json!({ "matches": hits.len(), "results": list }),
+    )])
+}
+
+fn settings_open(args: Value) -> R {
+    use crate::ui::search::{Request, SETTINGS, find, request};
+    let q = opt_str(&args, "query")?;
+    if opt_bool(&args, "palette")?.unwrap_or(false) {
+        request(Request::Palette(q.unwrap_or("").to_string()));
+        return text("Opened the ⌘K search.");
+    }
+    let i = match (opt_num(&args, "index")?, q) {
+        (Some(i), _) => i as usize,
+        (None, Some(q)) => *find(q)
+            .first()
+            .ok_or_else(|| format!("No setting matches “{q}”."))?,
+        (None, None) => return Err("pass `query` or `index`".into()),
+    };
+    let st = SETTINGS.get(i).ok_or("no setting with that index")?;
+    if !st.visible() {
+        return Err(format!("{} isn't available here ({}).", st.label, st.path()));
+    }
+    request(Request::Open(i));
+    text(format!("Opened {} › {}.", st.path(), st.label))
 }
 
 /// Sends a UI action (handled by the same systems as the button) and reports when it's done:

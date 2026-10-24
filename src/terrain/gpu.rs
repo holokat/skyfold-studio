@@ -297,6 +297,7 @@ pub fn sync_terrain_gpu(
             cloud_cover: Handle::default(),
             rule0: rules[0].clone(),
             rule1: rules[1].clone(),
+            canopy: crate::nature::shade::CANOPY_SHADE,
             reference: false,
             per_pixel_rules: false,
         };

@@ -25,8 +25,12 @@ use crate::world::Zones;
 /// Placement cell size (m).
 pub const CELL: f32 = 32.0;
 const TPC: usize = (CELL / TEXEL) as usize;
-/// Candidate slots per cell and category (the most that can ever grow there).
+/// Candidate slots per cell and category (what grows up to an amount of 100–200 %).
 const SLOTS: [usize; 4] = [110, 40, 256, 48];
+/// Further tree slots, only used where the density asks for more than `SLOTS` can hold (the
+/// Trees amount up to 500 %): they continue the same blue-noise pattern, so the trees on the
+/// first slots never move.
+const EXTRA: [usize; 4] = [220, 0, 0, 0];
 
 /// Bit set on every procedural instance id (placed objects count up from 1).
 pub const PROC_BIT: u64 = 1 << 63;
@@ -278,7 +282,7 @@ impl Masks {
         changed
     }
 
-    fn blocked(&self, cell: IVec2, p: Vec2, r: f32) -> bool {
+    pub(crate) fn blocked(&self, cell: IVec2, p: Vec2, r: f32) -> bool {
         if let Some(v) = self.roads.get(&cell)
             && v.iter().any(|(a, b, hw)| dist_seg(p, *a, *b) < hw + r)
         {
@@ -349,8 +353,8 @@ fn patterns() -> &'static [Vec<Vec2>; 4] {
     P.get_or_init(|| {
         std::array::from_fn(|c| {
             let mut rng = crate::noise::Rng::new(0x51ab_0000 + c as u64);
-            let mut pts: Vec<Vec2> = Vec::with_capacity(SLOTS[c]);
-            for _ in 0..SLOTS[c] {
+            let mut pts: Vec<Vec2> = Vec::with_capacity(SLOTS[c] + EXTRA[c]);
+            for _ in 0..SLOTS[c] + EXTRA[c] {
                 let mut best = Vec2::ZERO;
                 let mut best_d = -1.0;
                 for _ in 0..16 {
@@ -545,8 +549,17 @@ fn place_cat(
         // Reserve candidates at the maximum flora abundance. Family changes thin their
         // own slots, so increasing flowers never relocates the berry bushes.
         let reserve = if cat == 2 { 2.0 } else { 1.0 };
-        if unit(hs) * slot_density >= r.total * reserve {
-            continue;
+        if s < SLOTS[cat] {
+            if unit(hs) * slot_density >= r.total * reserve {
+                continue;
+            }
+        } else {
+            // (an extra slot: only the density beyond what the first slots hold)
+            let over = r.total * reserve - slot_density;
+            let extra_density = EXTRA[cat] as f32 / (CELL * CELL);
+            if over <= 0.0 || unit(hs) * extra_density >= over {
+                continue;
+            }
         }
         let id = id_base | s as u64;
         if ctx.field.excluded.contains(&id) {
@@ -830,9 +843,9 @@ mod tests {
     #[test]
     fn slot_patterns_are_blue_noise() {
         for (c, pts) in patterns().iter().enumerate() {
-            assert_eq!(pts.len(), SLOTS[c]);
+            assert_eq!(pts.len(), SLOTS[c] + EXTRA[c]);
             // no two candidates closer than a third of the mean spacing (on the torus)
-            let spacing = (CELL * CELL / SLOTS[c] as f32).sqrt();
+            let spacing = (CELL * CELL / (SLOTS[c] + EXTRA[c]) as f32).sqrt();
             for (i, a) in pts.iter().enumerate() {
                 for b in &pts[i + 1..] {
                     let dx = (a.x - b.x).abs().min(CELL - (a.x - b.x).abs());

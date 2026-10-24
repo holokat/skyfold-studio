@@ -262,6 +262,7 @@ fn create_map(d: &mut WorldData, def: &DungeonDef, dir: &Path) -> Result<(), Str
             d.terrain.sea_level = -2000.0;
             *d.amounts = crate::objects::NatureAmounts {
                 grass: 0.0,
+                grass_height: 1.0,
                 plants: 0.0,
                 flowers: 0.0,
                 mushrooms: 0.0,

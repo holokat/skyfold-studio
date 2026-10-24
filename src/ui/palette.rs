@@ -1,5 +1,5 @@
-//! ⌘K: a palette that finds every tab, tool, asset, look and the main actions (HANDOFF › ⌘K
-//! palette). ↑↓ moves, ↵ runs, Esc closes; with no match, ↵ opens Prompt an area with the words.
+//! ⌘K: a palette that finds every tab, tool, asset, look, the main actions and every setting in
+//! the panels (`super::search`, HANDOFF › ⌘K palette). ↑↓ moves, ↵ runs, Esc closes; with no match, ↵ opens Prompt an area with the words.
 
 use bevy_egui::egui::{
     self, Color32, CornerRadius, FontId, Id, Key, Margin, Modifiers, Order, Rect, RichText, Sense,
@@ -46,6 +46,24 @@ pub fn open(ctx: &egui::Context) {
     );
 }
 
+/// Close the palette.
+pub fn close(ctx: &egui::Context) {
+    store(ctx, Pal::default());
+}
+
+/// Open the palette with `query` already typed.
+pub fn open_with(ctx: &egui::Context, query: &str) {
+    store(
+        ctx,
+        Pal {
+            open: true,
+            focus: true,
+            query: query.to_string(),
+            sel: 0,
+        },
+    );
+}
+
 #[derive(Clone)]
 enum Act {
     Tab(Tab),
@@ -69,6 +87,23 @@ enum Act {
     Gallery,
     Mute,
     Panels,
+    /// `super::search::SETTINGS[i]`
+    Setting(usize),
+    /// Labs: the Characters tab on / off
+    LabsCharacters,
+}
+
+/// The tab a hand-written tool item switches to.
+fn act_tab(a: &Act) -> Option<Tab> {
+    Some(match a {
+        Act::Land(_) => Tab::Land,
+        Act::Sculpt(_) => Tab::Sculpt,
+        Act::Paint(_) => Tab::Paint,
+        Act::Water(_) => Tab::Water,
+        Act::Objects(_) => Tab::Objects,
+        Act::Zone(_) => Tab::Zones,
+        _ => return None,
+    })
 }
 
 struct Item {
@@ -233,7 +268,7 @@ fn items(s: &UiState) -> Vec<Item> {
             Act::Ui(UiAction::ToggleWalk),
         ),
         ("Playtest", "Gamepad", "", Act::Playtest),
-        ("Camera paths & flythrough…", "Video", "", Act::Paths),
+        ("Fly-through: demo video & camera paths…", "Video", "", Act::Paths),
         ("Prompt an area", "SparklesTwo", "G", Act::Prompt),
         ("Help & shortcuts", "QuestionmarkCircle", "H", Act::Help),
         ("Connect an agent (MCP)", "Agent", "", Act::Mcp),
@@ -259,6 +294,17 @@ fn items(s: &UiState) -> Vec<Item> {
     ));
     v.push(item(
         "Action",
+        if crate::characters::labs_enabled() {
+            "Labs: Characters (testing) — turn off"
+        } else {
+            "Labs: Characters (testing) — turn on"
+        },
+        "User",
+        "",
+        Act::LabsCharacters,
+    ));
+    v.push(item(
+        "Action",
         "Auto-populate nature",
         "Tree",
         "",
@@ -274,6 +320,22 @@ fn items(s: &UiState) -> Vec<Item> {
     for p in crate::look::LookPreset::ALL {
         let mut it = item("Look", p.name(), "ColorPalette", "", Act::Look(p));
         it.sub = p.inspired_by().to_string();
+        v.push(it);
+    }
+    // every setting in the panels (tools the list above has already are left out)
+    let tabs_with_tools: Vec<Tab> = v.iter().filter_map(|it| act_tab(&it.act)).collect();
+    for (i, st) in super::search::SETTINGS.iter().enumerate() {
+        if !st.visible() || st.kind == "Tool" && tabs_with_tools.contains(&st.tab) {
+            continue;
+        }
+        let kind = match st.kind {
+            "Tool" => "Tool",
+            "Section" => "Section",
+            "Button" => "Action",
+            _ => "Setting",
+        };
+        let mut it = item(kind, st.label, st.icon(), "", Act::Setting(i));
+        it.sub = st.path();
         v.push(it);
     }
     v
@@ -310,7 +372,9 @@ fn matches(all: Vec<Item>, q: &str) -> Vec<Item> {
                 return None;
             }
             let n = it.name.to_lowercase();
-            let score = if n == q {
+            // "map" finds "Review › Map" first
+            let tab_hit = it.kind == "Go to" && n.split(" › ").any(|seg| seg == q);
+            let score = if n == q || tab_hit {
                 0
             } else if n.starts_with(&q) {
                 1
@@ -325,15 +389,17 @@ fn matches(all: Vec<Item>, q: &str) -> Vec<Item> {
             let kind = match it.kind {
                 "Go to" => 0,
                 "Tool" => 1,
-                "Action" => 2,
-                "Look" => 3,
-                _ => 4,
+                "Setting" => 2,
+                "Section" => 3,
+                "Action" => 4,
+                "Look" => 5,
+                _ => 6,
             };
             Some((score * 10 + kind, it))
         })
         .collect();
     hits.sort_by_key(|h| h.0);
-    hits.into_iter().take(10).map(|h| h.1).collect()
+    hits.into_iter().take(12).map(|h| h.1).collect()
 }
 
 fn run(act: Act, s: &mut UiState, out: &mut UiOut, ctx: &egui::Context) {
@@ -403,6 +469,16 @@ fn run(act: Act, s: &mut UiState, out: &mut UiOut, ctx: &egui::Context) {
         Act::Mcp => s.mcp.show_panel = true,
         Act::Gallery => s.gallery.open = true,
         Act::Mute => s.audio.muted = !s.audio.muted,
+        Act::Setting(i) => super::search::go(ctx, s, &super::search::SETTINGS[i]),
+        Act::LabsCharacters => {
+            let on = !crate::characters::labs_enabled();
+            crate::characters::set_labs(on);
+            if on {
+                s.ed.tab = Tab::Characters;
+            } else if s.ed.tab == Tab::Characters {
+                s.ed.tab = Tab::Objects;
+            }
+        }
         Act::Panels => {
             let mut sh = super::shell::get(ctx);
             let open = !(sh.panel_open || sh.insp_open);
@@ -487,7 +563,7 @@ pub fn show(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
                                     .frame(egui::Frame::NONE)
                                     .font(FontId::proportional(16.0))
                                     .hint_text(
-                                        RichText::new("Search tools, assets, actions, looks…")
+                                        RichText::new("Search settings, tools, assets, actions…")
                                             .size(16.0)
                                             .color(TEXT_MUTE),
                                     )
@@ -583,11 +659,19 @@ pub fn show(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
                                 let gw = g.size().x;
                                 pnt.galley(pos2(x, r.center().y - g.size().y * 0.5), g, TEXT);
                                 if !it.sub.is_empty() {
-                                    let sg = pnt.layout_no_wrap(
+                                    // one line, cut with … before the kind / key on the right
+                                    let room = (r.right() - 120.0 - (x + gw + 8.0)).max(40.0);
+                                    let mut job = egui::text::LayoutJob::single_section(
                                         it.sub.clone(),
-                                        FontId::proportional(12.5),
-                                        TEXT_MUTE,
+                                        egui::TextFormat::simple(
+                                            FontId::proportional(12.5),
+                                            TEXT_MUTE,
+                                        ),
                                     );
+                                    job.wrap.max_width = room;
+                                    job.wrap.max_rows = 1;
+                                    job.wrap.break_anywhere = true;
+                                    let sg = pnt.layout_job(job);
                                     pnt.galley(
                                         pos2(x + gw + 8.0, r.center().y - sg.size().y * 0.5),
                                         sg,

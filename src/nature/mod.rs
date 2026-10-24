@@ -25,13 +25,14 @@ pub mod migrate;
 pub mod place;
 pub mod render;
 pub mod rules;
+pub mod shade;
 
 use std::sync::OnceLock;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-pub use appearance::{ForestDiversity, ForestLayout, NatureAppearance};
+pub use appearance::{ForestDiversity, ForestLayout, GroundCover, NatureAppearance};
 pub use field::NatureField;
 pub use place::{Ctx, Instance, Masks};
 pub use rules::Rules;
@@ -127,10 +128,12 @@ impl Plugin for NaturePlugin {
             .init_resource::<render::Near>()
             .init_resource::<render::Billboards>()
             .init_resource::<canopy::Canopy>()
+            .init_resource::<shade::CanopyShade>()
             .init_resource::<brush::NatureBrush>()
             .init_resource::<migrate::Pending>()
             .init_resource::<Watch>()
             .init_resource::<Seed>()
+            .add_systems(PreStartup, shade::init_buffer)
             .add_systems(
                 Update,
                 (init_rules, apply_undo, migrate::run_pending).chain(),
@@ -151,6 +154,7 @@ impl Plugin for NaturePlugin {
                     render::update_near,
                     render::update_billboards,
                     canopy::update_canopy,
+                    shade::update_canopy_shade,
                     clear_dirty,
                 )
                     .chain()

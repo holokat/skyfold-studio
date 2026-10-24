@@ -25,7 +25,7 @@ use bevy::render::render_resource::{
 };
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 
-use super::layers::LAYER_COUNT;
+use super::layers::{LAYER_COUNT, Layer};
 use super::material::{TerrainGpu, TerrainMaterial};
 use crate::model_render::compress::{self, Codec, Effort};
 
@@ -78,6 +78,51 @@ fn default_tile() -> f32 {
 #[derive(Resource, Default)]
 pub struct TerrainLibrary {
     pub materials: Vec<LibraryMaterial>,
+}
+
+/// How much of the world each slot covers (fractions of the land, painted or automatic).
+pub fn layer_usage(t: &crate::terrain::Terrain) -> [f32; LAYER_COUNT] {
+    let mut sum = [0.0f32; LAYER_COUNT];
+    let n = t.n();
+    let step = (n / 256).max(1);
+    let mut count: f32 = 0.0;
+    for j in (0..n).step_by(step) {
+        for i in (0..n).step_by(step) {
+            let w = t.final_weights(i, j);
+            for k in 0..LAYER_COUNT {
+                sum[k] += w[k];
+            }
+            count += 1.0;
+        }
+    }
+    sum.map(|v| v / count.max(1.0))
+}
+
+/// Slots the automatic style is least likely to need, first: a free one of these takes a new
+/// material.
+pub const FREE_ORDER: [Layer; LAYER_COUNT] = [
+    Layer::Ice,
+    Layer::Cobblestone,
+    Layer::DarkRock,
+    Layer::Mud,
+    Layer::DryGrass,
+    Layer::ForestFloor,
+    Layer::Gravel,
+    Layer::Dirt,
+    Layer::Snow,
+    Layer::Sand,
+    Layer::Rock,
+    Layer::Grass,
+];
+
+/// The slot a library material paints with: the one holding it already, else one the world
+/// doesn't use at all (`FREE_ORDER`); None when all twelve are in use.
+pub fn slot_for(choices: &TerrainLayerChoices, t: &crate::terrain::Terrain, id: &str) -> Option<usize> {
+    if let Some(i) = (0..LAYER_COUNT).find(|i| choices.get(*i) == id) {
+        return Some(i);
+    }
+    let usage = layer_usage(t);
+    FREE_ORDER.iter().map(|l| *l as usize).find(|i| usage[*i] < 1e-4)
 }
 
 /// Which library material fills each paint layer ("" = the built-in one). Saved with the world.

@@ -802,8 +802,8 @@ fn render_context_map(snapshot: &Snapshot) -> Result<PathBuf, String> {
             }
         }
     }
-    let root = std::env::current_dir().map_err(|e| e.to_string())?;
-    let dir = root.join("work/auto-zones-review/runtime").join(format!(
+    // The writable data root: the packaged app's cwd is `/`, a read-only volume.
+    let dir = crate::paths::cache_dir("auto-zones").join(format!(
         "{}-{}",
         std::process::id(),
         fastrand::u32(..)
@@ -888,17 +888,15 @@ fn begin_agent(
     let p = world.resource::<PromptSession>();
     let backend = p.backend;
     let st = p.status(backend).cloned();
-    let key = Some(p.api_key.trim().to_owned())
-        .filter(|v| !v.is_empty())
-        .or_else(agent::env_api_key);
-    if backend != Backend::AnthropicApi
+    let api = p.api_conn();
+    if backend != Backend::Api
         && agent::stub_path().is_none()
         && !st.as_ref().is_some_and(|v| v.ready)
     {
         return Err("Selected language model is not connected".into());
     }
-    if backend == Backend::AnthropicApi && key.is_none() {
-        return Err("Enter an Anthropic API key first".into());
+    if backend == Backend::Api && (!api.ready() || p.model().is_empty()) {
+        return Err("Add an API key and pick a model first".into());
     }
     let endpoint = crate::mcp::PrivateEndpoint::open(&[])?;
     let defs = serde_json::to_value(&s.existing).unwrap_or_default();
@@ -945,7 +943,7 @@ fn begin_agent(
         instructions: INSTRUCTIONS.into(),
         prompt,
         port: endpoint.port,
-        api_key: key,
+        api: Some(api),
         messages: vec![],
         resume: None,
         timeout: Duration::from_secs(180),

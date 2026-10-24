@@ -73,6 +73,8 @@ pub struct WalkState {
     pub playtest: bool,
     /// A camera path is playing: the editor UI hides and the world animates.
     pub cinematic: bool,
+    /// H while walking: no UI at all (HUD, panels, markers) for clean screenshots.
+    pub ui_hidden: bool,
     /// Start walking (or change where / how) next frame: from the Playtest button, MCP, tests.
     pub request: Option<WalkStart>,
     /// What the last frame bumped into, stood on and climbed (logs, tests).
@@ -206,7 +208,39 @@ impl Plugin for WalkPlugin {
                     .in_set(WalkSystems)
                     .after(crate::camera::CameraSystems),
             )
-            .add_systems(Update, viewer_position.before(crate::camera::CameraSystems));
+            .add_systems(Update, viewer_position.before(crate::camera::CameraSystems))
+            .add_systems(Update, toggle_ui.after(WalkSystems))
+            .add_systems(
+                PostUpdate,
+                hide_ui_output.after(bevy_egui::EguiPostUpdateSet::ProcessOutput),
+            );
+    }
+}
+
+/// H while walking hides every bit of UI (and shows it again); leaving the walk shows it.
+fn toggle_ui(
+    keys: Res<ButtonInput<KeyCode>>,
+    pointer: Res<crate::camera::Pointer>,
+    mut walk: ResMut<WalkState>,
+) {
+    if !walk.active {
+        if walk.ui_hidden {
+            walk.ui_hidden = false;
+        }
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyH) && !walk.input_paused && !pointer.keyboard_captured {
+        walk.ui_hidden = !walk.ui_hidden;
+    }
+}
+
+/// Drops the frame's egui drawing while the walk's UI is hidden (every window, HUD and marker,
+/// whichever system drew it); textures still update.
+fn hide_ui_output(walk: Res<WalkState>, mut out: Query<&mut bevy_egui::EguiRenderOutput>) {
+    if walk.active && walk.ui_hidden {
+        for mut o in &mut out {
+            o.paint_jobs.clear();
+        }
     }
 }
 

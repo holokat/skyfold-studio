@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::terrain::gpu::{PendingTexWrites, TexWrite};
 
+mod sea_view;
+pub use sea_view::SeaView;
+
 pub const N: usize = 256;
 pub const MIPS: u32 = 9; // 256 → 1
 pub const CASCADE_L: [f32; 3] = [800.0, 151.0, 27.7];
@@ -832,8 +835,9 @@ impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OceanState>()
             .init_resource::<OceanWaves>()
+            .init_resource::<SeaView>()
             .add_systems(PreStartup, create_textures)
-            .add_systems(Update, (choose_state, run_sim).chain());
+            .add_systems(Update, (choose_state, update_sea_view, run_sim).chain());
     }
 }
 
@@ -925,6 +929,32 @@ fn choose_state(
     st.speed += (style.wave_speed.clamp(0.1, 3.0) - st.speed) * 0.05;
 }
 
+/// Is any open sea in sight from the camera (`SeaView`)?
+fn update_sea_view(
+    mut view: ResMut<SeaView>,
+    st: Res<OceanState>,
+    style: Res<crate::water::WaterStyle>,
+    terrain: Res<crate::terrain::Terrain>,
+    cam: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
+) {
+    let Ok(cam) = cam.single() else {
+        return;
+    };
+    // the highest the surface reaches: the tide and the tallest crests (about the significant
+    // wave height), with room to spare
+    let crest = terrain.sea_level
+        + 1.0
+        + 0.12
+        + 0.18 * style.waves.min(1.5)
+        + st.state.hs() * 1.2;
+    if std::env::var("WB_PERF").is_ok_and(|p| p.contains("seaview")) {
+        view.visible = true;
+        return;
+    }
+    view.update(&terrain, cam.translation(), crest);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_sim(
     mut runner: ResMut<OceanRunner>,
     mut st: ResMut<OceanState>,
@@ -937,6 +967,11 @@ fn run_sim(
     terrain: Res<crate::terrain::Terrain>,
     cam: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
     mut coast: Local<CoastDistance>,
+    (sea_view, water, walk): (
+        Res<SeaView>,
+        Query<&ViewVisibility, With<MeshMaterial3d<crate::water::WaterMaterial>>>,
+        Res<crate::walk::WalkState>,
+    ),
 ) {
     // collect a finished frame
     if let Some(task) = &mut runner.task
@@ -984,6 +1019,17 @@ fn run_sim(
         1.0 / 10.0
     };
     if runner.since < interval {
+        return;
+    }
+    // no water of any kind in sight, nobody in it and the coast far off: the waves can wait
+    // (they pick up again where they were; nobody saw them stop)
+    if runner.steps >= 3
+        && !needs
+        && !sea_view.visible
+        && d >= 300.0
+        && walk.water == crate::motion::movement::InWater::Dry
+        && !water.iter().any(|v| v.get())
+    {
         return;
     }
     let Some(mut sim) = runner.sim.take() else {
@@ -1061,7 +1107,7 @@ fn push_mips(pending: &mut PendingTexWrites, h: &Handle<Image>, data: Arc<Vec<u8
 }
 
 /// Tiling RGBA value noise (each channel a different octave pattern).
-fn noise_texture() -> Image {
+pub(crate) fn noise_texture() -> Image {
     let n = 256usize;
     let mut data = Vec::with_capacity(n * n * 4);
     let periodic = |x: f32, y: f32, p: i32, seed: u32| {
@@ -1149,7 +1195,7 @@ fn rgba8_mipped(base: Vec<u8>, n: usize) -> Image {
 /// local foam coverage, so foam grows, tears into lace and dissolves. Mat-like shapes keep their
 /// contrast in the mips (thin cell walls averaged away into a grey haze).
 ///   R: foam density   G: fine bubbles   B: soft mottling   A: streaks
-fn foam_texture() -> Image {
+pub(crate) fn foam_texture() -> Image {
     const N: usize = 512;
     let hash = |x: i32, y: i32, cells: i32, seed: u32| {
         let h = crate::noise::hash2(x.rem_euclid(cells), y.rem_euclid(cells), seed);

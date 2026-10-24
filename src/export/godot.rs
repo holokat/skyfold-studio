@@ -1,6 +1,8 @@
 //! Godot 4 target: a complete project (`project.godot` + `world.tscn`) that opens directly in
-//! Godot 4.3 or newer. The scene holds the WorldEnvironment (physical sky, filmic tonemap, haze
-//! fog, grade), the sun at the world's time of day, the ocean, Marker3D gameplay markers and a
+//! Godot 4.4 or newer. The scene holds the WorldEnvironment (sky shader, filmic tonemap, haze
+//! fog, grade), the sun (and moon) at the world's time of day, the weather and atmosphere runtime
+//! (`wb_atmosphere.gd`: zone / biome weather, clouds, rain and snow, fog and mist), the ocean,
+//! Marker3D gameplay markers and a
 //! fly / walk camera; small `@tool` scripts build the heavy parts from `world_builder/` when the
 //! scene loads (in the editor too, as internal children that are never saved into the scene):
 //! terrain chunks with the splat shader and a HeightMapShape3D collider, MultiMeshInstance3D
@@ -21,10 +23,16 @@ const WATER_GD: &str = include_str!("godot/wb_water.gd");
 const CAMERA_GD: &str = include_str!("godot/wb_camera.gd");
 const CHECK_GD: &str = include_str!("godot/wb_check.gd");
 const GRASS_GD: &str = include_str!("godot/wb_grass.gd");
+const GRASS_SHADER: &str = include_str!("godot/wb_grass.gdshader");
 const PORTAL_GD: &str = include_str!("godot/wb_portal.gd");
 const FLICKER_GD: &str = include_str!("godot/wb_flicker.gd");
 const PIECE_GD: &str = include_str!("godot/wb_piece.gd");
 const FLAME_SHADER: &str = include_str!("godot/wb_flame.gdshader");
+const SKY_SHADER: &str = include_str!("godot/wb_sky.gdshader");
+const POST_SHADER: &str = include_str!("godot/wb_post.gdshader");
+
+pub(super) mod look;
+const ATMOSPHERE_GD: &str = include_str!("godot/wb_atmosphere.gd");
 
 const DATA: &str = "world_builder";
 
@@ -66,14 +74,15 @@ fn transform(m: Mat3, o: Vec3) -> String {
 }
 
 /// Zenith and horizon sky colours (linear) for the world's hour: clear blue by day, warm at
-/// sunrise / sunset, dark blue at night; haze pales the horizon.
-fn sky_colors(light: &core::LightOut, haze: f32) -> (Vec3, Vec3) {
+/// sunrise / sunset, dark blue at night; haze pales the horizon. The day colours (with the 0.5
+/// day energy in `Night::sky_energy`) are fitted to the editor's sky measured side by side.
+pub(super) fn sky_colors(light: &core::LightOut, haze: f32) -> (Vec3, Vec3) {
     let sun_y = light.sun_dir.y;
     let night = light.night;
     let sunset = (1.0 - (sun_y * 4.0).abs()).clamp(0.0, 1.0) * (1.0 - night);
     let haze = haze.clamp(0.0, 1.0);
-    let day_top = Vec3::new(0.13, 0.29, 0.62).lerp(Vec3::new(0.33, 0.42, 0.55), haze);
-    let day_horizon = Vec3::new(0.42, 0.56, 0.7).lerp(Vec3::new(0.6, 0.65, 0.7), haze);
+    let day_top = Vec3::new(0.15, 0.27, 0.43).lerp(Vec3::new(0.33, 0.42, 0.55), haze);
+    let day_horizon = Vec3::new(0.13, 0.229, 0.371).lerp(Vec3::new(0.6, 0.65, 0.7), haze);
     let top = day_top
         .lerp(Vec3::new(0.16, 0.18, 0.36), sunset)
         .lerp(Vec3::new(0.004, 0.007, 0.02), night);
@@ -290,7 +299,8 @@ fn model_entry_in(
     }))
 }
 
-fn water_params(st: &crate::water::WaterStyle, ocean: bool, river: bool) -> Value {
+/// `glow` scales the emission (`Night::emission`).
+fn water_params(st: &crate::water::WaterStyle, ocean: bool, river: bool, glow: f32) -> Value {
     json!({
         "shallow_color": st.shallow,
         "deep_color": st.deep,
@@ -306,8 +316,12 @@ fn water_params(st: &crate::water::WaterStyle, ocean: bool, river: bool) -> Valu
         "along_uv": river,
         "ocean": ocean,
         "emissive_color": st.emissive,
-        "emissive_strength": st.emissive_strength,
+        "emissive_strength": st.emissive_strength * glow,
         "metallic_amount": st.metallic,
+        "sea_hs": crate::ocean::SeaState::at((st.waves * 1.6).clamp(0.0, 4.0)).hs(),
+        "molten": st.behaviour == crate::water::WaterBehaviour::Molten,
+        "extinct": crate::water::water_optics(st).0.to_array(),
+        "inscat": crate::water::water_optics(st).1.to_array(),
     })
 }
 
@@ -478,12 +492,10 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         &json!({ "cell": t.cell, "tiles": tile_list }),
     )?;
 
-    // meadow grass: photoscanned tufts scattered around the camera from the grass map
+    // meadow grass: the editor's blade field (its patch meshes, grass map and settings), rebuilt
+    // round the camera by `wb_grass.gd` / `wb_grass.gdshader`
     let mut grass = false;
-    if o.plants
-        && let Some(g) = core::grass(s, gn)
-        && let Some((glb, _)) = core::grass_tufts(o.texture_size)
-    {
+    if o.plants && let Some(g) = core::grass(s, gn) {
         let px: Vec<u8> = g.into_iter().flatten().collect();
         ctx.write(
             &format!("{DATA}/terrain/grass.png"),
@@ -493,7 +505,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             &format!("{DATA}/terrain/grass.png.import"),
             data_import("terrain/grass.png").as_bytes(),
         )?;
-        write_glb(ctx, "terrain/grass_tufts.glb", &glb)?;
+        write_grass(s, ctx, gn, t.size / (gn - 1) as f32)?;
         grass = true;
     }
     let models = core::models(s, ctx, &format!("{DATA}/models"), 0.2, 0.8)?;
@@ -536,6 +548,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     let mut water_bodies = 0;
     if o.water {
         let (glb, bodies) = core::water(s);
+        let glow = Night::of(s, &core::lighting(s)).emission();
         if let Some(b) = &glb {
             write_glb(ctx, "water/water.glb", b)?;
         }
@@ -544,11 +557,34 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             &format!("{DATA}/water/water_normal.png"),
             &core::water_normal_png(512),
         )?;
+        // the editor's tiling noise and foam mat (its surf, lace and white water read them)
+        for (name, img) in [
+            ("noise", crate::ocean::noise_texture()),
+            ("foam", crate::ocean::foam_texture()),
+        ] {
+            let n = img.texture_descriptor.size.width;
+            let data = img.data.as_ref().ok_or("water texture")?;
+            let base = data[..(n * n * 4) as usize].to_vec();
+            let file = format!("water/{name}.png");
+            ctx.write(
+                &format!("{DATA}/{file}"),
+                &core::png_rgba(&image::RgbaImage::from_raw(n, n, base).ok_or("water texture")?),
+            )?;
+            ctx.write(
+                &format!("{DATA}/{file}.import"),
+                data_import(&file)
+                    .replace("mipmaps/generate=false", "mipmaps/generate=true")
+                    .as_bytes(),
+            )?;
+        }
         let data = json!({
             "mesh": if glb.is_some() { res("water/water.glb") } else { String::new() },
             "shader": res("shaders/water.gdshader"),
             "normal_map": res("water/water_normal.png"),
-            "bodies": bodies.iter().map(|b| json!({ "kind": b.kind, "name": b.name, "node": b.node, "params": water_params(&b.style, false, b.kind != "lake") })).collect::<Vec<_>>(),
+            "noise": res("water/noise.png"),
+            "heights": { "file": res("terrain/heights.f32"), "vertices": gn, "cell": t.size / (gn - 1) as f32 },
+            "foam": res("water/foam.png"),
+            "bodies": bodies.iter().map(|b| json!({ "kind": b.kind, "name": b.name, "node": b.node, "params": water_params(&b.style, false, b.kind != "lake", glow) })).collect::<Vec<_>>(),
             "volumes": super::collision::water_volumes(s).iter().map(|v| v.json()).collect::<Vec<_>>(),
         });
         ctx.write_json(&format!("{DATA}/water/water.json"), &data)?;
@@ -601,6 +637,22 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     }
     let light = core::lighting(s);
     ctx.write_json(&format!("{DATA}/data/lighting.json"), &light.json(s))?;
+    let canopy = write_canopy(s, ctx, &models, &inst)?;
+    write_atmosphere(s, ctx, canopy)?;
+    // the look's post-tonemap grade as a 3D colour-correction LUT
+    let lut_n = look::LUT_SIZE;
+    ctx.write(
+        &format!("{DATA}/look/grade_lut.png"),
+        &core::png_rgb(&look::grade_lut(&s.look)),
+    )?;
+    ctx.write(
+        &format!("{DATA}/look/grade_lut.png.import"),
+        format!(
+            "[remap]\n\nimporter=\"3d_texture\"\ntype=\"CompressedTexture3D\"\n\n[deps]\n\nsource_file=\"{}\"\n\n[params]\n\ncompress/mode=0\ncompress/high_quality=false\ncompress/lossy_quality=0.7\ncompress/hdr_compression=1\ncompress/channel_pack=0\nmipmaps/generate=false\nmipmaps/limit=-1\nslices/horizontal={lut_n}\nslices/vertical=1\n",
+            res("look/grade_lut.png")
+        )
+        .as_bytes(),
+    )?;
     let probes: Vec<[f32; 3]> = [(1, 1), (2, 2), (3, 1), (1, 3), (3, 3), (2, 1)]
         .iter()
         .map(|&(a, b)| {
@@ -628,10 +680,14 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         ("scripts/wb_camera.gd", CAMERA_GD),
         ("scripts/wb_check.gd", CHECK_GD),
         ("scripts/wb_grass.gd", GRASS_GD),
+        ("shaders/wb_grass.gdshader", GRASS_SHADER),
         ("scripts/wb_portal.gd", PORTAL_GD),
         ("scripts/wb_flicker.gd", FLICKER_GD),
         ("scripts/wb_piece.gd", PIECE_GD),
         ("scripts/wb_flame.gdshader", FLAME_SHADER),
+        ("shaders/wb_sky.gdshader", SKY_SHADER),
+        ("shaders/wb_post.gdshader", POST_SHADER),
+        ("scripts/wb_atmosphere.gd", ATMOSPHERE_GD),
     ] {
         ctx.write(&format!("{DATA}/{file}"), text.as_bytes())?;
     }
@@ -651,7 +707,6 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         grass,
         &cave_lights,
         nav_region,
-        (gn, t.size / (gn - 1) as f32),
         &dungeons,
     );
     ctx.write("world.tscn", scene.as_bytes())?;
@@ -755,9 +810,17 @@ fn terrain_material(
 ) -> String {
     let mut tiles = vec![2.0f32; 12];
     let mut tri = vec![0i32; 12];
+    // how much standing rain water each layer holds (`terrain.wesl` puddles), and snow
+    let mut holds = vec![0.0f32; 12];
+    let mut snow = vec![0.0f32; 12];
     for (k, l) in layers.iter().enumerate().take(12) {
         tiles[k] = l.tile_m;
         tri[k] = matches!(l.index, 6 | 7) as i32;
+        holds[k] = [0.12, 0.1, 0.35, 0.9, 1.0, 0.7, 0.55, 0.55, 0.15, 0.0, 1.0, 0.0]
+            .get(l.index)
+            .copied()
+            .unwrap_or(0.0);
+        snow[k] = (l.index == 9) as u32 as f32;
     }
     let list = |v: Vec<String>| v.join(", ");
     format!(
@@ -783,6 +846,8 @@ shader_parameter/mask_array = ExtResource("4_m")
 shader_parameter/layer_count = {count}
 shader_parameter/layer_tile = PackedFloat32Array({tiles})
 shader_parameter/layer_triplanar = PackedInt32Array({tri})
+shader_parameter/layer_holds = PackedFloat32Array({holds})
+shader_parameter/layer_snow = PackedFloat32Array({snow})
 shader_parameter/terrain_origin = Vector2({ox}, {oz})
 shader_parameter/terrain_size = {size}
 shader_parameter/sea_level = {sea}
@@ -798,6 +863,8 @@ shader_parameter/normal_strength = 1.0
         count = layers.len().min(12),
         tiles = list(tiles.iter().map(|v| f(*v)).collect()),
         tri = list(tri.iter().map(|v| v.to_string()).collect()),
+        holds = list(holds.iter().map(|v| f(*v)).collect()),
+        snow = list(snow.iter().map(|v| f(*v)).collect()),
         ox = f(origin[0]),
         oz = f(origin[1]),
         size = f(size),
@@ -805,7 +872,626 @@ shader_parameter/normal_strength = 1.0
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The editor's meadow for `wb_grass.gd`: its three blade patch meshes (raw buffers: positions,
+/// uv, uv2, custom0, indices), the heights it stands on (`terrain/heights.f32`, `gn` a side,
+/// `gcell` apart, divided by `gcell`) and its settings: the editor's colour set for the art style,
+/// the grass amount, lushness, blade height and level-of-detail ranges.
+fn write_grass(s: &Snapshot, ctx: &Ctx, gn: usize, gcell: f32) -> Result<(), String> {
+    use bevy::mesh::VertexAttributeValues as V;
+    let realistic = !s.painted;
+    let mut meshes = vec![];
+    for (lod, m) in crate::grass::export_patch_meshes(realistic).iter().enumerate() {
+        let f3 = |a| match m.attribute(a) {
+            Some(V::Float32x3(v)) => v.iter().flatten().copied().collect::<Vec<f32>>(),
+            _ => vec![],
+        };
+        let f2 = |a| match m.attribute(a) {
+            Some(V::Float32x2(v)) => v.iter().flatten().copied().collect::<Vec<f32>>(),
+            _ => vec![],
+        };
+        let pos = f3(bevy::mesh::Mesh::ATTRIBUTE_POSITION);
+        let uv = f2(bevy::mesh::Mesh::ATTRIBUTE_UV_0);
+        let uv2 = f2(bevy::mesh::Mesh::ATTRIBUTE_UV_1);
+        let col: Vec<f32> = match m.attribute(bevy::mesh::Mesh::ATTRIBUTE_COLOR) {
+            Some(V::Float32x4(v)) => v.iter().flatten().copied().collect(),
+            _ => vec![],
+        };
+        let idx: Vec<u32> = match m.indices() {
+            Some(bevy::mesh::Indices::U32(i)) => i.clone(),
+            Some(i) => i.iter().map(|v| v as u32).collect(),
+            None => vec![],
+        };
+        let nv = pos.len() / 3;
+        let mut bin: Vec<u8> = vec![];
+        for part in [&pos, &uv, &uv2, &col] {
+            bin.extend_from_slice(bytemuck::cast_slice(part));
+        }
+        bin.extend_from_slice(bytemuck::cast_slice(&idx));
+        let file = format!("grass/patch_lod{lod}");
+        ctx.write(&format!("{DATA}/{file}.bin"), &bin)?;
+        ctx.write_json(
+            &format!("{DATA}/{file}.json"),
+            &json!({ "bin": res(&format!("{file}.bin")), "vertices": nv, "indices": idx.len() }),
+        )?;
+        meshes.push(res(&format!("{file}.json")));
+    }
+    // (base, lush tip, dry tip, cold tip, warm tip), linear, as `grass::update_params`
+    let colours: [[f32; 3]; 5] = if s.painted {
+        [[0.12, 0.2, 0.04], [0.38, 0.54, 0.1], [0.66, 0.5, 0.16], [0.2, 0.36, 0.15], [0.44, 0.56, 0.08]]
+    } else {
+        [[0.085, 0.115, 0.03], [0.3, 0.42, 0.1], [0.55, 0.45, 0.2], [0.16, 0.27, 0.12], [0.36, 0.5, 0.07]]
+    };
+    let k = s.detail.clamp(0.65, 1.5);
+    let r = crate::grass::RANGES;
+    ctx.write_json(
+        &format!("{DATA}/grass/grass.json"),
+        &json!({
+            "shader": res("shaders/wb_grass.gdshader"),
+            "meshes": meshes,
+            "density": res("terrain/grass.png"),
+            "heights": res("terrain/heights.f32"),
+            "height_vertices": gn,
+            "height_cell": gcell,
+            "half": s.terrain.half(),
+            "sea_level": s.terrain.sea_level,
+            "ranges": [r[0] * k.min(1.0), r[1] * k.min(1.2), r[2] * k],
+            "params": {
+                "base_c": colours[0], "tip_c": colours[1], "dry_c": colours[2], "cold_c": colours[3], "warm_c": colours[4],
+                "amount": s.grass_amount,
+                "realistic": realistic as u32,
+                "lushness": s.grass_lushness.clamp(0.0, 1.0),
+                "height_scale": s.grass_height.clamp(0.3, 2.5),
+            },
+        }),
+    )
+}
+
+/// The shade under the tree crowns for the whole world (`nature::shade`, whose map the editor
+/// builds round the camera): every tree's crown disc splatted on a grid, the cover blurred over
+/// about a crown's height, and the crowns' base and top heights. Written as `atmosphere/canopy.f32`
+/// (sky visibility, crown top, crown base per texel). Returns its grid, or `None` with no trees.
+fn write_canopy(
+    s: &Snapshot,
+    ctx: &Ctx,
+    models: &[ModelOut],
+    inst: &[Vec<Inst>],
+) -> Result<Option<Value>, String> {
+    struct Crown {
+        c: Vec2,
+        r: f32,
+        base: f32,
+        top: f32,
+        alpha: f32,
+    }
+    let mut crowns = vec![];
+    for (m, list) in models.iter().zip(inst) {
+        if s.assets[m.asset].category != crate::objects::Category::Trees {
+            continue;
+        }
+        for i in list {
+            let Some(v) = m.variants.get(i.variant as usize).or(m.variants.first()) else {
+                continue;
+            };
+            let height = v.height * i.scale;
+            if height < 2.5 {
+                continue;
+            }
+            crowns.push(Crown {
+                c: Vec2::new(i.pos[0], i.pos[2]),
+                r: (v.width * i.scale * 0.42).max(1.2),
+                base: i.pos[1] + height * 0.3,
+                top: i.pos[1] + height,
+                alpha: 0.88,
+            });
+        }
+    }
+    if crowns.is_empty() || s.canopy_shade <= 0.0 {
+        return Ok(None);
+    }
+    // the editor's 2 m texels where the map stays small, coarser for big worlds (blurs scaled)
+    let size = s.terrain.half() * 2.0;
+    let texel = (size / 2048.0).max(2.0);
+    let n = (size / texel).ceil() as usize;
+    let origin = Vec2::splat(-s.terrain.half());
+    let mut trans = vec![1.0f32; n * n];
+    let mut top = vec![0.0f32; n * n];
+    let mut base = vec![0.0f32; n * n];
+    let mut weight = vec![0.0f32; n * n];
+    for c in &crowns {
+        let g = (c.c - origin) / texel;
+        let rt = c.r / texel;
+        let (x0, x1) = ((g.x - rt).floor().max(0.0), (g.x + rt).ceil().min(n as f32 - 1.0));
+        let (z0, z1) = ((g.y - rt).floor().max(0.0), (g.y + rt).ceil().min(n as f32 - 1.0));
+        if x0 > x1 || z0 > z1 {
+            continue;
+        }
+        for z in z0 as usize..=z1 as usize {
+            for x in x0 as usize..=x1 as usize {
+                let d = Vec2::new(x as f32 + 0.5, z as f32 + 0.5).distance(g) / rt;
+                let w = 1.0 - crate::noise::smoothstep(0.7, 1.0, d);
+                if w <= 0.0 {
+                    continue;
+                }
+                let k = z * n + x;
+                let a = c.alpha * w;
+                trans[k] *= 1.0 - a;
+                top[k] += c.top * a;
+                base[k] += c.base * a;
+                weight[k] += a;
+            }
+        }
+    }
+    let blur = |v: &mut Vec<f32>, metres: f32| {
+        let r = ((metres / texel).round() as usize).max(1);
+        // separable box blur
+        let mut tmp = v.clone();
+        for z in 0..n {
+            let mut acc = 0.0;
+            let row = z * n;
+            for x in 0..=r.min(n - 1) {
+                acc += v[row + x];
+            }
+            for x in 0..n {
+                let lo = x.saturating_sub(r);
+                let hi = (x + r).min(n - 1);
+                tmp[row + x] = acc / (hi - lo + 1) as f32;
+                if x + r + 1 < n {
+                    acc += v[row + x + r + 1];
+                }
+                if x >= r {
+                    acc -= v[row + x - r];
+                }
+            }
+        }
+        for x in 0..n {
+            let mut acc = 0.0;
+            for z in 0..=r.min(n - 1) {
+                acc += tmp[z * n + x];
+            }
+            for z in 0..n {
+                let lo = z.saturating_sub(r);
+                let hi = (z + r).min(n - 1);
+                v[z * n + x] = acc / (hi - lo + 1) as f32;
+                if z + r + 1 < n {
+                    acc += tmp[(z + r + 1) * n + x];
+                }
+                if z >= r {
+                    acc -= tmp[(z - r) * n + x];
+                }
+            }
+        }
+    };
+    let mut near: Vec<f32> = trans.iter().map(|t| 1.0 - t).collect();
+    let mut wide = near.clone();
+    for _ in 0..2 {
+        // (the editor's radii at 2 m texels: 1, 5 and 6 texels)
+        blur(&mut near, 2.0);
+        blur(&mut wide, 10.0);
+        blur(&mut top, 12.0);
+        blur(&mut base, 12.0);
+        blur(&mut weight, 12.0);
+    }
+    let k = 0.85 * s.canopy_shade.min(1.0);
+    let mut out = Vec::with_capacity(n * n * 3);
+    for i in 0..n * n {
+        let cover = 0.6 * near[i] + 0.4 * wide[i];
+        let (t, b) = if weight[i] > 1e-4 {
+            (top[i] / weight[i], base[i] / weight[i])
+        } else {
+            (0.0, 0.0)
+        };
+        out.extend_from_slice(&[1.0 - k * cover.clamp(0.0, 1.0), t, b]);
+    }
+    ctx.write(
+        &format!("{DATA}/atmosphere/canopy.f32"),
+        bytemuck::cast_slice(&out),
+    )?;
+    Ok(Some(json!({
+        "file": res("atmosphere/canopy.f32"),
+        "origin": [origin.x, origin.y],
+        "texel": texel,
+        "size": n,
+        // the editor's map ends ~350 m round the camera: its shade fades out there
+        "fade": [300.0, 370.0],
+    })))
+}
+
+/// The weather and atmosphere data `wb_atmosphere.gd` runs on: the zone and biome maps (the
+/// terrain's own grid), every weather's parameters (`Weather::params`), each zone's weather,
+/// clouds, wind, haze and lighting mood, each biome's weather and mood, the world's clouds, wind/// The distance fog colours the weather runtimes blend between (sRGB under the engine's
+/// exposure): clear haze, storm, sunlit weather fog and dust, and the clear air and zone fog
+/// densities.
+pub(super) fn atmosphere_fog(s: &Snapshot, light: &core::LightOut, exposure: f32) -> Value {
+    let lk = &s.look;
+    let colour_haze = if light.haze_enabled { lk.color_haze.clamp(0.0, 1.0) } else { 0.0 };
+    let haze = Haze::of(s, light, exposure);
+    let storm = Vec3::new(0.42, 0.45, 0.5) * (1.0 - light.night * 0.9);
+    let dust = Vec3::new(0.75, 0.6, 0.4) * (1.0 - light.night * 0.85);
+    json!({
+        "air": Haze::AIR,
+        "zone_density": crate::sky::ZONE_FOG_DENSITY,
+        "clear_color": haze.color,
+        "storm_color": Haze::tone(s, storm, colour_haze, exposure),
+        // weather fog is sunlit air: a light warm grey (calibrated against the editor's
+        // fog, rain and snow), dark at night
+        "weather_color": linear_to_srgb(
+            (Vec3::new(0.80, 0.74, 0.64) * (1.0 - light.night * 0.9) * 0.36 / exposure)
+                .min(Vec3::ONE)
+                .to_array()
+        ),
+        "dust_color": Haze::tone(s, dust, colour_haze, exposure),
+    })
+}
+
+/// The weather tables both engines' runtimes read: weathers by id (`clear`, `cloudy`, `rain`,
+/// `storm`, `snow`, `fog`, `sandstorm`) with their parameters, the zones by map id (their weather,
+/// clouds, wind, haze, lighting mood and play rules: entry banner, flying, mounts, rested area)
+/// and the biome presets by map id (their weather and mood).
+pub(super) fn weather_tables(
+    s: &Snapshot,
+) -> (
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+) {
+    use crate::world::Weather;
+    // weathers by id (`clear`, `cloudy`, `rain`, `storm`, `snow`, `fog`, `sandstorm`)
+    let id = |w: Weather| format!("{w:?}").to_lowercase();
+    let params = |w: Weather| {
+        let p = w.params();
+        json!({ "name": w.name(), "clouds": p.clouds, "fog": p.fog, "wet": p.wet, "rain": p.rain, "snow": p.snow, "dim": p.dim, "dust": p.dust })
+    };
+    let weathers: serde_json::Map<String, Value> =
+        Weather::ALL.iter().map(|w| (id(*w), params(*w))).collect();
+    let zones: serde_json::Map<String, Value> = s
+        .zones
+        .iter()
+        .map(|z| {
+            (
+                z.id.to_string(),
+                json!({
+                    "name": z.name,
+                    "weather_enabled": z.weather_enabled,
+                    "weather": id(z.weather),
+                    "intensity": z.weather_intensity,
+                    "clouds_enabled": z.clouds_enabled,
+                    "cloud_cover": z.cloud_cover,
+                    "wind_enabled": z.wind_enabled,
+                    "wind_speed": z.wind_speed,
+                    "haze_mode": serde_json::to_value(z.haze.mode).unwrap_or(Value::Null),
+                    "haze_amount": z.haze.amount,
+                    "light": z.own_light(),
+                    "banner": format!("{}  ·  {}", z.level_label(), z.zone_type.name()),
+                    "level_min": z.level_min,
+                    "level_max": z.level_max,
+                    "allow_flying": z.allow_flying,
+                    "allow_mounts": z.allow_mounts,
+                    "rested_area": z.rested_area,
+                    "temperature_c": z.temperature,
+                }),
+            )
+        })
+        .collect();
+    let biomes: serde_json::Map<String, Value> = crate::biomes::BiomePreset::ALL
+        .iter()
+        .map(|b| {
+            let d = b.def();
+            let light = (d.mood != crate::world::Mood::Natural).then(|| d.mood.light());
+            (
+                b.id().to_string(),
+                json!({ "name": d.name, "weather": id(d.weather), "intensity": d.weather_intensity, "light": light }),
+            )
+        })
+        .collect();
+    (weathers, zones, biomes)
+}
+
+
+/// and look, and the fog colours for clear, stormy and dusty air under this export's exposure.
+fn write_atmosphere(s: &Snapshot, ctx: &Ctx, canopy: Option<Value>) -> Result<(), String> {
+    use crate::world::Weather;
+    let t = &s.terrain;
+    let n = t.n();
+    for (name, map) in [("zones", &t.zones), ("biomes", &t.biomes)] {
+        let file = format!("atmosphere/{name}.png");
+        ctx.write(
+            &format!("{DATA}/{file}"),
+            &core::png_gray8(n as u32, n as u32, map.clone()),
+        )?;
+        ctx.write(
+            &format!("{DATA}/{file}.import"),
+            data_import(&file).as_bytes(),
+        )?;
+    }
+    // the editor's cloud cover field (`clouds::cover_map`), the same clouds and cloud shadows
+    let cn = 1024u32;
+    let cover: Vec<u8> = core::par_map(cn as usize, |y| {
+        (0..cn)
+            .map(|x| {
+                let v = crate::clouds::cloud_noise(
+                    (x as f32 + 0.5) / cn as f32,
+                    (y as f32 + 0.5) / cn as f32,
+                );
+                (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            })
+            .collect::<Vec<u8>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    ctx.write(
+        &format!("{DATA}/atmosphere/cloud_cover.png"),
+        &core::png_gray8(cn, cn, cover),
+    )?;
+    ctx.write(
+        &format!("{DATA}/atmosphere/cloud_cover.png.import"),
+        data_import("atmosphere/cloud_cover.png")
+            .replace("mipmaps/generate=false", "mipmaps/generate=true")
+            .as_bytes(),
+    )?;
+    // the volumetric clouds' noise: base shape (128³) and detail (32³) as 3D textures (slices in
+    // a grid), and the cirrus veil
+    for (name, img, cols) in [
+        ("cloud_base", crate::clouds::base_volume(), 16u32),
+        ("cloud_detail", crate::clouds::detail_volume(), 8u32),
+    ] {
+        let n = img.texture_descriptor.size.width;
+        let data = img.data.as_ref().ok_or("cloud volume")?;
+        let rows = n / cols;
+        let mut out = image::RgbaImage::new(n * cols, n * rows);
+        for z in 0..n {
+            let (gx, gy) = (z % cols * n, z / cols * n);
+            for y in 0..n {
+                for x in 0..n {
+                    let k = (((z * n + y) * n + x) * 4) as usize;
+                    out.put_pixel(gx + x, gy + y, image::Rgba([data[k], data[k + 1], data[k + 2], data[k + 3]]));
+                }
+            }
+        }
+        let file = format!("atmosphere/{name}.png");
+        ctx.write(&format!("{DATA}/{file}"), &core::png_rgba(&out))?;
+        ctx.write(
+            &format!("{DATA}/{file}.import"),
+            format!(
+                "[remap]\n\nimporter=\"3d_texture\"\ntype=\"CompressedTexture3D\"\n\n[deps]\n\nsource_file=\"{}\"\n\n[params]\n\ncompress/mode=0\ncompress/high_quality=false\ncompress/lossy_quality=0.7\ncompress/hdr_compression=1\ncompress/channel_pack=0\nmipmaps/generate=false\nmipmaps/limit=-1\nslices/horizontal={cols}\nslices/vertical={rows}\n",
+                res(&file)
+            )
+            .as_bytes(),
+        )?;
+    }
+    {
+        let img = crate::clouds::cirrus_map();
+        let n = img.texture_descriptor.size.width;
+        let data = img.data.as_ref().ok_or("cirrus")?;
+        let base = data[..(n * n * 4) as usize].to_vec();
+        ctx.write(
+            &format!("{DATA}/atmosphere/cirrus.png"),
+            &core::png_rgba(&image::RgbaImage::from_raw(n, n, base).ok_or("cirrus")?),
+        )?;
+        ctx.write(
+            &format!("{DATA}/atmosphere/cirrus.png.import"),
+            data_import("atmosphere/cirrus.png")
+                .replace("mipmaps/generate=false", "mipmaps/generate=true")
+                .as_bytes(),
+        )?;
+    }
+    // the editor's shore map: (level of the nearest water, distance to its edge, kind, 1) per texel
+    let (sm, shore) = crate::visuals::shore::build(&s.terrain, &s.water);
+    ctx.write(
+        &format!("{DATA}/atmosphere/shore.f32"),
+        bytemuck::cast_slice(&shore),
+    )?;
+    let light = core::lighting(s);
+    let night = Night::of(s, &light);
+    let exposure = godot_exposure(&light, &night);
+    let lk = &s.look;
+    let l = &s.lighting;
+    let wl = water_light(s, &light);
+    let (weathers, zones, biomes) = weather_tables(s);
+    let id = |w: Weather| format!("{w:?}").to_lowercase();
+    ctx.write_json(
+        &format!("{DATA}/atmosphere/atmosphere.json"),
+        &json!({
+            "grid": { "vertices": n, "cell": t.cell },
+            "sea_level": t.sea_level,
+            "zones_map": res("atmosphere/zones.png"),
+            "biomes_map": res("atmosphere/biomes.png"),
+            "fade_seconds": crate::look::ZONE_FADE,
+            "weathers": weathers,
+            "world": {
+                "clouds": l.cloud_coverage,
+                "cloud_speed": l.cloud_speed,
+                "precipitation": l.precipitation,
+                "lightning": l.rain.lightning,
+                "override": l.weather_override.map(id),
+                "haze_enabled": light.haze_enabled,
+                "haze": l.haze,
+                "night": light.night,
+                "wind": { "dir": [s.wind[0], s.wind[1]], "speed": s.wind[2], "gustiness": s.wind[3] },
+            },
+            "look": { "haze": lk.haze, "color_haze": lk.color_haze, "haze_distance": lk.haze_distance, "air": lk.air, "sunbeams": lk.sunbeams, "mist": lk.mist },
+            "fog": atmosphere_fog(s, &light, exposure),
+            "zones": zones,
+            "biomes": biomes,
+            "clouds": {
+                "cover": res("atmosphere/cloud_cover.png"),
+                "tile": crate::clouds::CLOUD_TILE,
+                "base": crate::clouds::CLOUD_BASE,
+                "offset": crate::clouds::seed_offset(l.cloud_seed).to_array(),
+                "speed": l.cloud_speed,
+                "shadows": l.cloud_shadows,
+                "base_tex": res("atmosphere/cloud_base.png"),
+                "detail_tex": res("atmosphere/cloud_detail.png"),
+                "cirrus_tex": res("atmosphere/cirrus.png"),
+                "type": l.cloud_type.clamp(0.0, 1.0),
+                "density": l.cloud_density.clamp(0.05, 4.0),
+                "cirrus": l.cirrus.clamp(0.0, 1.0),
+                "steps": l.cloud_quality.march().0,
+                "light_steps": l.cloud_quality.march().1,
+            },
+            "canopy": canopy,
+            "shore": {
+                "file": res("atmosphere/shore.f32"), "size": sm,
+                "sea_hs": crate::ocean::SeaState::at((s.ocean.waves * 1.6).clamp(0.0, 4.0)).hs(),
+                "shore_foam": s.ocean.shore_foam,
+                "water": Vec3::from_array(s.ocean.shallow.map(|c| crate::terrain::textures::srgb_to_lin_lut()[(c.clamp(0.0, 1.0) * 255.0) as usize])).to_array(),
+            },
+            "rain": { "puddles": l.rain.puddles },
+            "water_light": {
+                "sun_dir": wl.0.to_array(), "sun_disp": wl.1.to_array(),
+                "sky_clear": wl.2.to_array(), "sky_storm": wl.3.to_array(), "sky_dust": wl.4.to_array(),
+            },
+        }),
+    )
+}
+
+/// The key light (sun, or the moon at night) and the sky's irradiance in the editor's display units,
+/// as `water::update_water_materials` hands them to its water shader (illuminance × exposure / π,
+/// warmed when low; the fog colour × 0.8), for Godot's water: (direction, key, sky clear, sky
+/// under storm cloud, sky in dust), linear.
+pub(super) fn water_light(s: &Snapshot, light: &core::LightOut) -> (Vec3, Vec3, Vec3, Vec3, Vec3) {
+    let l = &s.lighting;
+    let lk = &s.look;
+    let sun_y = light.sun_dir.y;
+    let day = crate::noise::smoothstep(-0.2, 0.18, sun_y);
+    let twilight = (1.0 - crate::noise::smoothstep(-0.04, 0.01, sun_y))
+        * crate::noise::smoothstep(-0.22, -0.10, sun_y);
+    let ev = 10.4 + 4.2 * day - 1.85 * twilight + l.exposure_comp
+        - lk.exposure
+        - lk.night_lift * light.night;
+    let exp = 1.0 / (2f32.powf(ev) * 1.2);
+    let (dir, col, illum) = if light.night <= 0.5 {
+        let above = crate::noise::smoothstep(-0.06, 0.02, sun_y);
+        (
+            light.sun_dir,
+            lk.sun_color(),
+            130_000.0 * l.sun_strength * lk.sun * above.max(0.0001),
+        )
+    } else {
+        let m = crate::sky::moon_direction(l);
+        let lit = 0.12 + 0.88 * crate::sky::moon_illumination(l.moon_phase);
+        let above = crate::noise::smoothstep(-0.02, 0.1, m.y);
+        (
+            m,
+            Vec3::ONE,
+            crate::sky::MOON_LUX * l.moon_strength * lit * light.night * above,
+        )
+    };
+    let warm = crate::noise::smoothstep(0.0, 0.35, dir.y);
+    let tint = Vec3::new(1.0, 0.62, 0.38).lerp(Vec3::ONE, warm);
+    let key = col * tint * (illum * exp / std::f32::consts::PI);
+    let fog = Vec3::from_array(light.fog_color) * 0.8;
+    let storm = Vec3::new(0.42, 0.45, 0.5) * (1.0 - light.night * 0.9) * 0.8;
+    let dust = Vec3::new(0.75, 0.6, 0.4) * (1.0 - light.night * 0.85) * 0.8;
+    (dir, key, fog, storm, dust)
+}
+
+/// The editor's outdoor haze as one exponential Godot fog, calibrated side by side against the
+/// editor's view: most of what it shows far off is the physical sky's aerial perspective (on
+/// whenever haze is on, `sky::update_sun_moon`: its reach follows the haze switch, not the
+/// amount), then the distance fog of the haze amount and the look's colour haze (`look_post`),
+/// whose tint also colours the fog.
+pub(super) struct Haze {
+    /// per metre
+    pub(super) density: f32,
+    /// sRGB, under Godot's exposure
+    pub(super) color: [f32; 3],
+    sun_scatter: f32,
+}
+
+impl Haze {
+    /// Aerial perspective of the editor's atmosphere near the ground (per metre).
+    const AIR: f32 = 5.0e-5;
+    /// The editor's fog colour → Godot's (before exposure): darker, and bluer for the sky's own
+    /// scattered light in it.
+    const TINT: Vec3 = Vec3::new(0.27, 0.29, 0.34);
+
+    pub(super) fn of(s: &Snapshot, light: &core::LightOut, exposure: f32) -> Self {
+        let lk = &s.look;
+        let on = if light.haze_enabled { 1.0 } else { 0.0 };
+        let colour_haze = lk.color_haze.clamp(0.0, 1.0) * on;
+        let density = on * Self::AIR
+            + light.fog_density_exp(3000.0)
+            + colour_haze / lk.haze_distance.max(10.0) * 0.5;
+        Haze {
+            density,
+            color: Self::tone(s, Vec3::from_array(light.fog_color), colour_haze, exposure),
+            sun_scatter: 0.35 * (1.0 - light.night) * 0.3 * on,
+        }
+    }
+
+    /// An editor fog colour (linear) as Godot's fog colour (sRGB): tinted by the look's colour
+    /// haze as the editor does, with Godot's exposure taken out.
+    fn tone(s: &Snapshot, mut c: Vec3, colour_haze: f32, exposure: f32) -> [f32; 3] {
+        let lk = &s.look;
+        if colour_haze > 0.0 {
+            let hz = Color::srgb(lk.haze_color[0], lk.haze_color[1], lk.haze_color[2]).to_linear();
+            let hz = Vec3::new(hz.red, hz.green, hz.blue);
+            let lum = |v: Vec3| v.dot(Vec3::new(0.2126, 0.7152, 0.0722)).max(1e-4);
+            c = c.lerp(hz * (lum(c) / lum(hz)), (colour_haze * 0.8).min(1.0));
+        }
+        // the editor's fog colour isn't exposed with the scene; Godot's is
+        linear_to_srgb((c * Self::TINT / exposure).min(Vec3::ONE).to_array())
+    }
+}
+
+/// Godot's tonemap exposure for the editor's: its exposure, the night opening and the stops Godot's
+/// tonemappers need to land at the editor's brightness (measured side by side on sunlit ground).
+fn godot_exposure(light: &core::LightOut, night: &Night) -> f32 {
+    const CALIBRATION_EV: f32 = 0.3;
+    2f32.powf(light.exposure + night.ev + CALIBRATION_EV).clamp(0.25, 64.0)
+}
+
+/// The editor's night ambient fill colour (sRGB).
+const NIGHT_FILL_COLOR: [f32; 3] = [0.55, 0.62, 0.85];
+
+/// How the editor lights the world at night, in Godot's terms (light energy 1.1 = the editor's
+/// default sun, `sky::update_sun_moon`).
+pub(super) struct Night {
+    /// stops the exposure opens up by
+    pub(super) ev: f32,
+    moon: f32,
+    /// unit vector towards the moon
+    moon_dir: Vec3,
+    /// ambient fill energy
+    fill: f32,
+    /// 0 day … 1 night
+    night: f32,
+}
+
+impl Night {
+    /// The sky's energy under the opened exposure: most of the gain undone, so the night sky stays
+    /// a deep blue (all of it leaves a flat grey).
+    pub(super) fn sky_energy(&self) -> f32 {
+        2f32.powf(-0.6 * self.ev) * (0.5 + 0.5 * self.night)
+    }
+
+    /// Self-lit surfaces (lava, glowing water) look the same by day and by night in the editor:
+    /// their emission undoes the opened exposure.
+    fn emission(&self) -> f32 {
+        2f32.powf(-self.ev)
+    }
+
+    pub(super) fn of(s: &Snapshot, light: &core::LightOut) -> Self {
+        let l = &s.lighting;
+        let sun_y = light.sun_dir.y;
+        let day = crate::noise::smoothstep(-0.2, 0.18, sun_y);
+        let twilight = (1.0 - crate::noise::smoothstep(-0.04, 0.01, sun_y))
+            * crate::noise::smoothstep(-0.22, -0.10, sun_y);
+        let moon_dir = crate::sky::moon_direction(l);
+        let lit = 0.12 + 0.88 * crate::sky::moon_illumination(l.moon_phase);
+        let above = crate::noise::smoothstep(-0.02, 0.1, moon_dir.y);
+        let per_lux = 1.1 / 130_000.0;
+        Night {
+            ev: (14.6 - 10.4) * (1.0 - day) + 1.85 * twilight + s.look.night_lift * light.night,
+            moon: crate::sky::MOON_LUX * l.moon_strength * lit * light.night * above * per_lux,
+            moon_dir,
+            fill: crate::sky::NIGHT_FILL * light.night * l.night_brightness * per_lux,
+            night: light.night,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn world_scene(
     s: &Snapshot,
@@ -820,7 +1506,6 @@ fn world_scene(
     grass: bool,
     cave_lights: &[super::lights::CaveLight],
     nav_region: bool,
-    grass_grid: (usize, f32),
     dungeons: &DungeonsOut,
 ) -> String {
     let mut sc = Scene {
@@ -833,43 +1518,83 @@ fn world_scene(
 
     // sky: a procedural gradient in the editor's colours for this hour (physical skies render
     // much greyer than Skyfold Studio's atmosphere at the same exposure)
+    // night: the editor's eye opens up (EV 14.6 by day, 10.4 at night, more in the twilight when
+    // the night fill is only fading in), and a moon and a cool ambient fill light the land
+    let night = Night::of(s, light);
     let (top, horizon) = sky_colors(light, s.look.haze * light.haze);
+    // the sky shader: these colours, the sun, the cloud deck (the weather moves it,
+    // `wb_atmosphere.gd`), cirrus and stars
+    let sky_shader = sc.ext("Shader", &res("shaders/wb_sky.gdshader"));
+    let base_tex = sc.ext("CompressedTexture3D", &res("atmosphere/cloud_base.png"));
+    let detail_tex = sc.ext("CompressedTexture3D", &res("atmosphere/cloud_detail.png"));
+    let cirrus_tex = sc.ext("Texture2D", &res("atmosphere/cirrus.png"));
+    let l = &s.lighting;
+    let (steps, light_steps, _) = l.cloud_quality.march();
     let sky_mat = sc.sub(
-        "ProceduralSkyMaterial",
+        "ShaderMaterial",
         &format!(
-            "sky_top_color = {}
-sky_horizon_color = {}
-sky_curve = 0.12
-sky_energy_multiplier = 1.0
-ground_bottom_color = Color(0.16, 0.17, 0.15, 1)
-ground_horizon_color = {}
-ground_curve = 0.05
-sun_angle_max = 25.0
-sun_curve = 0.1",
+            "shader = {sky_shader}\nshader_parameter/top_color = {}\nshader_parameter/horizon_color = {}\nshader_parameter/sky_energy = {}\nshader_parameter/cloud_cover = {}\nshader_parameter/cloud_type = {}\nshader_parameter/cloud_density = {}\nshader_parameter/cirrus = {}\nshader_parameter/cloud_seed = {}\nshader_parameter/night = {}\nshader_parameter/stars = {}\nshader_parameter/sky_tint = {}\nshader_parameter/sky_tint_amount = {}\nshader_parameter/base_tex = {base_tex}\nshader_parameter/detail_tex = {detail_tex}\nshader_parameter/cirrus_tex = {cirrus_tex}\nshader_parameter/steps = {}\nshader_parameter/light_steps = {}",
             color(linear_to_srgb(top.to_array())),
             color(linear_to_srgb(horizon.to_array())),
-            color(linear_to_srgb(horizon.to_array()))
+            f(night.sky_energy()),
+            f(l.cloud_coverage),
+            f(l.cloud_type),
+            f(l.cloud_density),
+            f(l.cirrus),
+            f((l.cloud_seed % 10_000) as f32),
+            f(light.night),
+            f(if l.stars { 1.0 } else { 0.0 }),
+            color(s.look.sky_tint),
+            f(s.look.sky_tint_amount * (0.35 + 0.65 * (1.0 - light.night))),
+            f(steps),
+            f(light_steps),
         ),
     );
-    let sky = sc.sub("Sky", &format!("sky_material = {sky_mat}"));
-    let fog_density = light.fog_density_exp(3000.0);
-    let fog_col = linear_to_srgb(light.fog_color);
+    // (drifting clouds re-light the scene every frame: realtime radiance at 256 px)
+    let sky = sc.sub(
+        "Sky",
+        &format!("sky_material = {sky_mat}\nprocess_mode = 3\nradiance_size = 3"),
+    );
+    let exposure = godot_exposure(light, &night);
+    let haze = Haze::of(s, light, exposure);
+    let lut = sc.ext("Texture3D", &res("look/grade_lut.png"));
     let env = sc.sub(
         "Environment",
         &format!(
-            "background_mode = 2\nsky = {sky}\nambient_light_source = 3\nambient_light_sky_contribution = 1.0\nreflected_light_source = 2\n\
-             tonemap_mode = 2\ntonemap_exposure = {exposure}\ntonemap_white = 6.0\nssao_enabled = true\nssao_radius = 1.5\nssao_intensity = 1.5\n\
+            "background_mode = 2\nsky = {sky}\nambient_light_source = 3\nambient_light_color = {fill_col}\nambient_light_energy = 1.0\nambient_light_sky_contribution = {sky_share}\nreflected_light_source = 2\n\
+             tonemap_mode = {tonemap}\ntonemap_exposure = {exposure}\ntonemap_white = 6.0\nssao_enabled = true\nssao_radius = 1.5\nssao_intensity = 1.5\n\
              glow_enabled = true\nglow_intensity = {glow}\nglow_bloom = {bloom}\n\
-             fog_enabled = {fog}\nfog_light_color = {fog_col}\nfog_density = {fog_density}\nfog_aerial_perspective = 0.6\nfog_sky_affect = 0.0\n\
-             adjustment_enabled = true\nadjustment_contrast = {contrast}\nadjustment_saturation = {saturation}",
-            exposure = f(2f32.powf(light.exposure).clamp(0.25, 4.0)),
+             fog_enabled = {fog}\nfog_light_color = {fog_col}\nfog_density = {fog_density}\nfog_sun_scatter = {sun_scatter}\nfog_aerial_perspective = 0.0\nfog_sky_affect = 0.0\n\
+             volumetric_fog_enabled = false\nvolumetric_fog_length = 800.0\nvolumetric_fog_sky_affect = 0.0\nvolumetric_fog_ambient_inject = 0.5\n\
+             adjustment_enabled = true\nadjustment_contrast = 1.0\nadjustment_saturation = 1.0\nadjustment_color_correction = {lut}",
+            // (the look's saturation and contrast are in the LUT, after tonemapping as in the editor)
+            tonemap = look::tonemap_mode(s.look.tone),
+            lut = lut,
+            exposure = f(exposure),
+            // (Godot scales the sky's ambient by the energy too: the fill's level is in its colour)
+            // by day most of the ambient is warm light bounced off the ground (the editor's
+            // environment light has it; Godot's sky alone reads too blue and too bright in the
+            // shade: calibrated side by side), at night the editor's cool fill
+            fill_col = color(linear_to_srgb({
+                let [r, g, b] = NIGHT_FILL_COLOR;
+                let c = Color::srgb(r, g, b).to_linear();
+                let day = Vec3::from_array(light.sun_color)
+                    * Vec3::new(0.084, 0.068, 0.040)
+                    * light.sun_strength.min(1.5)
+                    * (1.0 - light.night);
+                [
+                    c.red * night.fill + day.x,
+                    c.green * night.fill + day.y,
+                    c.blue * night.fill + day.z,
+                ]
+            })),
+            sky_share = f(0.3 * (1.0 - light.night) + 0.1 * light.night),
             glow = f(0.4 + light.bloom * 2.0),
             bloom = f(light.bloom * 0.3),
-            fog = light.fog,
-            fog_col = color(fog_col),
-            fog_density = f(fog_density),
-            contrast = f(light.contrast),
-            saturation = f(light.saturation),
+            fog = haze.density > 0.0,
+            fog_col = color(haze.color),
+            fog_density = f(haze.density),
+            sun_scatter = f(haze.sun_scatter),
         ),
     );
     sc.node(
@@ -891,8 +1616,30 @@ sun_curve = 0.1",
             "transform = {}\nlight_color = {}\nlight_energy = {}\nlight_angular_distance = 0.5\nshadow_enabled = true\ndirectional_shadow_mode = 2\ndirectional_shadow_max_distance = 500.0\ndirectional_shadow_blend_splits = true\nmetadata/wb_hour = {}",
             transform(Mat3::from_cols(x, y, z), Vec3::new(0.0, 500.0, 0.0)),
             color(sun_col),
-            f((light.sun_strength * 1.1).max(0.02)),
+            f(light.sun_strength * 1.1),
             f(light.hour)
+        ),
+    );
+    if night.moon > 0.0 {
+        let z = night.moon_dir;
+        let x = Vec3::Y.cross(z).normalize_or(Vec3::X);
+        sc.node(
+            "[node name=\"Moon\" type=\"DirectionalLight3D\" parent=\".\"]",
+            &format!(
+                "transform = {}\nlight_color = Color(0.75, 0.82, 1, 1)\nlight_energy = {}\nshadow_enabled = {}\ndirectional_shadow_mode = 2\ndirectional_shadow_max_distance = 300.0",
+                transform(Mat3::from_cols(x, z.cross(x), z), Vec3::new(0.0, 500.0, 0.0)),
+                f(night.moon),
+                light.night > 0.6 && z.y > 0.05
+            ),
+        );
+    }
+    // weather, zone moods, clouds, rain and snow, fog and mist as the camera moves
+    let atmosphere = sc.ext("Script", &res("scripts/wb_atmosphere.gd"));
+    sc.node(
+        "[node name=\"Atmosphere\" type=\"Node3D\" parent=\".\"]",
+        &format!(
+            "script = {atmosphere}\ndata_path = {}",
+            quote(&res("atmosphere/atmosphere.json"))
         ),
     );
     sc.node(
@@ -905,12 +1652,20 @@ sun_curve = 0.1",
     if ocean || water_bodies {
         let shader = sc.ext("Shader", &res("shaders/water.gdshader"));
         let ripples = sc.ext("Texture2D", &res("water/water_normal.png"));
-        let p = water_params(&s.ocean, true, false);
+        let noise = sc.ext("Texture2D", &res("water/noise.png"));
+        let foam = sc.ext("Texture2D", &res("water/foam.png"));
+        let p = water_params(&s.ocean, true, false, night.emission());
         let mut body = format!(
-            "render_priority = 0\nshader = {shader}\nshader_parameter/ripple_normal = {ripples}"
+            "render_priority = 0\nshader = {shader}\nshader_parameter/ripple_normal = {ripples}\nshader_parameter/noise_tex = {noise}\nshader_parameter/foam_tex = {foam}"
         );
         for (k, v) in p.as_object().into_iter().flatten() {
             let val = match v {
+                Value::Array(a) if a.len() == 3 && (k == "extinct" || k == "inscat") => format!(
+                    "Vector3({}, {}, {})",
+                    f(a[0].as_f64().unwrap_or(0.0) as f32),
+                    f(a[1].as_f64().unwrap_or(0.0) as f32),
+                    f(a[2].as_f64().unwrap_or(0.0) as f32)
+                ),
                 Value::Array(a) if a.len() == 3 => color([
                     a[0].as_f64().unwrap_or(0.0) as f32,
                     a[1].as_f64().unwrap_or(0.0) as f32,
@@ -1010,7 +1765,7 @@ sun_curve = 0.1",
         }
     }
     // the placed objects' fires (braziers, torch stands, fire pits, campfires): real fire and light
-    fire_nodes(&mut sc, &s.fires, true);
+    fire_nodes(&mut sc, &s.fires, Some(0.15 + 0.85 * light.night));
     if nav_region {
         let nav = sc.ext("NavigationMesh", &res("navigation/navmesh.tres"));
         sc.node(
@@ -1033,12 +1788,8 @@ sun_curve = 0.1",
         sc.node(
             "[node name=\"Grass\" type=\"Node3D\" parent=\".\"]",
             &format!(
-                "script = {script}\ntufts_path = {}\ndensity_path = {}\nheights_path = {}\nvertices = {}\ncell = {}",
-                quote(&res("terrain/grass_tufts.glb")),
-                quote(&res("terrain/grass.png")),
-                quote(&res("terrain/heights.f32")),
-                grass_grid.0,
-                f(grass_grid.1)
+                "script = {script}\ndata_path = {}",
+                quote(&res("grass/grass.json"))
             ),
         );
     }
@@ -1073,7 +1824,8 @@ sun_curve = 0.1",
             if m.kind != "fishing" {
                 sc.node(
                     &format!("[node name=\"Label\" type=\"Label3D\" parent=\"Gameplay/{name}\"]"),
-                    &format!("transform = {}\nbillboard = 1\npixel_size = 0.02\nfont_size = 48\noutline_size = 10\ntext = {}", transform(Mat3::IDENTITY, Vec3::new(0.0, 4.0, 0.0)), quote(&m.name)),
+                    // (unshaded text: undo the exposure so it reads the same by day and by night)
+                    &format!("transform = {}\nbillboard = 1\npixel_size = 0.02\nmodulate = {}\nfont_size = 48\noutline_size = 10\ntext = {}", transform(Mat3::IDENTITY, Vec3::new(0.0, 4.0, 0.0)), color([1.0 / exposure; 3]), quote(&m.name)),
                 );
             }
         }
@@ -1094,6 +1846,23 @@ sun_curve = 0.1",
         "[node name=\"Camera\" type=\"Camera3D\" parent=\".\"]",
         &format!("transform = {}\ncurrent = true\nfov = 50.0\nnear = 0.1\nfar = {}\nscript = {camera_script}\nsea_level = {}", transform(Mat3::from_cols(xc, yc, zc), eye), f(t.size * 3.0), f(t.sea)),
     );
+    // the look's vignette and film grain over the whole view
+    if s.look.vignette > 1e-3 || s.look.grain > 1e-4 {
+        let post = sc.ext("Shader", &res("shaders/wb_post.gdshader"));
+        let mat = sc.sub(
+            "ShaderMaterial",
+            &format!(
+                "render_priority = 127\nshader = {post}\nshader_parameter/vignette = {}\nshader_parameter/grain = {}",
+                f(s.look.vignette),
+                f(s.look.grain)
+            ),
+        );
+        let quad = sc.sub("QuadMesh", "size = Vector2(1, 1)");
+        sc.node(
+            "[node name=\"LookPost\" type=\"MeshInstance3D\" parent=\"Camera\"]",
+            &format!("transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1)\ncast_shadow = 0\nextra_cull_margin = 16384.0\nignore_occlusion_culling = true\nmesh = {quad}\nmaterial_override = {mat}"),
+        );
+    }
     sc.node(
         "[node name=\"Hints\" type=\"CanvasLayer\" parent=\".\"]",
         "",
@@ -1404,7 +2173,7 @@ fn dungeon_scene(
         );
     }
     // the fires' flames (their lights are the dungeon's)
-    fire_nodes(&mut sc, &d.fires, false);
+    fire_nodes(&mut sc, &d.fires, None);
     // cracks, stains, drips, blood, soot, runes: Decal nodes projecting down their -Y onto the surfaces
     if let Some(m) = d.map.as_ref().filter(|m| !m.decals.is_empty()) {
         sc.node("[node name=\"Decals\" type=\"Node3D\" parent=\".\"]", "");
@@ -1533,7 +2302,9 @@ fn dungeon_scene(
 /// The fires' flames: AetherFX's fire baked to flipbooks, a quad each turning to the camera
 /// (`wb_flame.gdshader`; a material per fire and colour) under a `Fires` node; `lights`: the
 /// fires that throw a light of their own get a flickering OmniLight3D.
-fn fire_nodes(sc: &mut Scene, fires: &[crate::flames::Fire], lights: bool) {
+/// `lights`: each fire's light too, at this share of its full (night-time) strength, as the editor
+/// dims fires by day.
+fn fire_nodes(sc: &mut Scene, fires: &[crate::flames::Fire], lights: Option<f32>) {
     let list = crate::flames::fires_json(fires);
     if list.is_empty() {
         return;
@@ -1594,8 +2365,11 @@ fn fire_nodes(sc: &mut Scene, fires: &[crate::flames::Fire], lights: bool) {
             &format!("[node name=\"{id}_{k}\" type=\"MeshInstance3D\" parent=\"Fires\"]"),
             &format!("transform = {}\nmesh = {quad}\nmaterial_override = {mat}\ncast_shadow = 0\ninstance_shader_parameters/seed = {}\ninstance_shader_parameters/spread = {}", transform(Mat3::from_diagonal(Vec3::new(w, h, 1.0)), at), f(((k as f32) * 0.618_034).fract()), f(x["spread"].as_f64().unwrap_or(1.0) as f32)),
         );
-        if lights && x["light"] == true {
-            let energy = ((num(&x["light_lumens"]) / 300_000.0).sqrt() * 1.5).clamp(0.2, 4.0);
+        if let Some(share) = lights
+            && x["light"] == true
+        {
+            let energy =
+                ((num(&x["light_lumens"]) / 300_000.0).sqrt() * 1.5).clamp(0.2, 4.0) * share;
             let p = Vec3::new(
                 num(&x["light_position"][0]),
                 num(&x["light_position"][1]),
@@ -1615,6 +2389,17 @@ fn has_sea(s: &Snapshot) -> bool {
 }
 
 fn project(s: &Snapshot) -> String {
+    let light = core::lighting(s);
+    let night = Night::of(s, &light);
+    let (dir, key, sky, _, _) = water_light(s, &light);
+    let v3 = |v: Vec3| format!("Vector3({}, {}, {})", f(v.x), f(v.y), f(v.z));
+    let globals = format!(
+        "[shader_globals]\n\nwb_sun_dir={{\n\"type\": \"vec3\",\n\"value\": {}\n}}\nwb_sun_disp={{\n\"type\": \"vec3\",\n\"value\": {}\n}}\nwb_sky_disp={{\n\"type\": \"vec3\",\n\"value\": {}\n}}\nwb_exposure={{\n\"type\": \"float\",\n\"value\": {}\n}}\nwb_heights={{\n\"type\": \"sampler2D\",\n\"value\": \"\"\n}}\nwb_hgrid={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 0, 0)\n}}\nwb_cover={{\n\"type\": \"sampler2D\",\n\"value\": \"\"\n}}\nwb_cloud={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 0, 0)\n}}\nwb_canopy={{\n\"type\": \"sampler2D\",\n\"value\": \"\"\n}}\nwb_canopy_grid={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 0, 0)\n}}\nwb_canopy_cam={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 300, 370)\n}}\nwb_shore={{\n\"type\": \"sampler2D\",\n\"value\": \"\"\n}}\nwb_shore_p={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 0, 0)\n}}\nwb_rain={{\n\"type\": \"vec4\",\n\"value\": Vector4(0, 0, 0, 0)\n}}\nwb_water_tint={{\n\"type\": \"vec3\",\n\"value\": Vector3(0, 0, 0)\n}}\n",
+        v3(dir),
+        v3(key),
+        v3(sky),
+        f(godot_exposure(&light, &night))
+    );
     format!(
         r#"; Engine configuration file, written by Skyfold Studio.
 
@@ -1625,7 +2410,7 @@ config_version=5
 config/name={name}
 config/description="Exported from Skyfold Studio"
 run/main_scene="res://world.tscn"
-config/features=PackedStringArray("4.3", "Forward Plus")
+config/features=PackedStringArray("4.4", "Forward Plus")
 config/icon="res://icon.svg"
 
 [display]
@@ -1639,8 +2424,19 @@ lights_and_shadows/directional_shadow/size=8192
 lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
 anti_aliasing/quality/msaa_3d=2
 textures/default_filters/anisotropic_filtering_level=4
-"#,
-        name = quote(&s.name)
+{sharpen}
+{globals}"#,
+        name = quote(&s.name),
+        globals = globals,
+        // the look's sharpening: FSR at full resolution sharpens contrast-adaptively (0 sharpest)
+        sharpen = if s.look.sharpen > 0.01 {
+            format!(
+                "scaling_3d/mode=1\nscaling_3d/scale=1.0\nscaling_3d/fsr_sharpness={}\n",
+                f((1.0 - s.look.sharpen.clamp(0.0, 1.0)) * 2.0)
+            )
+        } else {
+            String::new()
+        }
     )
 }
 
@@ -1649,7 +2445,7 @@ const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" heigh
 
 const README: &str = r#"# {name} — Godot 4 project
 
-Exported from Skyfold Studio. Open it with **Godot 4.3 or newer**: in the Project Manager choose
+Exported from Skyfold Studio. Open it with **Godot 4.4 or newer**: in the Project Manager choose
 *Import*, pick this folder's `project.godot`, open it (the first import takes a minute) and press
 **F5**.
 
@@ -1660,7 +2456,9 @@ hints.
 ## What's in the scene (`world.tscn`)
 
 - **WorldEnvironment**: physical sky, filmic tonemap, SSAO, glow, the world's haze as fog and its
-  colour grade (contrast, saturation); **Sun**: a DirectionalLight3D at the world's time of day.
+  colour grade (contrast, saturation); **Sun**: a DirectionalLight3D at the world's time of day;
+  at night a **Moon** (its phase and strength), the editor's cool night fill as ambient light and
+  the exposure opened up the way the editor's eye adapts.
 - **Terrain** (`world_builder/scripts/wb_terrain.gd`): per tile (one up to 4097 samples,
   2049-sample tiles beyond, listed in `terrain/tiles.json`) the chunk meshes of
   `terrain_<x>_<z>.glb`, each chunk with its own levels of detail (skirted, so neighbours at
@@ -1681,8 +2479,10 @@ hints.
   convex hulls for props and rocks, simplified shapes for buildings (floors and stairs within a
   few centimetres), with a PhysicsMaterial for its footstep surface. Buildings import with
   lightmap UV2s (`light_baking` = static lightmaps).
-- **Grass** (`wb_grass.gd`, in game): photoscanned grass tufts scattered around the camera from
-  the world's grass map.
+- **Grass** (`wb_grass.gd`, `wb_grass.gdshader`, in game): Skyfold Studio's meadow, blade for
+  blade: the editor's patch of blade clumps per 8 m cell round the camera at three levels of
+  detail, shaped by a port of its grass shader from the world's grass map (density, dryness,
+  climate tint, height) and bending in the Atmosphere's wind and gusts.
 - **Roads**: textured road meshes (`world_builder/roads/roads.glb`).
 - **Caves**: caves, mines, sinkholes and rock arches (`world_builder/caves/caves.glb`, one node
   per cave with a trimesh collider). The terrain is open where they cut the ground (no triangles,
@@ -1716,6 +2516,14 @@ hints.
   (`world_builder/navigation/navmesh.tres`: walkable ground, roads and water; one layer, so cave
   floors and upper storeys aren't in it — rebake the region from the colliders for those).
 - **CrystalLights**: the caves' glowing crystals as OmniLight3Ds.
+- **Atmosphere** (`wb_atmosphere.gd`, data in `world_builder/atmosphere/`): the weather as
+  Skyfold Studio runs it. The zone under the camera sets it (its own weather, else the painted
+  biome's; `zones.png` / `biomes.png` map them), with its lighting mood and haze, easing across
+  borders. It drives the cloud deck of the sky shader (`wb_sky.gdshader`: the hour's colours,
+  sun, clouds, cirrus, stars), rain and snow round the camera, the distance fog, volumetric haze
+  (sunbeams), weather fog and ground mist (FogVolumes), the sun's dimming and the exposure under
+  heavy cloud, and lightning in storms. Preview a weather with its `weather_override`; game code
+  can read `current_weather()` and `current_zone()`.
 - **Camera** with `wb_camera.gd`.
 
 The scripts are `@tool` scripts: they build their content when the scene loads, in the editor

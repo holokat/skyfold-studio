@@ -64,7 +64,7 @@ pub const STYLES: &[AuraStyle] = &[AuraStyle {
     light: [0.62, 0.3, 1.0],
     lumens: 120_000.0,
     pulse_period: 4.6,
-    // Skyfold's own loops (assets/audio/dungeon/CREDITS.md): the void drone, haunted whispers
+    // dungeon beds (assets/audio/CREDITS.md): the void drone, haunted whispers
     sounds: &[("amb_dng_void_0", 0.8), ("amb_dng_haunted_0", 0.5)],
     radius: 6.0,
     height: 18.0,

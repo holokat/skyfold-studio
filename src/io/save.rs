@@ -87,6 +87,7 @@ impl Snapshot {
             motion: data.motion.clone(),
             caves: (*data.caves).clone(),
             dungeons: (*data.dungeons).clone(),
+            characters: (*data.characters).clone(),
             dungeon_map: data.dungeon_map.0.clone(),
             map: data.map.settings.clone(),
             reference: crate::refmap::doc_to_save(&data.reference, dir),

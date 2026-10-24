@@ -7,8 +7,12 @@
 //!   directory and our tools are pre-approved.
 //! - Claude Code CLI (`claude -p --output-format stream-json`): only our MCP server
 //!   (`--strict-mcp-config`), built-in tools off (`--tools ""`), our tools pre-allowed.
-//! - Anthropic API (a key from the panel or `ANTHROPIC_API_KEY`): a Messages API tool-use loop
-//!   over the same tools, sent with `curl` (the key goes through stdin, never the command line).
+//! - An API key for any OpenAI-compatible provider (OpenRouter, OpenAI, Anthropic, a local
+//!   Ollama…): a Chat Completions tool-calling loop over the same tools, sent with `curl` (the key
+//!   goes through stdin, never the command line).
+//!
+//! "Sign in with Claude" runs `claude auth login` in the background (`ClaudeLogin`): it opens the
+//! browser, and takes a pasted code when the browser can't hand it back.
 //!
 //! Each run is a background thread; it reports `AgentEvent`s, can be stopped (the process group
 //! is killed) and times out. Detection (`detect`) also runs off the main thread.
@@ -27,36 +31,122 @@ use serde_json::{Value, json};
 pub enum Backend {
     Codex,
     ClaudeCode,
-    AnthropicApi,
+    /// An API key for an OpenAI-compatible provider (`Provider`).
+    Api,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 3] = [Backend::Codex, Backend::ClaudeCode, Backend::AnthropicApi];
+    pub const ALL: [Backend; 3] = [Backend::Codex, Backend::ClaudeCode, Backend::Api];
     pub fn id(self) -> &'static str {
         match self {
             Backend::Codex => "codex",
             Backend::ClaudeCode => "claude_code",
-            Backend::AnthropicApi => "anthropic_api",
+            Backend::Api => "api",
         }
     }
     pub fn from_id(s: &str) -> Option<Backend> {
+        // (saved before the API backend took any provider)
+        if s == "anthropic_api" {
+            return Some(Backend::Api);
+        }
         Self::ALL.into_iter().find(|b| b.id() == s)
     }
     pub fn name(self) -> &'static str {
         match self {
             Backend::Codex => "Codex",
             Backend::ClaudeCode => "Claude Code",
-            Backend::AnthropicApi => "Anthropic API",
+            Backend::Api => "API key",
         }
     }
-    /// Models offered in the panel (first = default).
+    /// Models offered in the panel (first = default). The API backend's come from its provider
+    /// (`detect`), or `Provider::models`.
     pub fn models(self) -> &'static [&'static str] {
         match self {
             // (only until the installed Codex's own catalog is read: `detect`)
             Backend::Codex => &["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol"],
             Backend::ClaudeCode => &["opus", "sonnet"],
-            Backend::AnthropicApi => &["claude-opus-5-5", "claude-sonnet-5-5"],
+            Backend::Api => &[],
         }
+    }
+}
+
+/// An OpenAI-compatible API the API backend offers by name (any other base URL works too).
+pub struct Provider {
+    pub name: &'static str,
+    pub base: &'static str,
+    /// Environment variable with its key ("" = none).
+    pub env: &'static str,
+    pub key_hint: &'static str,
+    /// Where to get a key ("" = no key needed).
+    pub keys_at: &'static str,
+    /// Suggested models when its catalog can't be read.
+    pub models: &'static [&'static str],
+}
+
+pub const PROVIDERS: [Provider; 4] = [
+    Provider {
+        name: "OpenRouter",
+        base: "https://openrouter.ai/api/v1",
+        env: "OPENROUTER_API_KEY",
+        key_hint: "sk-or-…",
+        keys_at: "openrouter.ai/keys",
+        models: &[],
+    },
+    Provider {
+        name: "OpenAI",
+        base: "https://api.openai.com/v1",
+        env: "OPENAI_API_KEY",
+        key_hint: "sk-…",
+        keys_at: "platform.openai.com/api-keys",
+        models: &[],
+    },
+    Provider {
+        name: "Anthropic",
+        base: "https://api.anthropic.com/v1",
+        env: "ANTHROPIC_API_KEY",
+        key_hint: "sk-ant-…",
+        keys_at: "console.anthropic.com",
+        models: &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+    },
+    Provider {
+        name: "Local (Ollama)",
+        base: "http://localhost:11434/v1",
+        env: "",
+        key_hint: "no key needed",
+        keys_at: "",
+        models: &[],
+    },
+];
+
+/// The named provider at this base URL (None: a custom one).
+pub fn provider(base: &str) -> Option<&'static Provider> {
+    let base = base.trim().trim_end_matches('/');
+    PROVIDERS.iter().find(|p| p.base == base)
+}
+
+/// A base URL curl can be given safely: http(s), no spaces or quotes.
+pub fn valid_base(base: &str) -> bool {
+    let b = base.trim();
+    (b.starts_with("https://") || b.starts_with("http://"))
+        && b.len() > 8
+        && !b.chars().any(|c| c.is_whitespace() || c == '"' || c == '\\')
+}
+
+/// Where the API backend sends requests, and with which key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApiConn {
+    pub base: String,
+    pub key: Option<String>,
+}
+
+impl ApiConn {
+    /// Has what it needs for a run: a key, or a provider that takes none (a local server).
+    pub fn ready(&self) -> bool {
+        valid_base(&self.base)
+            && (self.key.is_some() || provider(&self.base).is_some_and(|p| p.keys_at.is_empty()))
+    }
+    fn url(&self, path: &str) -> String {
+        format!("{}/{path}", self.base.trim().trim_end_matches('/'))
     }
 }
 
@@ -260,15 +350,16 @@ fn run_quick(cmd: &Path, args: &[&str]) -> Option<(bool, String)> {
     Some((out.status.success(), s))
 }
 
-/// The API key: the panel's, else `ANTHROPIC_API_KEY`.
-pub fn env_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
+/// The provider's key from its environment variable (`OPENROUTER_API_KEY`, …), when the panel
+/// has none.
+pub fn env_api_key(base: &str) -> Option<String> {
+    let p = provider(base).filter(|p| !p.env.is_empty())?;
+    std::env::var(p.env).ok().filter(|k| !k.trim().is_empty())
 }
 
-/// Finds the backends and whether they're logged in (blocking: call off the main thread).
-pub fn detect(api_key: bool) -> Vec<BackendStatus> {
+/// Finds the backends and whether they're logged in, and the API provider's models (blocking:
+/// call off the main thread).
+pub fn detect(api: ApiConn) -> Vec<BackendStatus> {
     let mut out = vec![];
     // Codex
     let codex = find_codex();
@@ -333,10 +424,7 @@ pub fn detect(api_key: bool) -> Vec<BackendStatus> {
                         v["authMethod"].as_str().unwrap_or("account")
                     );
                 } else {
-                    st.note = format!(
-                        "Not logged in: run `\"{}\" auth login` (or start `claude` in Terminal and type /login), then reopen this panel.",
-                        p.display()
-                    );
+                    st.note = "Not signed in: use Sign in with Claude.".into();
                 }
             }
             None => st.note = "Found but could not run it.".into(),
@@ -344,17 +432,80 @@ pub fn detect(api_key: bool) -> Vec<BackendStatus> {
     }
     out.push(st);
     // API
+    let name = provider(&api.base).map_or("the provider", |p| p.name);
+    // (a public catalog, like OpenRouter's, suggests models before a key is in)
+    let models = valid_base(&api.base).then(|| api_models(&api));
+    let (ready, models, note) = match (api.ready(), models) {
+        (false, m) => (
+            false,
+            m.and_then(Result::ok).unwrap_or_default(),
+            format!("Needs an API key for {name}."),
+        ),
+        (true, Some(Ok(m))) => {
+            let n = m.len();
+            (true, m, format!("Connected to {name} ({n} models)"))
+        }
+        (true, Some(Err(e))) => (true, vec![], format!("Key set (couldn't list {name}'s models: {e})")),
+        (true, None) => (true, vec![], "Key set".into()),
+    };
     out.push(BackendStatus {
-        backend: Backend::AnthropicApi,
-        ready: api_key,
+        backend: Backend::Api,
+        ready,
         path: None,
-        note: if api_key {
-            "API key set".into()
-        } else {
-            "Needs an API key (console.anthropic.com), or ANTHROPIC_API_KEY.".into()
-        },
+        note,
         features: vec![],
-        models: vec![],
+        models,
+    });
+    out
+}
+
+/// The provider's model catalog (`GET {base}/models`), tool-capable ones only where it says;
+/// Claude models first.
+pub fn api_models(api: &ApiConn) -> Result<Vec<ModelInfo>, String> {
+    let v = curl_json(api, &api.url("models"), None, 20)?;
+    Ok(parse_api_models(&v))
+}
+
+pub fn parse_api_models(v: &Value) -> Vec<ModelInfo> {
+    let list = v["data"].as_array().or(v["models"].as_array());
+    let mut out: Vec<ModelInfo> = list
+        .into_iter()
+        .flatten()
+        // (OpenRouter lists what each model supports: our runs need tool calls)
+        // (batch-only variants answer hours later)
+        .filter(|m| m["id"].as_str().is_some_and(|id| !id.ends_with(":batch")))
+        .filter(|m| {
+            m["supported_parameters"]
+                .as_array()
+                .is_none_or(|a| a.iter().any(|p| p == "tools"))
+        })
+        .filter_map(|m| {
+            let slug = m["id"].as_str()?.to_string();
+            Some(ModelInfo {
+                name: m["name"]
+                    .as_str()
+                    .or(m["display_name"].as_str())
+                    .unwrap_or(&slug)
+                    .to_string(),
+                slug,
+                description: String::new(),
+                efforts: vec![],
+                default_effort: String::new(),
+            })
+        })
+        .collect();
+    // the strongest Claude first (the default), then the rest in the provider's order
+    out.sort_by_key(|m| {
+        let s = &m.slug;
+        if s.contains("claude-opus") {
+            0
+        } else if s.contains("claude-sonnet") {
+            1
+        } else if s.contains("claude") {
+            2
+        } else {
+            3
+        }
     });
     out
 }
@@ -372,7 +523,8 @@ pub struct RunSpec {
     pub prompt: String,
     /// The run's private MCP endpoint.
     pub port: u16,
-    pub api_key: Option<String>,
+    /// API backend: the provider and its key.
+    pub api: Option<ApiConn>,
     /// API backend: the conversation so far (refine continues it).
     pub messages: Vec<Value>,
     /// Claude Code: session to resume (refine).
@@ -490,7 +642,7 @@ pub fn start(spec: RunSpec) -> AgentHandle {
                 (Some(script), _) => run_stub(&spec, &script, &tx, &c2),
                 (None, Backend::Codex) => run_codex(&spec, &tx, &ch2, &c2),
                 (None, Backend::ClaudeCode) => run_claude(&spec, &tx, &ch2, &c2),
-                (None, Backend::AnthropicApi) => run_api(&spec, &tx, &c2),
+                (None, Backend::Api) => run_api(&spec, &tx, &c2),
             };
             c2.store(true, Ordering::Relaxed);
             if let Err(e) = res {
@@ -924,23 +1076,21 @@ fn run_claude(
     ))
 }
 
-// ------------------------------------------------------------------ Anthropic API
+// ------------------------------------------------------------------ API key (OpenAI-compatible)
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MAX_TURNS: usize = 80;
 
-/// The MCP `tools/list` result → Messages API tool definitions.
-pub fn api_tools(list: &Value) -> Vec<Value> {
+/// The MCP `tools/list` result → Chat Completions tool definitions.
+pub fn chat_tools(list: &Value) -> Vec<Value> {
     list["tools"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|t| json!({ "name": t["name"], "description": t["description"], "input_schema": t["inputSchema"] }))
+        .map(|t| json!({ "type": "function", "function": { "name": t["name"], "description": t["description"], "parameters": t["inputSchema"] } }))
         .collect()
 }
 
-/// One Messages API request body.
-/// Standard base64 (for image blocks).
+/// Standard base64 (for image data URLs).
 fn base64_encode(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
@@ -964,64 +1114,102 @@ fn base64_encode(b: &[u8]) -> String {
     s
 }
 
-pub fn api_request(model: &str, system: &str, tools: &[Value], messages: &[Value]) -> Value {
-    json!({
-        "model": model,
-        "max_tokens": 16000,
-        "system": [{ "type": "text", "text": system }],
-        "tools": tools,
-        "messages": messages,
-        "thinking": { "type": "adaptive" },
-        "output_config": { "effort": "high" },
-        // caches the stable prefix (tools, system) and the growing conversation
-        "cache_control": { "type": "ephemeral" },
-        // a declined request is retried on a fallback model server-side
-        "fallbacks": "default",
-    })
+fn image_part(mime: &str, data_b64: &str) -> Value {
+    json!({ "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{data_b64}") } })
 }
 
-/// The tool calls in a response: (id, name, input).
-pub fn api_tool_uses(resp: &Value) -> Vec<(String, String, Value)> {
-    resp["content"]
+/// One Chat Completions request body (the system prompt goes first each time).
+pub fn chat_request(
+    model: &str,
+    system: &str,
+    tools: &[Value],
+    messages: &[Value],
+    base: &str,
+) -> Value {
+    let mut all = vec![json!({ "role": "system", "content": system })];
+    all.extend(messages.iter().cloned());
+    let mut v = json!({ "model": model, "messages": all, "tools": tools });
+    // (OpenAI's reasoning models take only the newer name)
+    let limit = if base.contains("api.openai.com") {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+    v[limit] = json!(16000);
+    v
+}
+
+/// The answer's message (`choices[0].message`) and why it stopped.
+pub fn chat_message(resp: &Value) -> (Value, String) {
+    let c = &resp["choices"][0];
+    (
+        c["message"].clone(),
+        c["finish_reason"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+/// The tool calls in a message: (id, name, input).
+pub fn chat_tool_calls(msg: &Value) -> Vec<(String, String, Value)> {
+    msg["tool_calls"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|b| b["type"] == "tool_use")
-        .map(|b| {
+        .map(|t| {
+            let f = &t["function"];
+            // (arguments arrive as a JSON string; some providers send the object)
+            let input = match &f["arguments"] {
+                Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+                Value::Object(_) => f["arguments"].clone(),
+                _ => json!({}),
+            };
             (
-                b["id"].as_str().unwrap_or("").to_string(),
-                b["name"].as_str().unwrap_or("").to_string(),
-                b["input"].clone(),
+                t["id"].as_str().unwrap_or("").to_string(),
+                f["name"].as_str().unwrap_or("").to_string(),
+                input,
             )
         })
         .collect()
 }
 
-pub fn api_text(resp: &Value) -> String {
-    resp["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|b| b["type"] == "text")
-        .filter_map(|b| b["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+pub fn chat_text(msg: &Value) -> String {
+    match &msg["content"] {
+        Value::String(s) => s.trim().to_string(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
-/// An MCP `tools/call` result → a `tool_result` block (text and images).
-pub fn api_tool_result(id: &str, mcp_result: &Value) -> Value {
-    let content: Vec<Value> = mcp_result["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|c| match c["type"].as_str() {
-            Some("image") => json!({ "type": "image", "source": { "type": "base64", "media_type": c["mimeType"].as_str().unwrap_or("image/png"), "data": c["data"] } }),
-            _ => json!({ "type": "text", "text": c["text"].as_str().unwrap_or("") }),
-        })
-        .collect();
-    json!({ "type": "tool_result", "tool_use_id": id, "content": content, "is_error": mcp_result["isError"].as_bool().unwrap_or(false) })
+/// An MCP `tools/call` result → a `tool` message (its text) and image parts for a following user
+/// message (tool messages take text only).
+pub fn chat_tool_result(id: &str, mcp_result: &Value) -> (Value, Vec<Value>) {
+    let mut text = vec![];
+    let mut images = vec![];
+    for c in mcp_result["content"].as_array().into_iter().flatten() {
+        match c["type"].as_str() {
+            Some("image") => images.push(image_part(
+                c["mimeType"].as_str().unwrap_or("image/png"),
+                c["data"].as_str().unwrap_or(""),
+            )),
+            _ => text.push(c["text"].as_str().unwrap_or("").to_string()),
+        }
+    }
+    let mut body = text.join("\n");
+    if mcp_result["isError"].as_bool() == Some(true) {
+        body = format!("Error: {body}");
+    }
+    if !images.is_empty() {
+        body += &format!("\n({} image(s) follow in the next message)", images.len());
+    }
+    (
+        json!({ "role": "tool", "tool_call_id": id, "content": body }),
+        images,
+    )
 }
 
 /// JSON-RPC to the run's endpoint.
@@ -1038,60 +1226,92 @@ fn mcp_rpc(port: u16, id: u64, method: &str, params: Value) -> Result<Value, Str
     Ok(v["result"].clone())
 }
 
-/// POSTs to the Messages API with curl; the key and headers go through stdin (`-K -`), the body
-/// through a private temp file.
-fn api_post(key: &str, body: &Value, dir: &Path) -> Result<Value, String> {
-    let file = dir.join("request.json");
-    std::fs::write(&file, body.to_string()).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+/// GETs (or POSTs `body` to) the provider with curl; the key and headers go through stdin
+/// (`-K -`), a body through a private temp file.
+fn curl_json(api: &ApiConn, url: &str, body: Option<&Value>, max_secs: u32) -> Result<Value, String> {
+    if !valid_base(url) {
+        return Err(format!("not a usable URL: {url}"));
     }
-    let config = format!(
-        "url = \"{API_URL}\"\nheader = \"x-api-key: {key}\"\nheader = \"anthropic-version: 2023-06-01\"\nheader = \"anthropic-beta: server-side-fallback-2026-07-01\"\nheader = \"content-type: application/json\"\ndata-binary = \"@{}\"\n",
-        file.display()
-    );
-    let mut c = Command::new("/usr/bin/curl")
-        .args(["-sS", "--max-time", "600", "-K", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("curl: {e}"))?;
-    if let Some(mut si) = c.stdin.take() {
-        let _ = si.write_all(config.as_bytes());
+    let mut config = format!("url = \"{url}\"\n");
+    if let Some(k) = &api.key {
+        let k = k.trim();
+        if k.chars().any(|c| c.is_whitespace() || c == '"' || c == '\\') {
+            return Err("the API key has spaces or quotes in it".into());
+        }
+        config += &format!("header = \"Authorization: Bearer {k}\"\n");
+        if url.contains("api.anthropic.com") {
+            config += &format!("header = \"x-api-key: {k}\"\nheader = \"anthropic-version: 2023-06-01\"\n");
+        }
     }
-    let out = c.wait_with_output().map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&file);
+    if url.contains("openrouter.ai") {
+        config += "header = \"HTTP-Referer: https://skyfoldstudio.com\"\nheader = \"X-Title: Skyfold Studio\"\n";
+    }
+    let file = body
+        .map(|b| -> Result<PathBuf, String> {
+            let f = std::env::temp_dir().join(format!(
+                "skyfold-api-{}-{}.json",
+                std::process::id(),
+                fastrand::u64(..)
+            ));
+            std::fs::write(&f, b.to_string()).map_err(|e| e.to_string())?;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+            Ok(f)
+        })
+        .transpose()?;
+    if let Some(f) = &file {
+        config += &format!(
+            "header = \"content-type: application/json\"\ndata-binary = \"@{}\"\n",
+            f.display()
+        );
+    }
+    let run = || -> Result<std::process::Output, String> {
+        let mut c = Command::new("/usr/bin/curl")
+            .args(["-sS", "--max-time", &max_secs.to_string(), "-K", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("curl: {e}"))?;
+        if let Some(mut si) = c.stdin.take() {
+            let _ = si.write_all(config.as_bytes());
+        }
+        c.wait_with_output().map_err(|e| e.to_string())
+    };
+    let out = run();
+    if let Some(f) = &file {
+        let _ = std::fs::remove_file(f);
+    }
+    let out = out?;
     if !out.status.success() {
         return Err(format!(
             "network error: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let v: Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("unreadable API answer: {e}"))?;
-    if v["type"] == "error" {
-        return Err(format!(
-            "Anthropic API: {}",
-            v["error"]["message"].as_str().unwrap_or("error")
-        ));
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(|_| {
+        let t = String::from_utf8_lossy(&out.stdout);
+        format!("unreadable answer: {}", t.trim().chars().take(160).collect::<String>())
+    })?;
+    if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
+        let msg = e["message"]
+            .as_str()
+            .or(e.as_str())
+            .unwrap_or("error")
+            .to_string();
+        return Err(msg);
     }
     Ok(v)
 }
 
 fn run_api(spec: &RunSpec, tx: &Sender<AgentEvent>, cancel: &AtomicBool) -> Result<(), String> {
-    let key = spec
-        .api_key
-        .clone()
-        .or_else(env_api_key)
-        .ok_or("No Anthropic API key")?;
+    let api = spec.api.clone().filter(ApiConn::ready).ok_or("Add an API key first")?;
+    let name = provider(&api.base).map_or("the API", |p| p.name);
     let _ = tx.send(AgentEvent::Status(format!(
-        "Calling the Anthropic API ({})…",
+        "Calling {name} ({})…",
         spec.model
     )));
-    let tools = api_tools(&mcp_rpc(spec.port, 1, "tools/list", json!({}))?);
+    let tools = chat_tools(&mcp_rpc(spec.port, 1, "tools/list", json!({}))?);
     let mut messages = spec.messages.clone();
     if spec.images.is_empty() {
         messages.push(json!({ "role": "user", "content": spec.prompt }));
@@ -1100,53 +1320,77 @@ fn run_api(spec: &RunSpec, tx: &Sender<AgentEvent>, cancel: &AtomicBool) -> Resu
             .images
             .iter()
             .filter_map(|p| std::fs::read(p).ok())
-            .map(|b| json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": base64_encode(&b) } }))
+            .map(|b| image_part("image/png", &base64_encode(&b)))
             .collect();
         content.push(json!({ "type": "text", "text": spec.prompt }));
         messages.push(json!({ "role": "user", "content": content }));
     }
+    let url = api.url("chat/completions");
     let mut rpc_id = 10;
     let mut summary = String::new();
     for _ in 0..MAX_TURNS {
         if cancel.load(Ordering::Relaxed) {
             return Err("Stopped".into());
         }
-        let resp = api_post(
-            &key,
-            &api_request(&spec.model, &spec.instructions, &tools, &messages),
-            &spec.workdir,
-        )?;
-        // the whole content goes back (thinking and fallback blocks included)
-        messages.push(json!({ "role": "assistant", "content": resp["content"] }));
-        let said = api_text(&resp);
+        let resp = curl_json(
+            &api,
+            &url,
+            Some(&chat_request(
+                &spec.model,
+                &spec.instructions,
+                &tools,
+                &messages,
+                &api.base,
+            )),
+            600,
+        )
+        .map_err(|e| format!("{name}: {e}"))?;
+        let (msg, finish) = chat_message(&resp);
+        if msg.is_null() {
+            return Err(format!("{name} sent no answer"));
+        }
+        let calls = chat_tool_calls(&msg);
+        // (only what every provider takes back: reasoning and extra fields stay out)
+        let mut back = json!({ "role": "assistant", "content": msg["content"] });
+        if !calls.is_empty() {
+            back["tool_calls"] = msg["tool_calls"].clone();
+        }
+        messages.push(back);
+        let said = chat_text(&msg);
         if !said.is_empty() {
             summary = said.clone();
             let _ = tx.send(AgentEvent::Message(said));
         }
-        match resp["stop_reason"].as_str().unwrap_or("") {
-            "tool_use" => {
-                let mut results = vec![];
-                for (id, name, input) in api_tool_uses(&resp) {
-                    if cancel.load(Ordering::Relaxed) {
-                        return Err("Stopped".into());
-                    }
-                    rpc_id += 1;
-                    let r = mcp_rpc(
-                        spec.port,
-                        rpc_id,
-                        "tools/call",
-                        json!({ "name": name, "arguments": input }),
-                    )
-                    .unwrap_or_else(
-                        |e| json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
-                    );
-                    results.push(api_tool_result(&id, &r));
+        if !calls.is_empty() {
+            let mut images = vec![];
+            for (id, name, input) in calls {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Stopped".into());
                 }
-                messages.push(json!({ "role": "user", "content": results }));
+                rpc_id += 1;
+                let r = mcp_rpc(
+                    spec.port,
+                    rpc_id,
+                    "tools/call",
+                    json!({ "name": name, "arguments": input }),
+                )
+                .unwrap_or_else(
+                    |e| json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                );
+                let (m, imgs) = chat_tool_result(&id, &r);
+                messages.push(m);
+                images.extend(imgs);
             }
-            "pause_turn" => {}
-            "refusal" => return Err("The model declined this request.".into()),
-            "max_tokens" => {
+            if !images.is_empty() {
+                let mut content = vec![json!({ "type": "text", "text": "The images from those tool results:" })];
+                content.extend(images);
+                messages.push(json!({ "role": "user", "content": content }));
+            }
+            continue;
+        }
+        match finish.as_str() {
+            "content_filter" => return Err("The model declined this request.".into()),
+            "length" => {
                 messages.push(json!({ "role": "user", "content": "Continue, and finish with a short summary." }));
             }
             _ => {
@@ -1167,6 +1411,120 @@ fn run_api(spec: &RunSpec, tx: &Sender<AgentEvent>, cancel: &AtomicBool) -> Resu
     Ok(())
 }
 
+// ------------------------------------------------------------------ Sign in with Claude
+
+/// `claude auth login` running in the background: it opens the browser; when the browser can't
+/// hand the sign-in back, the page shows a code to paste (`submit_code`).
+pub struct ClaudeLogin {
+    child: Arc<Mutex<Option<Child>>>,
+    stdin: Option<std::process::ChildStdin>,
+    lines: Mutex<Receiver<String>>,
+    /// The sign-in page (to open again).
+    pub url: Option<String>,
+    /// Finished: signed in, or why not.
+    pub done: Option<Result<(), String>>,
+    output: Vec<String>,
+}
+
+impl ClaudeLogin {
+    pub fn start() -> Result<ClaudeLogin, String> {
+        use std::os::unix::process::CommandExt;
+        let exe = find_claude().ok_or("Claude Code is not installed (claude.com/claude-code)")?;
+        let mut c = Command::new(exe)
+            .args(["auth", "login", "--claudeai"])
+            .env("PATH", child_path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("couldn't start Claude Code: {e}"))?;
+        let (tx, rx) = mpsc::channel();
+        // (its prompt has no newline: read raw chunks)
+        for out in [
+            c.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
+            c.stderr.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut out = out;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = out.read(&mut buf) {
+                    if n == 0 || tx.send(String::from_utf8_lossy(&buf[..n]).into()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(ClaudeLogin {
+            stdin: c.stdin.take(),
+            child: Arc::new(Mutex::new(Some(c))),
+            lines: Mutex::new(rx),
+            url: None,
+            done: None,
+            output: vec![],
+        })
+    }
+
+    /// Reads its output and whether it has finished (call every frame).
+    pub fn poll(&mut self) {
+        if self.done.is_some() {
+            return;
+        }
+        if let Ok(rx) = self.lines.lock() {
+            while let Ok(s) = rx.try_recv() {
+                self.output.push(s);
+            }
+        }
+        if self.url.is_none() {
+            let all = self.output.concat();
+            self.url = all
+                .split_whitespace()
+                .find(|w| w.starts_with("https://"))
+                .map(str::to_string);
+        }
+        let status = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|mut c| c.as_mut()?.try_wait().ok().flatten());
+        if let Some(st) = status {
+            self.done = Some(if st.success() {
+                Ok(())
+            } else {
+                let all = self.output.concat();
+                let last = all
+                    .lines()
+                    .map(str::trim)
+                    .rfind(|l| !l.is_empty() && !l.starts_with("Paste code"))
+                    .unwrap_or("sign-in didn't finish")
+                    .to_string();
+                Err(last)
+            });
+        }
+    }
+
+    /// The code the sign-in page shows when it can't hand the sign-in back by itself.
+    pub fn submit_code(&mut self, code: &str) {
+        if let Some(si) = self.stdin.as_mut() {
+            let _ = si.write_all(format!("{}\n", code.trim()).as_bytes());
+            let _ = si.flush();
+        }
+    }
+}
+
+impl Drop for ClaudeLogin {
+    /// (closing the editor or the panel never leaves a sign-in running)
+    fn drop(&mut self) {
+        if self.done.is_none() {
+            kill(&self.child);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,7 +1539,7 @@ mod tests {
             instructions: "be good".into(),
             prompt: "make volcanoes".into(),
             port: 7811,
-            api_key: None,
+            api: None,
             messages: vec![],
             resume: Some("abc".into()),
             timeout: Duration::from_secs(60),
@@ -1276,31 +1634,56 @@ mod tests {
     #[test]
     fn api_round_trip() {
         let list = json!({ "tools": [{ "name": "selection_info", "description": "d", "inputSchema": { "type": "object", "properties": {} } }] });
-        let tools = api_tools(&list);
-        assert_eq!(tools[0]["input_schema"]["type"], "object");
-        let req = api_request(
-            "claude-opus-5-5",
-            "sys",
-            &tools,
-            &[json!({ "role": "user", "content": "hi" })],
-        );
-        assert_eq!(req["model"], "claude-opus-5-5");
-        assert_eq!(req["thinking"]["type"], "adaptive");
-        assert_eq!(req["tools"][0]["name"], "selection_info");
-        let resp = json!({ "stop_reason": "tool_use", "content": [
-            { "type": "thinking", "thinking": "" },
-            { "type": "text", "text": "Looking first." },
-            { "type": "tool_use", "id": "toolu_1", "name": "selection_screenshot", "input": { "views": ["top"] } }
-        ] });
-        assert_eq!(api_text(&resp), "Looking first.");
-        let uses = api_tool_uses(&resp);
-        assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].1, "selection_screenshot");
+        let tools = chat_tools(&list);
+        assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+        let msgs = [json!({ "role": "user", "content": "hi" })];
+        let req = chat_request("anthropic/claude", "sys", &tools, &msgs, "https://openrouter.ai/api/v1");
+        assert_eq!(req["messages"][0]["role"], "system");
+        assert_eq!(req["messages"][1]["content"], "hi");
+        assert_eq!(req["max_tokens"], 16000);
+        assert_eq!(req["tools"][0]["function"]["name"], "selection_info");
+        let o = chat_request("gpt", "sys", &tools, &msgs, "https://api.openai.com/v1");
+        assert!(o.get("max_tokens").is_none() && o["max_completion_tokens"] == 16000);
+        let resp = json!({ "choices": [{ "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "Looking first.",
+            "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "selection_screenshot", "arguments": "{\"views\":[\"top\"]}" } }]
+        } }] });
+        let (msg, finish) = chat_message(&resp);
+        assert_eq!(finish, "tool_calls");
+        assert_eq!(chat_text(&msg), "Looking first.");
+        let calls = chat_tool_calls(&msg);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "selection_screenshot");
+        assert_eq!(calls[0].2["views"][0], "top");
         let mcp = json!({ "content": [{ "type": "image", "data": "AAAA", "mimeType": "image/png" }, { "type": "text", "text": "Top view" }], "isError": false });
-        let r = api_tool_result("toolu_1", &mcp);
-        assert_eq!(r["tool_use_id"], "toolu_1");
-        assert_eq!(r["content"][0]["source"]["data"], "AAAA");
-        assert_eq!(r["content"][1]["text"], "Top view");
-        assert_eq!(r["is_error"], false);
+        let (m, imgs) = chat_tool_result("call_1", &mcp);
+        assert_eq!(m["role"], "tool");
+        assert_eq!(m["tool_call_id"], "call_1");
+        assert!(m["content"].as_str().unwrap().starts_with("Top view"));
+        assert_eq!(imgs[0]["image_url"]["url"], "data:image/png;base64,AAAA");
+        let (e, _) = chat_tool_result("c", &json!({ "content": [{ "type": "text", "text": "bad" }], "isError": true }));
+        assert_eq!(e["content"], "Error: bad");
+    }
+
+    #[test]
+    fn providers_and_models() {
+        assert_eq!(Backend::from_id("anthropic_api"), Some(Backend::Api));
+        assert!(provider("https://openrouter.ai/api/v1/").is_some());
+        assert!(!valid_base("openrouter.ai") && !valid_base("https://a b"));
+        let local = ApiConn { base: "http://localhost:11434/v1".into(), key: None };
+        assert!(local.ready());
+        let or = ApiConn { base: "https://openrouter.ai/api/v1".into(), key: None };
+        assert!(!or.ready());
+        let v = json!({ "data": [
+            { "id": "x/no-tools", "supported_parameters": ["temperature"] },
+            { "id": "openai/gpt", "name": "GPT", "supported_parameters": ["tools"] },
+            { "id": "anthropic/claude-haiku-5.5", "supported_parameters": ["tools"] },
+            { "id": "anthropic/claude-opus-5.5", "supported_parameters": ["tools"] },
+            { "id": "anthropic/claude-opus-5.5:batch", "supported_parameters": ["tools"] }
+        ] });
+        let m = parse_api_models(&v);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].slug, "anthropic/claude-opus-5.5");
+        assert_eq!(m[1].slug, "anthropic/claude-haiku-5.5");
     }
 }

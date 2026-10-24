@@ -120,7 +120,7 @@
    0.5,
    1.5
   ],
-  "note": "Floors are flat (within 41°) span tops more than 0.25 m up with room to stand. Regions smaller than min_floor_m2 are ignored, and so is furniture: a region less than furniture.below_m above the floor under it and smaller than furniture.max_m2 (beds, tables, counters). A floor neither walker reaches has no way up drawn (roofs, decorative decks) and is exempt.",
+  "note": "Floors are flat (within 41\u00b0) span tops more than 0.25 m up with room to stand. Regions smaller than min_floor_m2 are ignored, and so is furniture: a region less than furniture.below_m above the floor under it and smaller than furniture.max_m2 (beds, tables, counters). A floor neither walker reaches has no way up drawn (roofs, decorative decks) and is exempt.",
   "furniture": {
    "below_m": 1.0,
    "max_m2": 8.0
@@ -181,8 +181,8 @@
    "id": "tri_density",
    "name": "Triangle density",
    "metric": "tri_density",
-   "unit": "triangles per m² of surface",
-   "why": "Detail the eye can't see at the distance the model is seen from: tiny triangles shade four times over; a 1.6 m bed at 5,600/m² is ten times denser than any hand-painted prop.",
+   "unit": "triangles per m\u00b2 of surface",
+   "why": "Detail the eye can't see at the distance the model is seen from: tiny triangles shade four times over; a 1.6 m bed at 5,600/m\u00b2 is ten times denser than any hand-painted prop.",
    "limits": {
     "small_prop": {
      "warn": 60000,
@@ -416,7 +416,7 @@
    "id": "origin",
    "name": "Origin at the bottom centre",
    "metric": "origin_offset",
-   "unit": "× half the footprint off centre",
+   "unit": "\u00d7 half the footprint off centre",
    "why": "Models are placed, turned and snapped by their origin: off-centre pivots swing wide when turned (wall and hanging pieces pivot on their fixing and are exempt).",
    "limits": {
     "default": {
@@ -489,7 +489,7 @@
    "id": "declared_size",
    "name": "Y-up, metres, as declared",
    "metric": "declared_size_mismatch",
-   "unit": "× the declared size",
+   "unit": "\u00d7 the declared size",
    "why": "The glTF's real bounds must match the size its manifest or build stats declare: a Z-up export, a unit slip or a stray root transform shows up here.",
    "limits": {
     "default": {
@@ -636,7 +636,7 @@
    "id": "walk_floors",
    "name": "Floors with a way up are reachable",
    "metric": "unreachable_floor_m2",
-   "unit": "m² of floor",
+   "unit": "m\u00b2 of floor",
    "why": "A floor the drawn stairs, steps or ramps lead to that the walker (0.32 m radius, 1.8 m tall, 0.45 m steps) can't reach: too steep, too tight or too low on the way.",
    "only_when": [
     {
@@ -659,7 +659,7 @@
    "id": "walk_floors_open",
    "name": "Floors with a way up are reachable (open models)",
    "metric": "unreachable_floor_m2",
-   "unit": "m² of floor",
+   "unit": "m\u00b2 of floor",
    "why": "Like walk_floors, for walkable models that aren't walk-in (they collide as solid columns).",
    "only_when": [
     {
@@ -726,7 +726,32 @@
   {
    "id": "bmesh_set_input",
    "severity": "warn",
-   "why": "A bmesh op fed from a set (a set comprehension, set(...), {…}) gets its elements in hash order, which changes run to run: keep order with dict.fromkeys(...)."
+   "why": "A bmesh op fed from a set (a set comprehension, set(...), {\u2026}) gets its elements in hash order, which changes run to run: keep order with dict.fromkeys(...)."
   }
- ]
+ ],
+ "mounted": {
+  "about": "Models whose pivot is deliberately not at their bottom centre, declared because the gate's shape guess (wall back face, hanging top) can't tell. wall / hanging: pivot on the fixing (no origin, float or sink checks); footed: pivot at the foot of a post, wall line or corner with the rest reaching out (no origin check); sunken: sits into the ground (no sink check). Moving these pivots would shift every placed copy in existing worlds.",
+  "models": {
+   "handpainted:archery_target": "footed",
+   "handpainted:blacksmith_hanging_lantern": "hanging",
+   "handpainted:bonehook_skull_frame": "footed",
+   "handpainted:bonehook_skull_post": "footed",
+   "handpainted:chapel_altar_rail": "footed",
+   "handpainted:crypt_stairs": "sunken",
+   "handpainted:fence_corner": "footed",
+   "handpainted:house_large_herbs": "hanging",
+   "handpainted:iron_fence_corner": "footed",
+   "handpainted:mushroom_lantern_post": "footed",
+   "handpainted:palisade_wall": "footed",
+   "handpainted:redhide_wall_torch": "wall",
+   "handpainted:skullbanner_post_torch": "footed",
+   "handpainted:skullbanner_tooth_garland": "hanging",
+   "handpainted:skullbanner_trophy": "hanging",
+   "handpainted:spore_wooden_lantern_post": "footed",
+   "handpainted:torch_sconce": "wall",
+   "handpainted:trapdoor": "sunken",
+   "handpainted:wall_lantern": "wall",
+   "handpainted:warband_wall_shield": "wall"
+  }
+ }
 }

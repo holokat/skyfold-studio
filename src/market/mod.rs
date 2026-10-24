@@ -22,12 +22,13 @@
 
 pub mod backend;
 pub mod catalog;
+pub mod install;
 pub mod mcp;
 pub mod site;
 pub mod ui;
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use bevy::prelude::*;
 
@@ -78,12 +79,24 @@ struct LibPack {
     pack: String,
     style: String,
     models: usize,
+    /// a shipped preview (`objects::PREVIEWS`): its models are listed, not installed
+    preview: bool,
 }
 
 /// The bundled libraries' packs (read once).
-fn lib_packs() -> &'static [LibPack] {
-    static LIBS: OnceLock<Vec<LibPack>> = OnceLock::new();
-    LIBS.get_or_init(|| {
+fn lib_packs() -> Arc<Vec<LibPack>> {
+    if let Some(l) = LIBS.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return l;
+    }
+    let l = Arc::new(read_lib_packs());
+    *LIBS.write().unwrap_or_else(|e| e.into_inner()) = Some(l.clone());
+    l
+}
+
+static LIBS: RwLock<Option<Arc<Vec<LibPack>>>> = RwLock::new(None);
+
+fn read_lib_packs() -> Vec<LibPack> {
+    {
         #[derive(serde::Deserialize)]
         struct Count {
             #[serde(default)]
@@ -93,7 +106,7 @@ fn lib_packs() -> &'static [LibPack] {
         crate::objects::model_libraries(&dir)
             .into_iter()
             .map(|l| {
-                let models = std::fs::read_to_string(dir.join(&l.folder).join("models.json"))
+                let models = std::fs::read_to_string(l.dir.join("models.json"))
                     .ok()
                     .and_then(|s| serde_json::from_str::<Count>(&s).ok())
                     .map(|c| c.models.len())
@@ -103,10 +116,18 @@ fn lib_packs() -> &'static [LibPack] {
                     pack: l.pack_id,
                     style: l.pack,
                     models,
+                    preview: l.preview,
                 }
             })
             .collect()
-    })
+    }
+}
+
+/// A pack was just installed (or removed): count the libraries again and rebuild the snapshot.
+pub fn reload_installed() {
+    *LIBS.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(read_lib_packs()));
+    let cur = snapshot();
+    install(cur.with_dev(cur.dev));
 }
 
 /// The packs and what this account owns: an immutable snapshot (`snapshot()`), replaced whole
@@ -151,16 +172,22 @@ impl Market {
                         price: None,
                         free_assets: vec![],
                         asset_count: None,
+                        listing_id: None,
                         purchase_url: None,
                         thumbnail_url: None,
                         hero_asset: None,
                         unlisted: true,
                         installed: 0,
+                        previewed: 0,
                     });
                     packs.len() - 1
                 }
             };
-            packs[i].installed += l.models;
+            if l.preview {
+                packs[i].previewed += l.models;
+            } else {
+                packs[i].installed += l.models;
+            }
             by_prefix.insert(l.prefix.clone(), i);
         }
         Market {
@@ -295,7 +322,7 @@ impl Market {
             self.owned.iter().cloned(),
             dev,
             self.source.clone(),
-            lib_packs(),
+            &lib_packs(),
         );
         m.signed_in = self.signed_in;
         m.error = self.error.clone();
@@ -359,13 +386,19 @@ fn take_notice() -> Option<String> {
     NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// Developer overrides are available only in debug builds and are always opt-in.
-/// Release builds ignore both the environment override and any saved developer preference.
+/// Developer overrides are available only in debug builds and the studio's own `studio_dev`
+/// builds, and are always opt-in. Release builds ignore both the environment override and any
+/// saved developer preference.
 pub const DEV_UNLOCK_DEFAULT: bool = false;
 
 pub(super) const fn developer_unlock_available() -> bool {
-    cfg!(debug_assertions)
+    cfg!(debug_assertions) || cfg!(feature = "studio_dev")
 }
+
+/// Marks a `studio_dev` binary, so `tools/release/package_macos.py` refuses to ship it.
+#[cfg(feature = "studio_dev")]
+#[used]
+static STUDIO_DEV_MARKER: [u8; 24] = *b"SKYFOLD_STUDIO_DEV_BUILD";
 
 fn dev_setting() -> Dev {
     if !developer_unlock_available() {
@@ -388,7 +421,7 @@ fn dev_setting() -> Dev {
 /// The first snapshot: the cached catalog of the marketplace (or the bundled one) and the
 /// entitlements known so far. Tests get the bundled catalog, nothing owned, no unlock.
 fn startup() -> Market {
-    let libs = lib_packs();
+    let libs = &lib_packs();
     if cfg!(test) {
         return Market::build(catalog::bundled(), [], Dev::Off, Source::Bundled, libs);
     }
@@ -401,6 +434,8 @@ fn startup() -> Market {
             let (packs, owned) = cache
                 .map(|c| (c.packs, c.owned))
                 .unwrap_or_else(|| (catalog::bundled(), vec![]));
+            // (packs bought through the website stay owned whatever the marketplace says)
+            let owned = owned.into_iter().chain(backend::local_owned());
             let mut m = Market::build(packs, owned, dev, Source::Marketplace(url.clone()), libs);
             m.signed_in = cfg.token.is_some();
             m.checked_at = at;
@@ -538,7 +573,9 @@ fn apply(f: Fetched) {
             vec![]
         }
     });
-    let mut m = Market::build(packs, owned, cur.dev, f.source.clone(), lib_packs());
+    // a bought pack is never taken away by a refresh (signed out, offline, another backend)
+    let owned = owned.into_iter().chain(backend::local_owned());
+    let mut m = Market::build(packs, owned, cur.dev, f.source.clone(), &lib_packs());
     m.signed_in = signed_in;
     m.checked_at = if fresh {
         backend::now()
@@ -587,8 +624,11 @@ mod tests {
     #[test]
     fn developer_unlock_is_opt_in_and_never_available_in_release() {
         assert!(!super::DEV_UNLOCK_DEFAULT);
-        assert_eq!(super::developer_unlock_available(), cfg!(debug_assertions));
-        if !cfg!(debug_assertions) {
+        assert_eq!(
+            super::developer_unlock_available(),
+            cfg!(debug_assertions) || cfg!(feature = "studio_dev")
+        );
+        if !super::developer_unlock_available() {
             assert_eq!(super::dev_setting(), super::Dev::Off);
         }
     }
@@ -608,11 +648,13 @@ mod tests {
             }),
             free_assets: samples.iter().map(|s| s.to_string()).collect(),
             asset_count: None,
+            listing_id: None,
             purchase_url: None,
             thumbnail_url: None,
             hero_asset: None,
             unlisted: false,
             installed: 0,
+            previewed: 0,
         }
     }
 
@@ -622,6 +664,7 @@ mod tests {
             pack: pack.into(),
             style: "handpainted".into(),
             models: 5,
+            preview: false,
         };
         vec![
             l("hp", "fantasy"),
@@ -642,6 +685,37 @@ mod tests {
             Source::Bundled,
             &libs(),
         )
+    }
+
+    /// A paid pack shipped only as a preview (`objects::PREVIEWS`): listed with all its models,
+    /// not installed, its samples usable and the rest locked; owning it doesn't make it installed.
+    #[test]
+    fn a_previewed_pack_is_listed_not_installed() {
+        let libs = vec![LibPack {
+            prefix: "hp".into(),
+            pack: "fantasy".into(),
+            style: "handpainted".into(),
+            models: 585,
+            preview: true,
+        }];
+        let catalog = vec![pack("fantasy", Some(4999), &["hp:well", "hp:bench"])];
+        let m = Market::build(catalog.clone(), [], Dev::Off, Source::Bundled, &libs);
+        let p = m.pack("fantasy").unwrap();
+        assert_eq!((p.installed, p.previewed, p.assets()), (0, 585, 585));
+        assert!(p.listed() && !p.unlisted);
+        assert_eq!(m.access("hp:well"), Access::Sample(p));
+        assert_eq!(m.access("hp:inn"), Access::Locked(p));
+        assert!(m.check("hp:inn").is_err() && m.check("hp:bench").is_ok());
+        // bought on the website but not downloaded yet: owned, still to install
+        let m = Market::build(
+            catalog,
+            ["fantasy".to_string()],
+            Dev::Off,
+            Source::Bundled,
+            &libs,
+        );
+        let p = m.pack("fantasy").unwrap();
+        assert_eq!((m.state(p), p.installed), (PackState::Owned, 0));
     }
 
     #[test]
@@ -741,7 +815,7 @@ mod tests {
             ids,
             ["polyhaven_scans", "skyborn_village", "skyfold_studio"]
         );
-        let m = Market::build(packs, [], Dev::Off, Source::Bundled, lib_packs());
+        let m = Market::build(packs, [], Dev::Off, Source::Bundled, &lib_packs());
         // CC0 packs are free (Poly Haven's scans, and the public Skyborn village); the packs Skyfold
         // makes to sell are paid, with 10 free samples
         assert_eq!(m.state(m.pack("polyhaven_scans").unwrap()), PackState::Free);
@@ -751,7 +825,7 @@ mod tests {
             .iter()
             .flat_map(|l| {
                 let doc: serde_json::Value = serde_json::from_str(
-                    &std::fs::read_to_string(dir.join(&l.folder).join("models.json")).unwrap(),
+                    &std::fs::read_to_string(l.dir.join("models.json")).unwrap(),
                 )
                 .unwrap();
                 doc["models"]

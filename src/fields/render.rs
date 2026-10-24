@@ -61,6 +61,7 @@ pub struct FieldUniform {
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bind_group_data(CropKey)]
 pub struct CropExt {
     #[storage(100, read_only)]
     pub params: Handle<ShaderBuffer>,
@@ -83,6 +84,39 @@ pub struct CropExt {
     pub ground: Handle<Image>,
     #[texture(110, dimension = "2d_array")]
     pub ground_detail: Handle<Image>,
+    /// Which of the crop's two draws this is (see `CropPass`).
+    pub pass: CropPass,
+}
+
+/// Cut-out crops are drawn twice in the main pass: their depth first (`Depth`: the cut-out test,
+/// no colour; an opaque material, so it draws before the alpha-masked ones), then shaded where
+/// that depth is the nearest (`Shade`: depth equal, no discard, so the GPU's hidden surface removal
+/// works and a dense field is shaded once a pixel, not once a layer). The depth prepass stays
+/// without them (the screen-space AO would shade the plants against each other). `Single`: one
+/// draw with the cut-out test (`WB_NOEQUALDEPTH`, A/B tests).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Reflect)]
+pub enum CropPass {
+    #[default]
+    Single,
+    Depth,
+    Shade,
+}
+
+/// What the crop pipeline is specialised on.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CropKey {
+    pass: CropPass,
+}
+
+impl From<&CropExt> for CropKey {
+    fn from(e: &CropExt) -> Self {
+        Self { pass: e.pass }
+    }
+}
+
+/// Whether crops are drawn as a depth pass + an equal-depth shaded pass (`CropPass`).
+fn two_pass() -> bool {
+    std::env::var("WB_NOEQUALDEPTH").is_err()
 }
 
 impl MaterialExtension for CropExt {
@@ -96,6 +130,52 @@ impl MaterialExtension for CropExt {
     fn enable_prepass() -> bool {
         false
     }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        use bevy::render::render_resource::{ColorWrites, CompareFunction};
+        use bevy::shader::ShaderDefVal;
+        let may_discard = |d: &ShaderDefVal| matches!(d, ShaderDefVal::Bool(n, _) if n == "MAY_DISCARD");
+        match key.bind_group_data.pass {
+            CropPass::Single => {
+                // (the module has three: name the one this draw runs)
+                if let Some(f) = descriptor.fragment.as_mut() {
+                    f.entry_point = Some("fragment".into());
+                }
+            }
+            CropPass::Depth => {
+                if let Some(f) = descriptor.fragment.as_mut() {
+                    f.entry_point = Some("fragment_depth".into());
+                    // (`WB_CROPDEBUG`: the depth draw shows, magenta, wherever the shaded one
+                    // doesn't cover it)
+                    if std::env::var("WB_CROPDEBUG").is_err() {
+                        for t in f.targets.iter_mut().flatten() {
+                            t.write_mask = ColorWrites::empty();
+                        }
+                    }
+                }
+            }
+            CropPass::Shade => {
+                // (alpha-masked only to draw after the depth: the shader's definitions stay the
+                // depth draw's exactly, so its vertex shader is the same code and the depths
+                // match)
+                descriptor.vertex.shader_defs.retain(|d| !may_discard(d));
+                if let Some(f) = descriptor.fragment.as_mut() {
+                    f.shader_defs.retain(|d| !may_discard(d));
+                    f.entry_point = Some("fragment_shade".into());
+                }
+                if let Some(ds) = descriptor.depth_stencil.as_mut() {
+                    ds.depth_compare = Some(CompareFunction::Equal);
+                    ds.depth_write_enabled = Some(false);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A field as drawn: its material, frame and tiles.
@@ -104,6 +184,8 @@ struct Drawn {
     outline: Vec<[f32; 2]>,
     rows: f32,
     material: Handle<CropMaterial>,
+    /// the depth draw's material (`CropPass::Depth`), when drawn in two passes
+    depth: Option<Handle<CropMaterial>>,
     origin: Vec2,
     rot: Quat,
     /// tile origins in the field's frame, and their ground height range
@@ -111,13 +193,16 @@ struct Drawn {
     /// the field's world bounds (for skipping it whole)
     lo: Vec2,
     hi: Vec2,
-    pools: [Vec<Entity>; 4],
+    /// each tile's entity, and its depth draw's
+    pools: [Vec<(Entity, Option<Entity>)>; 4],
     heights_of: u64,
 }
 
 #[derive(Resource, Default)]
 pub struct CropRender {
-    meshes: HashMap<(Crop, u8), (Handle<Mesh>, f32)>,
+    /// per crop and level: the tile mesh, the same with its triangles in reverse order (the
+    /// shaded draw of two, see below) and the tallest plant
+    meshes: HashMap<(Crop, u8), (Handle<Mesh>, Option<Handle<Mesh>>, f32)>,
     drawn: HashMap<u64, Drawn>,
     revision: Option<u64>,
     /// the crop models' revision the meshes were made from
@@ -277,10 +362,7 @@ fn sync_fields(
         r.meshes.clear();
         r.revision = None;
         for d in std::mem::take(&mut r.drawn).into_values() {
-            for e in d.pools.into_iter().flatten() {
-                commands.entity(e).despawn();
-            }
-            mats.remove(&d.material);
+            despawn_drawn(&mut commands, &mut mats, d);
         }
     }
     let layer_tiles: [Vec4; 3] = std::array::from_fn(|i| {
@@ -316,10 +398,7 @@ fn sync_fields(
             .collect();
         for id in stale {
             if let Some(d) = r.drawn.remove(&id) {
-                for e in d.pools.into_iter().flatten() {
-                    commands.entity(e).despawn();
-                }
-                mats.remove(&d.material);
+                despawn_drawn(&mut commands, &mut mats, d);
             }
         }
         let new: Vec<&Field> = fields
@@ -332,7 +411,7 @@ fn sync_fields(
             let (mask, extent) = mask_image(f, origin, rot, size);
             let mask = images.add(mask);
             let ranges = f.crop.ranges();
-            let material = mats.add(CropMaterial {
+            let material = CropMaterial {
                 base: StandardMaterial {
                     base_color: Color::WHITE,
                     perceptual_roughness: 0.72,
@@ -378,8 +457,19 @@ fn sync_fields(
                         .unwrap_or(blank[1].clone()),
                     ground: ground_a.clone(),
                     ground_detail: ground_d.clone(),
+                    pass: CropPass::Single,
                 },
-            });
+            };
+            let (material, depth) = if two_pass() {
+                let mut depth = material.clone();
+                depth.extension.pass = CropPass::Depth;
+                let mut shade = material;
+                shade.extension.pass = CropPass::Shade;
+                shade.base.alpha_mode = AlphaMode::Mask(0.5);
+                (mats.add(shade), Some(mats.add(depth)))
+            } else {
+                (mats.add(material), None)
+            };
             let (lo, hi) = super::bounds(&f.poly());
             let t = tiles(f, origin, rot, size)
                 .into_iter()
@@ -392,6 +482,7 @@ fn sync_fields(
                     outline: f.outline.clone(),
                     rows: f.rows,
                     material,
+                    depth,
                     origin,
                     rot,
                     tiles: t,
@@ -406,17 +497,19 @@ fn sync_fields(
     }
     // a new height texture (a new world) or new ground under the tiles
     for d in r.drawn.values_mut() {
-        if mats.get(&d.material).is_some_and(|m| {
-            m.extension.height != gpu.height
-                || m.extension.ground != ground_a
-                || m.extension.field.tiles != layer_tiles
-        }) && let Some(mut m) = mats.get_mut(&d.material)
-        {
-            m.extension.height = gpu.height.clone();
-            m.extension.ground = ground_a.clone();
-            m.extension.ground_detail = ground_d.clone();
-            m.extension.field.tiles = layer_tiles;
-            m.extension.field.tex.x = if ground.albedo.is_some() { 1.0 } else { 0.0 };
+        for h in std::iter::once(&d.material).chain(d.depth.as_ref()) {
+            if mats.get(h).is_some_and(|m| {
+                m.extension.height != gpu.height
+                    || m.extension.ground != ground_a
+                    || m.extension.field.tiles != layer_tiles
+            }) && let Some(mut m) = mats.get_mut(h)
+            {
+                m.extension.height = gpu.height.clone();
+                m.extension.ground = ground_a.clone();
+                m.extension.ground_detail = ground_d.clone();
+                m.extension.field.tiles = layer_tiles;
+                m.extension.field.tex.x = if ground.albedo.is_some() { 1.0 } else { 0.0 };
+            }
         }
         if d.heights_of != terrain.height_revision {
             d.heights_of = terrain.height_revision;
@@ -438,6 +531,19 @@ fn sync_fields(
 
 /// Puts each field's tiles around the camera, at their level of detail.
 #[allow(clippy::too_many_arguments)]
+fn despawn_drawn(commands: &mut Commands, mats: &mut Assets<CropMaterial>, d: Drawn) {
+    for (e, twin) in d.pools.into_iter().flatten() {
+        commands.entity(e).despawn();
+        if let Some(t) = twin {
+            commands.entity(t).despawn();
+        }
+    }
+    mats.remove(&d.material);
+    if let Some(h) = &d.depth {
+        mats.remove(h);
+    }
+}
+
 fn place_tiles(
     mut commands: Commands,
     mut r: ResMut<CropRender>,
@@ -495,7 +601,7 @@ fn place_tiles(
             if need == 0 && d.pools[lod].is_empty() {
                 continue;
             }
-            let (mesh, height) = r
+            let (mesh, reversed, height) = r
                 .meshes
                 .entry((d.crop, lod as u8))
                 .or_insert_with(|| {
@@ -513,28 +619,59 @@ fn place_tiles(
                         )
                     };
                     let h = patch.height;
-                    (meshes.add(patch.mesh()), h)
+                    let mesh = patch.mesh();
+                    if std::env::var("WB_FIELDS_LOG").is_ok() {
+                        info!(
+                            "FIELDS {:?} lod {lod}: {} vertices, {} triangles a tile",
+                            d.crop,
+                            mesh.count_vertices(),
+                            mesh.indices().map_or(0, |i| i.len() / 3)
+                        );
+                    }
+                    // Two surfaces at exactly the same depth (pieces laid over each other): drawn
+                    // once with the depth test, the first triangle of the two shows; the shaded
+                    // draw of two passes them both and the last shows, so it draws them in
+                    // reverse order
+                    let reversed = two_pass().then(|| {
+                        let mut m = mesh.clone();
+                        if let Some(bevy::mesh::Indices::U32(idx)) = m.indices_mut() {
+                            let tris: Vec<[u32; 3]> =
+                                idx.chunks_exact(3).rev().map(|t| [t[0], t[1], t[2]]).collect();
+                            *idx = tris.into_iter().flatten().collect();
+                        }
+                        meshes.add(m)
+                    });
+                    (meshes.add(mesh), reversed, h)
                 })
                 .clone();
             while d.pools[lod].len() < need {
                 // (`NoAutoAabb`: the plants are placed in the vertex shader, so the bounds Bevy
                 // would work out from the mesh lie at y = 0 and the tiles get culled; ours, set
                 // below, cover the ground and the crop)
-                let e = commands
-                    .spawn((
-                        Mesh3d(mesh.clone()),
-                        MeshMaterial3d(d.material.clone()),
-                        Transform::IDENTITY,
-                        Aabb::default(),
-                        Visibility::Hidden,
-                        NotShadowCaster,
-                        bevy::camera::visibility::NoAutoAabb,
-                    ))
-                    .id();
-                d.pools[lod].push(e);
+                let mut tile = |m: &Handle<CropMaterial>, mesh: &Handle<Mesh>| {
+                    commands
+                        .spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(m.clone()),
+                            Transform::IDENTITY,
+                            Aabb::default(),
+                            Visibility::Hidden,
+                            NotShadowCaster,
+                            bevy::camera::visibility::NoAutoAabb,
+                        ))
+                        .id()
+                };
+                let e = tile(&d.material, reversed.as_ref().unwrap_or(&mesh));
+                let twin = d.depth.as_ref().map(|m| tile(m, &mesh));
+                d.pools[lod].push((e, twin));
                 respawned = true;
             }
-            for (i, e) in d.pools[lod].clone().into_iter().enumerate() {
+            let slots: Vec<(usize, Entity)> = d.pools[lod]
+                .iter()
+                .enumerate()
+                .flat_map(|(i, (e, twin))| std::iter::once((i, *e)).chain(twin.map(|t| (i, t))))
+                .collect();
+            for (i, e) in slots {
                 let Ok((mut tf, mut aabb, mut vis)) = q.get_mut(e) else {
                     continue;
                 };

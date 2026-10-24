@@ -26,6 +26,7 @@ fn registry() -> Vec<McpTool> {
     crate::market::mcp::register(&mut app);
     crate::scenes::mcp::register(&mut app);
     crate::fields::mcp::register(&mut app);
+    crate::characters::mcp::register(&mut app);
     Plugin::build(&crate::export::ExportPlugin, &mut app);
     Plugin::build(&crate::bigworld::BigWorldPlugin, &mut app);
     app.world().resource::<McpTools>().tools.clone()

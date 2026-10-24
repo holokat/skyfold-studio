@@ -67,11 +67,12 @@ Without preset, assets or category, thin / remove act on all nature. Placement f
     });
     app.mcp_tool(McpTool {
         name: "nature_set_amounts",
-        description: "World-wide nature dials, instant and saved with the world: `grass` (meadow grass thickness), `trees`, `rocks`, `plants` (ferns, bushes, reeds), `flowers`, `mushrooms`, `berries`, and `debris` (logs, stumps, branches). Each is 0..2; 1 follows the rules.",
+        description: "World-wide nature dials, instant and saved with the world: `grass` (meadow grass thickness), `grass_height` (blade length ×0.3..2.5, 1 = as grown), `trees`, `rocks`, `plants` (ferns, bushes, reeds), `flowers`, `mushrooms`, `berries`, and `debris` (logs, stumps, branches). Each is 0..2 (`trees` 0..5); 1 follows the rules.",
         input_schema: || {
             json!({ "type": "object", "properties": {
                 "grass": { "type": "number", "minimum": 0, "maximum": 2 },
-                "trees": { "type": "number", "minimum": 0, "maximum": 2 },
+                "grass_height": { "type": "number", "minimum": 0.3, "maximum": 2.5 },
+                "trees": { "type": "number", "minimum": 0, "maximum": 5 },
                 "rocks": { "type": "number", "minimum": 0, "maximum": 2 },
                 "plants": { "type": "number", "minimum": 0, "maximum": 2 },
                 "flowers": { "type": "number", "minimum": 0, "maximum": 2 },
@@ -84,13 +85,31 @@ Without preset, assets or category, thin / remove act on all nature. Placement f
     });
     app.mcp_tool(McpTool {
         name: "nature_appearance",
-        description: "Read or update the saved global nature appearance. Forest diversity changes only automatic rule-grown forests; explicit painted and pinned trees retain their species. `enabled: false` exactly keeps the legacy tree selection. `layout` is natural_groves or mixed. `grass_lushness` is 0..1 and adds lushness independently from the grass amount dial.",
+        description: "Read or update the saved global nature appearance. Forest diversity changes only automatic rule-grown forests; explicit painted and pinned trees retain their species. `enabled: false` exactly keeps the legacy tree selection. `layout` is natural_groves or mixed. `grass_lushness` is 0..1 and adds lushness independently from the grass amount dial. `canopy_shade` is 0..1 (default 1): how much sky light tree crowns hold back from the forest floor and the insides of crowns (0 lights them like open ground).",
         input_schema: || json!({ "type": "object", "properties": {
             "enabled": { "type": "boolean", "description": "forest diversity on/off" },
             "layout": { "type": "string", "enum": ["natural_groves", "mixed"] },
-            "grass_lushness": { "type": "number", "minimum": 0, "maximum": 1 }
+            "grass_lushness": { "type": "number", "minimum": 0, "maximum": 1 },
+            "canopy_shade": { "type": "number", "minimum": 0, "maximum": 1 }
         }}),
         run: |w, a| run(w, appearance, a),
+    });
+    app.mcp_tool(McpTool {
+        name: "ground_cover",
+        description: "Read or set the ground cover, saved with the world: the dense knee-high layer round the viewer (realistic art style). \
+`undergrowth` 0..2 (1 = a full woodland floor): ferns and broad-leaved herbs (photoscanned weed rosettes, nettles, leafy stalks) growing in clumps under tree crowns; \
+`herbs` 0..1: the undergrowth's mix, 0 all ferns .. 1 all broad-leaved herbs, in single-species patches; \
+`tufts` 0..2: photoscanned grass tufts among the meadow blades in the open; \
+`grass_under_trees` 0..1: how much meadow grass still grows under the crowns (the undergrowth takes over); \
+`clumping` 0..1: 0 an even spread .. 1 dense patches with bare ground between. One undo step. With no arguments, reports the settings and how many plants of each kind grow near the viewer.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "undergrowth": { "type": "number", "minimum": 0, "maximum": 2 },
+            "herbs": { "type": "number", "minimum": 0, "maximum": 1 },
+            "tufts": { "type": "number", "minimum": 0, "maximum": 2 },
+            "grass_under_trees": { "type": "number", "minimum": 0, "maximum": 1 },
+            "clumping": { "type": "number", "minimum": 0, "maximum": 1 }
+        }}),
+        run: |w, a| run(w, ground_cover, a),
     });
     app.mcp_tool(McpTool {
         name: "nature_query",
@@ -189,6 +208,7 @@ fn kinds_arg(args: &Value, lib: &crate::objects::Library) -> Result<Vec<AssetKin
 fn amounts(In(args): In<Value>, mut d: WorldData) -> R {
     let keys = [
         "grass",
+        "grass_height",
         "trees",
         "rocks",
         "plants",
@@ -202,14 +222,19 @@ fn amounts(In(args): In<Value>, mut d: WorldData) -> R {
         .map(|k| opt_num(&args, k))
         .collect::<Result<_, _>>()?;
     if vals.iter().all(Option::is_none) {
-        return Err("give at least one of grass, trees, rocks, plants, flowers, mushrooms, berries, debris (0..2)".into());
+        return Err("give at least one of grass, grass_height (0.3..2.5), trees (0..5), rocks, plants, flowers, mushrooms, berries, debris (0..2)".into());
     }
     let a = &mut *d.amounts;
     for (k, v) in keys.iter().zip(vals) {
         let Some(v) = v else { continue };
-        let v = v.clamp(0.0, 2.0);
+        let v = match *k {
+            "grass_height" => v.clamp(0.3, 2.5),
+            "trees" => v.clamp(0.0, 5.0),
+            _ => v.clamp(0.0, 2.0),
+        };
         match *k {
             "grass" => a.grass = v,
+            "grass_height" => a.grass_height = v,
             "trees" => a.trees = v,
             "rocks" => a.rocks = v,
             "plants" => a.plants = v,
@@ -242,10 +267,11 @@ fn appearance(In(args): In<Value>, mut d: WorldData) -> R {
     };
     let enabled = opt_bool(&args, "enabled")?;
     let lushness = opt_num(&args, "grass_lushness")?;
-    if enabled.is_none() && layout.is_none() && lushness.is_none() {
+    let shade = opt_num(&args, "canopy_shade")?;
+    if enabled.is_none() && layout.is_none() && lushness.is_none() && shade.is_none() {
         let a = d.appearance.sanitized();
         return json_out(
-            json!({ "forest": { "enabled": a.forest.enabled, "layout": match a.forest.layout { crate::nature::ForestLayout::NaturalGroves => "natural_groves", crate::nature::ForestLayout::Mixed => "mixed" } }, "grass_lushness": a.grass_lushness }),
+            json!({ "forest": { "enabled": a.forest.enabled, "layout": match a.forest.layout { crate::nature::ForestLayout::NaturalGroves => "natural_groves", crate::nature::ForestLayout::Mixed => "mixed" } }, "grass_lushness": a.grass_lushness, "canopy_shade": a.canopy_shade }),
         );
     }
     let mut after = d.appearance.sanitized();
@@ -262,14 +288,59 @@ fn appearance(In(args): In<Value>, mut d: WorldData) -> R {
             0.0
         };
     }
+    if let Some(v) = shade {
+        after.canopy_shade = v;
+    }
     crate::nature::set_appearance(&mut d.appearance, &mut d.history, after);
     d.meta.dirty = true;
     text(format!(
-        "Forest diversity {} ({}) · grass lushness {:.0}%.",
+        "Forest diversity {} ({}) · grass lushness {:.0}% · shade under trees {:.0}%.",
         if after.forest.enabled { "on" } else { "off" },
         after.forest.layout.name(),
-        after.grass_lushness * 100.0
+        after.grass_lushness * 100.0,
+        after.sanitized().canopy_shade * 100.0
     ))
+}
+
+fn ground_cover(
+    In(args): In<Value>,
+    mut d: WorldData,
+    tiles: Option<Res<crate::groundcover::GroundTiles>>,
+    shade: Res<crate::nature::shade::CanopyShade>,
+    cam: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
+    frames: Option<Res<crate::frame_stats::FrameStats>>,
+) -> R {
+    let mut after = d.appearance.sanitized();
+    let mut any = false;
+    for (key, v) in [
+        ("undergrowth", &mut after.ground.undergrowth),
+        ("herbs", &mut after.ground.herbs),
+        ("tufts", &mut after.ground.tufts),
+        ("grass_under_trees", &mut after.ground.grass_under_trees),
+        ("clumping", &mut after.ground.clumping),
+    ] {
+        if let Some(x) = opt_num(&args, key)? {
+            *v = x;
+            any = true;
+        }
+    }
+    if any {
+        crate::nature::set_appearance(&mut d.appearance, &mut d.history, after);
+        d.meta.dirty = true;
+    }
+    let g = d.appearance.sanitized().ground;
+    let (herbs, ferns, tufts) = tiles.map(|t| t.counts()).unwrap_or_default();
+    json_out(json!({
+        "undergrowth": g.undergrowth,
+        "herbs": g.herbs,
+        "tufts": g.tufts,
+        "grass_under_trees": g.grass_under_trees,
+        "clumping": g.clumping,
+        "near_viewer": { "herb_clumps": herbs, "ferns": ferns, "grass_tufts": tufts },
+        "canopy_cover_at_viewer": cam.single().map(|c| shade.cover_at(c.translation().xz())).unwrap_or(0.0),
+        "frame_ms_median": frames.map(|f| f.median_ms),
+        "note": if d.meta.art_style.painted() { "the hand-painted style has no ground cover (photoscans)" } else { "counts follow the viewer and update over a few frames" },
+    }))
 }
 
 /// Counts per asset of what grows in an area (procedural plus placed nature objects).
@@ -520,6 +591,7 @@ fn rules_info(
                 },
             },
             "grass_lushness": appearance.grass_lushness,
+            "canopy_shade": appearance.canopy_shade,
         },
         "note": "A spot grows its painted preset, else its biome's (picked by large-scale patch noise), else — once the world is populated — the classic land rules (slope, altitude, moisture, forest noise). Rich forest diversity only replaces automatic tree layers: temperate and autumn forests can add maples, ginkgo and sakura, sequoias are rare temperate conifer anchors, and bamboo is restricted to jungle ecology. Explicit painted species stay exact.",
     }))

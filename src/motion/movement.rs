@@ -656,11 +656,11 @@ fn fly(s: &mut WalkState, inp: &MoveInput, w: &MoveWorld, right: Vec3, dt: f32) 
 pub fn key_hints(s: &WalkState) -> String {
     let fly_speed = s.fly_speed;
     match (s.mode, s.water) {
-        (MoveMode::Fly, _) => format!("WASD fly where you look · Space up · C down · Wheel speed ({fly_speed:.0} m/s) · Shift boost · Alt slow · F land · Esc exit"),
-        (MoveMode::Mount, _) => "WASD ride · Shift sprint · Alt trot · Space jump · R dismount · F fly · Esc exit".into(),
-        (_, InWater::Swimming) => "WASD swim · Shift faster · C / Ctrl dive · F fly · Esc exit".into(),
-        (_, InWater::Diving) => "WASD swim where you look · Space up · C / Ctrl down · Shift faster · Esc exit".into(),
-        _ => "WASD move · Shift sprint · Alt / Caps walk · C crouch · Space jump · R mount · F fly · T time ×60 · V draw · Esc exit".into(),
+        (MoveMode::Fly, _) => format!("WASD fly where you look · Space up · C down · Wheel speed ({fly_speed:.0} m/s) · Shift boost · Alt slow · F land · H hide UI · Esc exit"),
+        (MoveMode::Mount, _) => "WASD ride · Shift sprint · Alt trot · Space jump · R dismount · F fly · H hide UI · Esc exit".into(),
+        (_, InWater::Swimming) => "WASD swim · Shift faster · C / Ctrl dive · F fly · H hide UI · Esc exit".into(),
+        (_, InWater::Diving) => "WASD swim where you look · Space up · C / Ctrl down · Shift faster · H hide UI · Esc exit".into(),
+        _ => "WASD move · Shift sprint · Alt / Caps walk · C crouch · Space jump · R mount · F fly · T time ×60 · V draw · H hide UI · Esc exit".into(),
     }
 }
 

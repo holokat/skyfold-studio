@@ -12,6 +12,7 @@ import bevy_pbr::render::{
     view_transformations::position_world_to_clip,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
+    pbr_types::PbrInput,
 };
 import super::noise::{hashf, value_noise2};
 import super::wind::gust_field;
@@ -80,6 +81,68 @@ fn rotate_about_axis(v: vec3<f32>, axis: vec3<f32>, angle: f32) -> vec3<f32> {
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
 
+/// Bevy's `VertexOutput` with an invariant position: the crops' depth draw and their shaded
+/// draw (`fragment_depth`, `fragment_shade`) are separate pipelines, and Metal fits each one's
+/// vertex shader to what its fragment shader reads; without this the two can place a vertex a
+/// hair apart, and the shaded draw's equal-depth test then misses that triangle.
+struct CropOut {
+    @invariant @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @if(VERTEX_UVS_A)
+    @location(2) uv: vec2<f32>,
+    @if(VERTEX_UVS_B)
+    @location(3) uv_b: vec2<f32>,
+    @if(VERTEX_TANGENTS)
+    @location(4) world_tangent: vec4<f32>,
+    @if(VERTEX_COLORS)
+    @location(5) color: vec4<f32>,
+    @if(VERTEX_OUTPUT_INSTANCE_INDEX)
+    @location(6) @interpolate(flat) instance_index: u32,
+    @if(VISIBILITY_RANGE_DITHER)
+    @location(7) @interpolate(flat) visibility_range_dither: i32,
+}
+
+fn to_crop(o: VertexOutput) -> CropOut {
+    var c: CropOut;
+    c.position = o.position;
+    c.world_position = o.world_position;
+    c.world_normal = o.world_normal;
+@if(VERTEX_UVS_A)
+    c.uv = o.uv;
+@if(VERTEX_UVS_B)
+    c.uv_b = o.uv_b;
+@if(VERTEX_TANGENTS)
+    c.world_tangent = o.world_tangent;
+@if(VERTEX_COLORS)
+    c.color = o.color;
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
+    c.instance_index = o.instance_index;
+@if(VISIBILITY_RANGE_DITHER)
+    c.visibility_range_dither = o.visibility_range_dither;
+    return c;
+}
+
+fn from_crop(c: CropOut) -> VertexOutput {
+    var o: VertexOutput;
+    o.position = c.position;
+    o.world_position = c.world_position;
+    o.world_normal = c.world_normal;
+@if(VERTEX_UVS_A)
+    o.uv = c.uv;
+@if(VERTEX_UVS_B)
+    o.uv_b = c.uv_b;
+@if(VERTEX_TANGENTS)
+    o.world_tangent = c.world_tangent;
+@if(VERTEX_COLORS)
+    o.color = c.color;
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
+    o.instance_index = c.instance_index;
+@if(VISIBILITY_RANGE_DITHER)
+    o.visibility_range_dither = c.visibility_range_dither;
+    return o;
+}
+
 fn terrain_height(xz: vec2<f32>) -> f32 {
     let half = crop.grid.x;
     let cell = crop.grid.y;
@@ -99,7 +162,7 @@ fn terrain_height(xz: vec2<f32>) -> f32 {
 }
 
 @vertex
-fn vertex(vertex_in: Vertex) -> VertexOutput {
+fn vertex(vertex_in: Vertex) -> CropOut {
     var out: VertexOutput;
     let v = decompress_vertex(vertex_in, vertex_in.instance_index);
     let world_from_local = mesh_functions::get_world_from_local(vertex_in.instance_index);
@@ -256,7 +319,7 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     out.world_tangent = v.tangent;
 @if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex_in.instance_index;
-    return out;
+    return to_crop(out);
 }
 
 // Surfaces: the crop atlas (the shared one the procedural plants are painted from, or a
@@ -264,8 +327,86 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
 // screen-space derivatives, so no tangent frame is stored (the tangent carries the atlas uv and the
 // surface kind) — the terrain's own photoscanned ground layers (ridges, beds, furrows: they match
 // the field's ground), or plain vertex colour. Roughness comes with the vertex colour's alpha.
+//
+// Cut-out crops are drawn twice in the main pass (`fields::render`): first only their depth
+// (`fragment_depth`: the same cut-out test, no colour), then shaded where that depth is the
+// nearest (`fragment_shade`: depth equal, no discard). Without the discard the GPU's hidden
+// surface removal works again, so each pixel of a dense field is shaded once, not once a layer.
+// Both draws use this module with the same definitions, only another fragment entry point: the
+// vertex shader compiles to the very same code, so the depths match exactly.
+
+/// The atlas's cut-out alpha at this fragment (true: kept).
+fn cutout_keep(tan: vec4<f32>, wp: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> bool {
+    let kind = u32(tan.z + 0.5);
+    if kind != KIND_ATLAS && kind != KIND_TILED {
+        return true;
+    }
+    var suv = tan.xy;
+    var gx = duvx;
+    var gy = duvy;
+    if kind == KIND_TILED {
+        var aspect = (tan.z - 21.0) * 10.0;
+        if aspect < 0.02 {
+            let dims = vec2<f32>(textureDimensions(atlas_tex));
+            aspect = dims.x / dims.y;
+        }
+        let size = vec2<f32>(tan.w, tan.w * aspect);
+        let w = wp.xz / TILED_METRES;
+        suv = tan.xy + fract(w) * size;
+        gx = dpx.xz / TILED_METRES * size;
+        gy = dpy.xz / TILED_METRES * size;
+    }
+    return textureSampleGrad(atlas_tex, atlas_samp, suv, gx, gy).a >= 0.5;
+}
+
 @fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+fn fragment_depth(crop_in: CropOut) -> FragmentOutput {
+    let in = from_crop(crop_in);
+    var tan = vec4<f32>(0.0);
+@if(VERTEX_TANGENTS) {
+    tan = in.world_tangent;
+}
+    let wp = in.world_position.xyz;
+    let dpx = dpdx(wp);
+    let dpy = dpdy(wp);
+    let duvx = dpdx(tan.xy);
+    let duvy = dpdy(tan.xy);
+    if !cutout_keep(tan, wp, dpx, dpy, duvx, duvy) {
+        discard;
+    }
+    var out: FragmentOutput;
+    // (seen only with `WB_CROPDEBUG`: where the shaded draw doesn't cover it)
+    out.color = vec4<f32>(40.0, 0.0, 40.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fragment(crop_in: CropOut, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    let in = from_crop(crop_in);
+    var keep = true;
+    var pbr_input = crop_input(in, is_front, &keep);
+    if !keep {
+        discard;
+    }
+    return lit(pbr_input);
+}
+
+@fragment
+fn fragment_shade(crop_in: CropOut, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    let in = from_crop(crop_in);
+    var keep = true;
+    return lit(crop_input(in, is_front, &keep));
+}
+
+fn lit(pbr_input: PbrInput) -> FragmentOutput {
+    var out: FragmentOutput;
+    out.color = apply_pbr_lighting(pbr_input);
+    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+    return out;
+}
+
+/// The crop's surface at this fragment; `keep`: false where the cut-out alpha drops it.
+fn crop_input(in: VertexOutput, is_front: bool, keep: ptr<function, bool>) -> PbrInput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     var tan = vec4<f32>(0.0);
 @if(VERTEX_TANGENTS) {
@@ -308,7 +449,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if !is_front {
         n = -n;
     }
-    var keep = true;
     if kind == KIND_ATLAS || kind == KIND_TILED {
         var suv = uv;
         var gx = duvx;
@@ -330,7 +470,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             gy = dpy.xz / TILED_METRES * size;
         }
         let a = textureSampleGrad(atlas_tex, atlas_samp, suv, gx, gy);
-        keep = a.a >= 0.5;
+        *keep = a.a >= 0.5;
         let tn = textureSampleGrad(atlas_nrm, atlas_samp, suv, gx, gy).xy * 2.0 - 1.0;
         let t1 = cross(dpy, n);
         let t2 = cross(n, dpx);
@@ -357,12 +497,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.diffuse_transmission = 0.0;
         pbr_input.diffuse_occlusion = min(pbr_input.diffuse_occlusion, vec3<f32>(d.w)); // keeps the screen-space AO
     }
-    if !keep {
-        discard;
-    }
     pbr_input.N = n;
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-    return out;
+    return pbr_input;
 }

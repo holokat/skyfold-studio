@@ -62,6 +62,11 @@ pub(super) const READ_ONLY: &[&str] = &[
     "selection_info",
     "selection_screenshot",
     "walk_state",
+    "settings_search",
+    "characters_list",
+    "characters_markers",
+    "characters_animations",
+    "characters_npcs",
 ];
 
 /// The `tools/list` result for the registry.

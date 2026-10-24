@@ -442,7 +442,7 @@ fn compose(ui: &mut egui::Ui, sel: &mut Selection, s: &mut PromptSession) {
             sel.mask_on = on;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = s.status(s.backend).is_some_and(|st| st.ready) || (s.backend == Backend::AnthropicApi && !s.api_key.trim().is_empty());
+            let ready = s.ready(s.backend);
             let can = ready && !s.input.trim().is_empty();
             let send = ui.add_enabled(can, egui::Button::new(RichText::new(format!("{}  Send", icon::PAPER_PLANE_RIGHT)).color(ON_ACCENT)).fill(ACCENT).corner_radius(CornerRadius::same(8)).min_size(vec2(84.0, 30.0)));
             if (send.on_hover_text("Send (⌘↩)").clicked() || (send_key && can)) && can {
@@ -496,7 +496,24 @@ fn backend_row(ui: &mut egui::Ui, s: &mut PromptSession) {
             s.detect();
         }
     });
-    // the model and how hard it thinks
+    if s.backend == Backend::Api {
+        api_key_row(ui, s, 200.0);
+        api_model_row(ui, s);
+    } else {
+        model_row(ui, s);
+    }
+    let signin = s.backend == Backend::ClaudeCode
+        && s.status(Backend::ClaudeCode).is_some_and(|st| !st.ready && st.path.is_some());
+    if signin || s.login.is_some() {
+        claude_signin_row(ui, s);
+    } else if let Some(st) = s.status(s.backend) {
+        let col = if st.ready { GREEN } else { AMBER };
+        ui.add(egui::Label::new(RichText::new(&st.note).small().color(col)).wrap());
+    }
+}
+
+/// The model and how hard it thinks (Codex, Claude Code: their own lists).
+fn model_row(ui: &mut egui::Ui, s: &mut PromptSession) {
     let opts = s.model_options();
     let model = s.model();
     let cur = opts.iter().find(|o| o.slug == model).cloned();
@@ -530,36 +547,164 @@ fn backend_row(ui: &mut egui::Ui, s: &mut PromptSession) {
                 .on_hover_text("Reasoning effort: higher thinks longer and builds more carefully, but takes longer");
         }
     });
-    if let Some(st) = s.status(s.backend) {
-        let col = if st.ready { GREEN } else { AMBER };
-        if !(s.backend == Backend::AnthropicApi && !s.api_key.trim().is_empty()) {
-            ui.add(egui::Label::new(RichText::new(&st.note).small().color(col)).wrap());
+}
+
+/// The API backend's provider (OpenRouter, OpenAI, … or any OpenAI-compatible URL) and its key.
+/// Shared by the prompt panel and the setup wizard.
+pub(crate) fn api_key_row(ui: &mut egui::Ui, s: &mut PromptSession, key_width: f32) {
+    let named = super::agent::provider(&s.api_base);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Provider").color(TEXT_DIM));
+        egui::ComboBox::from_id_salt("api_provider")
+            .selected_text(named.map_or("Custom URL", |p| p.name))
+            .width(150.0)
+            .dropdown_ui(ui, |ui| {
+                for p in &super::agent::PROVIDERS {
+                    if menu_check(ui, named.is_some_and(|n| n.base == p.base), p.name).clicked() {
+                        s.set_api_base(p.base);
+                    }
+                }
+                if menu_check(ui, named.is_none(), "Custom URL…").clicked() && named.is_some() {
+                    s.api_base = "https://".into();
+                }
+            })
+            .response
+            .on_hover_text("Any service that speaks the OpenAI Chat Completions API works: OpenRouter reaches Claude, GPT, Gemini and many more with one key");
+    });
+    if named.is_none() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("URL").color(TEXT_DIM));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut s.api_base)
+                    .hint_text("https://…/v1")
+                    .desired_width(key_width + 60.0),
+            );
+            if r.lost_focus() {
+                let b = s.api_base.clone();
+                s.set_api_base(&b);
+            }
+        });
+        if !super::agent::valid_base(&s.api_base) {
+            ui.label(RichText::new("The base URL, ending in /v1 (the part before /chat/completions)").small().color(AMBER));
         }
     }
-    if s.backend == Backend::AnthropicApi {
+    let needs_key = named.is_none_or(|p| !p.keys_at.is_empty());
+    if needs_key {
         ui.horizontal(|ui| {
             ui.label(RichText::new(icon::KEY).color(TEXT_DIM));
             let r = ui.add(
                 egui::TextEdit::singleline(&mut s.api_key)
                     .password(true)
-                    .hint_text("sk-ant-… API key")
-                    .desired_width(200.0),
+                    .hint_text(format!("{} API key", named.map_or("sk-…", |p| p.key_hint)))
+                    .desired_width(key_width),
             );
             let mut remember = s.remember_key;
-            let c = toggle(
-                ui,
-                &mut remember,
-                RichText::new("Remember").small().color(TEXT),
-            )
-            .on_hover_text(
-                "Keep the key on this Mac (a file only you can read, outside the project)",
-            );
+            let c = toggle(ui, &mut remember, RichText::new("Remember").small().color(TEXT))
+                .on_hover_text("Keep the key on this Mac (a file only you can read, outside the project)");
             if c.changed() || (r.lost_focus() && s.remember_key) {
                 s.remember_key = remember;
                 s.store_key();
             }
+            // (a new key: read the provider's models with it)
+            if r.lost_focus() {
+                s.detect();
+            }
         });
+        if let Some(p) = named
+            && s.api_key.trim().is_empty()
+        {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Get a key at").small().color(TEXT_DIM));
+                ui.hyperlink_to(
+                    RichText::new(p.keys_at).small(),
+                    format!("https://{}", p.keys_at),
+                );
+            });
+        }
     }
+}
+
+/// The API backend's model: any id the provider has, with its catalog as suggestions.
+pub(crate) fn api_model_row(ui: &mut egui::Ui, s: &mut PromptSession) {
+    let opts = s.model_options();
+    let mut model = s.models.get(&Backend::Api).cloned().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Model").color(TEXT_DIM));
+        let hint = opts.first().map_or("model id, e.g. anthropic/…".to_string(), |o| o.slug.clone());
+        let r = ui.add(egui::TextEdit::singleline(&mut model).hint_text(hint).desired_width(170.0));
+        if r.changed() {
+            s.set_model(&model);
+        }
+        if !opts.is_empty() {
+            let typed = model.trim().to_lowercase();
+            egui::ComboBox::from_id_salt("api_model_pick")
+                .selected_text(format!("{}", opts.len()))
+                .width(56.0)
+                .height(420.0)
+                .dropdown_ui(ui, |ui| {
+                    ui.set_min_width(320.0);
+                    let cur = s.model();
+                    for o in opts
+                        .iter()
+                        .filter(|o| typed.is_empty() || o.slug.to_lowercase().contains(&typed) || o.name.to_lowercase().contains(&typed) || o.slug == cur)
+                        .take(40)
+                    {
+                        let label = if o.name == o.slug { o.slug.clone() } else { format!("{}  ·  {}", o.name, o.slug) };
+                        if menu_check(ui, o.slug == cur, RichText::new(label).color(TEXT)).clicked() {
+                            s.set_model(&o.slug);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("The provider's models that can use tools (type to narrow the list)");
+        }
+    });
+}
+
+/// Sign in with Claude: one click runs Claude Code's own sign-in (the browser opens); a code to
+/// paste in case the browser can't hand it back. Shared by the prompt panel and the wizard.
+pub(crate) fn claude_signin_row(ui: &mut egui::Ui, s: &mut PromptSession) {
+    let Some(url) = s.login.as_ref().map(|l| l.url.clone()) else {
+        let b = egui::Button::new(RichText::new(format!("{}  Sign in with Claude", icon::SIGN_IN)).color(ON_ACCENT))
+            .fill(ACCENT)
+            .corner_radius(CornerRadius::same(8))
+            .min_size(vec2(170.0, 30.0));
+        if ui.add(b).on_hover_text("Opens claude.ai in your browser to sign in with your Claude account").clicked() {
+            s.start_claude_login();
+        }
+        if let Some(e) = &s.login_error {
+            ui.add(egui::Label::new(RichText::new(format!("Sign-in didn't finish: {e}")).small().color(AMBER)).wrap());
+        }
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+        ui.label(RichText::new("Finish signing in in your browser…").color(TEXT));
+    });
+    ui.horizontal(|ui| {
+        if let Some(u) = &url
+            && ui.link(RichText::new(format!("{}  Open the sign-in page again", icon::ARROW_SQUARE_OUT)).small()).clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+        }
+        // (dropping it stops the sign-in)
+        if ui.button(RichText::new("Cancel").small()).clicked() {
+            s.login = None;
+        }
+    });
+    ui.horizontal(|ui| {
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut s.login_code)
+                .hint_text("Code from the page, if it shows one")
+                .desired_width(210.0),
+        );
+        let go = !s.login_code.trim().is_empty()
+            && (ui.button("Use code").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))));
+        if go && let Some(l) = s.login.as_mut() {
+            l.submit_code(&s.login_code);
+            s.login_code.clear();
+        }
+    });
 }
 
 fn agent_effort_label(e: &str) -> String {

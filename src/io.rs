@@ -105,6 +105,9 @@ struct WorldDoc {
     /// this world is a dungeon's map: its plan, style, lights and mood
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dungeon_map: Option<crate::dungeons::MapDoc>,
+    /// animated characters placed in the world (Labs: `crate::characters`)
+    #[serde(default, skip_serializing_if = "crate::characters::WorldCharacters::is_empty")]
+    characters: crate::characters::WorldCharacters,
     /// Map tab settings (style, resolution, layers, title)
     #[serde(default)]
     map: crate::worldmap::MapSettings,
@@ -168,6 +171,7 @@ pub struct WorldData<'w> {
     pub caves: ResMut<'w, crate::caves::Caves>,
     pub dungeons: ResMut<'w, crate::dungeons::Dungeons>,
     pub dungeon_map: ResMut<'w, crate::dungeons::DungeonMap>,
+    pub characters: ResMut<'w, crate::characters::WorldCharacters>,
     pub map: ResMut<'w, crate::worldmap::WorldMap>,
     pub reference: ResMut<'w, crate::refmap::RefMap>,
     pub legacy_effects: ResMut<'w, LegacyEffectsMetadata>,
@@ -314,6 +318,22 @@ fn track_revision(mut meta: ResMut<WorldMeta>) {
     }
 }
 
+/// What quitting does with unsaved work: a background save finishes first, then (with autosave on)
+/// the world is saved before the editor quits.
+fn quit_save(data: &mut WorldData, autosave: bool) {
+    finish_save(data, save::wait());
+    if data.meta.dirty && autosave {
+        autosave_now(data, "closing", true);
+    }
+}
+
+/// Before an update relaunches the app (`crate::updates`): the same save as closing the window.
+pub(crate) fn save_before_quit(data: &mut WorldData, auto: &Autosave) {
+    if !automated_run() && data.lib.is_some() {
+        quit_save(data, auto.enabled);
+    }
+}
+
 pub(crate) fn save_recovery(mut data: WorldData) {
     if !automated_run() && data.meta.dirty {
         autosave_now(&mut data, "render error", true);
@@ -349,11 +369,7 @@ fn autosave(
     // closing the window: keep unsaved work
     let quitting = closing.read().count() > 0 || exits.read().count() > 0;
     if quitting {
-        // a background save finishes before the editor quits
-        finish_save(&mut data, save::wait());
-        if data.meta.dirty && auto.enabled {
-            autosave_now(&mut data, "closing", true);
-        }
+        quit_save(&mut data, auto.enabled);
         return;
     }
     let every = if std::env::var("WB_RECOVERY_DIR").is_ok() {
@@ -687,6 +703,26 @@ fn handle_actions(
                     .set_title("Import 3D models")
                     .add_filter("glTF models", &["glb", "gltf"]),
             ),
+            UiAction::PackInstalled { pack, title } => {
+                // its libraries' models join the library now, no restart
+                crate::market::reload_installed();
+                let dir = std::path::PathBuf::from(crate::assets_path()).join("models");
+                let mut n = 0;
+                if let Some(lib) = data.lib.as_mut() {
+                    for l in crate::objects::model_libraries(&dir)
+                        .iter()
+                        .filter(|l| l.pack_id == pack)
+                    {
+                        for e in crate::objects::model_library(l) {
+                            lib.add(e);
+                            n += 1;
+                        }
+                    }
+                }
+                data.ed.toast(format!(
+                    "{title} is installed: {n} assets are yours to place (Objects tab)"
+                ));
+            }
             UiAction::ImportFiles { files, from } => {
                 // (`from`: a marketplace listing's title; empty for File › Import)
                 let from = Some(from).filter(|f| !f.is_empty());
@@ -912,6 +948,7 @@ pub fn new_world_from(data: &mut WorldData, heights: Vec<f32>, res: usize, cell:
     *data.motion = default();
     *data.caves = default();
     *data.dungeons = default();
+    *data.characters = default();
     data.dungeon_map.0 = None;
     crate::nature::forget_snapshot();
     data.reference.clear();
@@ -1105,6 +1142,7 @@ pub fn load_world(dir: &Path, data: &mut WorldData) -> Result<(), String> {
     *data.motion = doc.motion;
     *data.caves = doc.caves;
     *data.dungeons = doc.dungeons;
+    *data.characters = doc.characters;
     data.dungeon_map.0 = doc.dungeon_map;
     // Sheet maps saved before raised bridge decks existed are repaired once, from their own
     // preserved blueprint and build floor.  This touches neither terrain, water nor objects.
@@ -1480,6 +1518,7 @@ mod tests {
             caves: default(),
             dungeons: default(),
             dungeon_map: None,
+            characters: default(),
             map: default(),
             reference: default(),
             reference_effects: None,

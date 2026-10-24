@@ -23,6 +23,7 @@ import bevy_pbr::render::{
 import super::noise::{value_noise2, value_noise3, fbm2, fbm3, voronoi2, srgb, cloud_density, cloud_cover, CLOUD_TILE};
 import super::shore::{surf_cycle, swash_front, run_up};
 import super::rain::{puddle_amount, rain_ripples};
+import super::canopy_shade::canopy_sky;
 
 struct TerrainParams {
     grid: vec4<f32>,
@@ -831,6 +832,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         }
     }
     pbr_input.directional_shadow_factor = 1.0 - cloud * terrain.sun.w;
+    // ---- the sky light the tree crowns above hold back (forest floors)
+    let canopy = canopy_sky(wp);
+    pbr_input.diffuse_occlusion *= canopy;
+    pbr_input.specular_occlusion *= canopy;
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

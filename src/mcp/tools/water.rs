@@ -1040,7 +1040,11 @@ fn list(In(_): In<Value>, d: WorldData) -> R {
         .iter()
         .map(|l| {
             let kind = if l.is_drawn() { lakes::shape_by_id(&l.shape).id } else { "basin" };
-            json!({ "id": l.id, "name": l.name, "type": kind, "preset": l.style.preset, "level": r1(l.level), "depth": r1(l.depth), "centre": [l.seed[0].round(), l.seed[1].round()] })
+            let area = l.is_drawn().then(|| {
+                let poly: Vec<Vec2> = l.outline.iter().map(|p| Vec2::from_array(*p)).collect();
+                crate::water::lakes::signed_area(&poly).abs().round()
+            });
+            json!({ "id": l.id, "name": l.name, "type": kind, "preset": l.style.preset, "level": r1(l.level), "depth": r1(l.depth), "centre": [l.seed[0].round(), l.seed[1].round()], "area_m2": area })
         })
         .collect();
     let falls: Vec<Value> = w

@@ -1051,7 +1051,7 @@ fn check_tool(world: &mut World, args: Value) -> Result<Vec<McpContent>, String>
             // models/<folder>/…: the pack is the folder (stylepacks/<pack>/… its pack)
             let mut parts = rel.split('/').skip(1);
             let pack = match parts.next() {
-                Some("stylepacks") => parts.next().unwrap_or("stylepacks"),
+                Some(f @ ("stylepacks" | crate::objects::PREVIEWS)) => parts.next().unwrap_or(f),
                 Some(f) => f,
                 None => "imported",
             };

@@ -854,7 +854,7 @@ impl Catalog {
         let dir = std::path::PathBuf::from(crate::assets_path()).join("models");
         let mut c = Catalog::default();
         for lib in crate::objects::model_libraries(&dir) {
-            let Some(doc) = std::fs::read_to_string(dir.join(&lib.folder).join("models.json"))
+            let Some(doc) = std::fs::read_to_string(lib.dir.join("models.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             else {

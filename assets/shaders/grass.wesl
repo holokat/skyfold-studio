@@ -16,6 +16,7 @@ import bevy_pbr::render::{
 };
 import super::noise::{fbm2, hashf};
 import super::wind::gust_field;
+import super::canopy_shade::{canopy_sky, canopy_grass};
 
 struct GrassParams {
     // x: terrain half size, y: cell size, z: vertices per side, w: sea level
@@ -100,7 +101,9 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     let half = grass.grid.x;
     let n = grass.grid.z;
     let g = (sxz + vec2<f32>(half)) / grass.grid.y;
-    let dd = textureSampleLevel(density_tex, density_samp, (g + vec2<f32>(0.5)) / n, 0.0);
+    var dd = textureSampleLevel(density_tex, density_samp, (g + vec2<f32>(0.5)) / n, 0.0);
+    // under the crowns the forest undergrowth takes over from the meadow
+    dd.r *= canopy_grass(sxz);
     // Keep the original amount response for the shared blade layer. Above amount 1, the added
     // fine layer continues to fill in, so the existing 1..2 dial really adds realistic cover.
     let cover = dd.r * grass.amount.x;
@@ -395,6 +398,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             realistic,
         );
     }
+    // the sky light the tree crowns above hold back
+    let sky = canopy_sky(in.world_position.xyz);
+    pbr_input.diffuse_occlusion *= sky;
+    pbr_input.specular_occlusion *= sky;
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

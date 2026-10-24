@@ -25,7 +25,11 @@ pub struct Pack {
     /// how many assets the pack has (when it isn't installed here to count)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_count: Option<u32>,
-    /// where "Get pack" sends the user (opened in the browser)
+    /// its listing on skyfoldstudio.com: "Get pack" buys it there (Checkout in the browser), then
+    /// downloads and installs it (`super::install`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing_id: Option<String>,
+    /// where "Get pack" sends the user when it has no listing (opened in the browser)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purchase_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,6 +43,10 @@ pub struct Pack {
     /// how many of its models are installed here
     #[serde(skip)]
     pub installed: usize,
+    /// how many of its models this app shows as a preview without having them
+    /// (`crate::objects::PREVIEWS`; their pictures and the free samples ship with it)
+    #[serde(skip)]
+    pub previewed: usize,
 }
 
 impl Pack {
@@ -51,13 +59,19 @@ impl Pack {
         self.free_assets.iter().any(|a| a == id)
     }
 
-    /// How many assets it has: the ones installed here, else the catalog's count.
+    /// How many assets it has: the ones installed here, else the catalog's count, else the
+    /// shipped preview's.
     pub fn assets(&self) -> usize {
         if self.installed > 0 {
             self.installed
         } else {
-            self.asset_count.unwrap_or(0) as usize
+            self.asset_count.map_or(self.previewed, |n| n as usize)
         }
+    }
+
+    /// Its models are in the library here (installed, or a shipped preview of them).
+    pub fn listed(&self) -> bool {
+        self.installed > 0 || self.previewed > 0
     }
 
     /// "$14.99", "Free", or "Not for sale yet".

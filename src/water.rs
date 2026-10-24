@@ -502,6 +502,11 @@ pub struct WaterMaterials {
 #[derive(Component)]
 struct Ocean;
 
+/// The ocean's drawn surface (a child of `Ocean`, whose own visibility the dungeons set): hidden
+/// while no open sea can be seen (`crate::ocean::SeaView`).
+#[derive(Component)]
+struct OceanSurface;
+
 /// A lake or river mesh and the body it renders.
 #[derive(Component)]
 struct WaterBodyMesh {
@@ -595,13 +600,19 @@ fn spawn_ocean(
     commands.spawn((
         Name::new("Ocean"),
         Ocean,
-        // a polar grid centred under the camera (dense near the eye, out to the horizon)
-        Mesh3d(meshes.add(crate::ocean::polar_grid(384, 0.25, 22.0, 5000.0))),
-        MeshMaterial3d(ocean.clone()),
         Transform::IDENTITY,
-        NotShadowCaster,
-        RenderLayers::layer(crate::water_render::WATER_RENDER_LAYER),
-        bevy::camera::visibility::NoFrustumCulling,
+        Visibility::default(),
+        children![(
+            Name::new("Ocean surface"),
+            OceanSurface,
+            // a polar grid centred under the camera (dense near the eye, out to the horizon)
+            Mesh3d(meshes.add(crate::ocean::polar_grid(384, 0.25, 22.0, 5000.0))),
+            MeshMaterial3d(ocean.clone()),
+            Transform::IDENTITY,
+            NotShadowCaster,
+            RenderLayers::layer(crate::water_render::WATER_RENDER_LAYER),
+            bevy::camera::visibility::NoFrustumCulling,
+        )],
     ));
     commands.insert_resource(WaterMaterials { ocean });
 }
@@ -760,6 +771,10 @@ fn update_water_materials(
     ),
     mut materials: ResMut<Assets<WaterMaterial>>,
     mut ocean: Query<&mut Transform, (With<Ocean>, Without<crate::camera::MainCamera>)>,
+    (mut surface, sea_view): (
+        Query<&mut Visibility, With<OceanSurface>>,
+        Res<crate::ocean::SeaView>,
+    ),
     bodies: Query<&WaterBodyMesh>,
     (time, mut drift): (Res<Time>, Local<Vec2>),
     cam: Query<
@@ -794,6 +809,17 @@ fn update_water_materials(
             p.z,
         );
         t.rotation = Quat::from_rotation_y(yaw);
+    }
+    // nowhere in sight: not drawn (none of its pixels would survive the depth test)
+    let shown = if sea_view.visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in &mut surface {
+        if *v != shown {
+            *v = shown;
+        }
     }
     // key light in display units: illuminance × exposure / π, warmed when the sun is low
     let exp = 1.0 / (2f32.powf(exposure.ev100) * 1.2);
@@ -1701,7 +1727,9 @@ fn water_tools(
                         m => m,
                     };
                 }
-                let amount = brush.strength * 7.0 * time.delta_secs().min(0.05);
+                // (about the brush's size per second at full strength: a short scrub shows)
+                let speed = (brush.size * 0.9).max(12.0);
+                let amount = brush.strength * speed * time.delta_secs().min(0.05);
                 if let Some(l) = water.lakes.iter_mut().find(|l| l.id == *id) {
                     lakes::deform(&mut l.outline, hit.xz(), brush.size, amount, mode);
                 }

@@ -202,7 +202,7 @@ impl Surface {
         }
     }
 
-    /// Footstep takes per surface (`tools/audio/gen_footsteps.py` makes six: three per foot). The
+    /// Footstep takes per surface (`tools/audio/open/build_steps.py` makes six: three per foot). The
     /// audio loader counts the files on disk and only falls back to this.
     pub fn variant_count(self) -> u32 {
         6

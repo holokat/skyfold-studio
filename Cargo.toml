@@ -1,6 +1,6 @@
 [package]
 name = "world_builder"
-version = "0.1.2"
+version = "0.1.0"
 edition = "2024"
 description = "Paintbrush-simple 3D world editor for MMO worlds"
 license = "MIT"
@@ -8,7 +8,7 @@ homepage = "https://skyfoldstudio.com"
 repository = "https://github.com/holokat/skyfold-studio"
 
 [workspace]
-members = [".", "crates/ez_tree", "crates/particle_fluids"]
+members = [".", "crates/ez_tree", "crates/particle_fluids", "crates/autorig"]
 
 [dependencies]
 bevy = { version = "0.20.0", features = ["mp3", "jpeg", "file_watcher"] }
@@ -24,6 +24,8 @@ rustfft = "6.4"
 half = "2.7"
 ez_tree = { path = "crates/ez_tree" }
 particle_fluids = { path = "crates/particle_fluids" }
+# character import, automatic rigging and retargeting (Labs: src/characters)
+autorig = { path = "crates/autorig" }
 # MCP server (Streamable HTTP on localhost)
 tiny_http = "0.12"
 # world map: vector drawing, glyph outlines, parallel rasterising
@@ -39,10 +41,17 @@ block_compression = { version = "0.10.1", default-features = false, features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSBundle", "NSString", "NSDictionary"] }
+# Sparkle auto-updates (updates.rs): the relaunch block Sparkle hands its delegate
+block2 = "0.6"
 # the GPU-reset canary (gpu_watchdog.rs): an empty command buffer on wgpu's Metal queue (both already in the tree through wgpu)
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLCommandBuffer", "MTLCommandQueue"] }
 wgpu = { version = "30", default-features = false }
+
+[features]
+# The studio's own screenshot builds: the developer unlock in Asset packs. Build it with
+# `cargo build --profile studio --features studio_dev` (target/studio, never packaged).
+studio_dev = []
 
 [profile.dev]
 opt-level = 2
@@ -52,3 +61,7 @@ opt-level = 3
 
 [profile.release]
 codegen-units = 4
+
+# release speed in its own folder, so a studio_dev binary never lands in target/release
+[profile.studio]
+inherits = "release"

@@ -529,6 +529,7 @@ pub fn add_npc(
         yaw,
         poi,
         notes: String::new(),
+        life: Default::default(),
     });
     gp.dirty = true;
     id
@@ -692,6 +693,7 @@ pub fn add_creature(
         aggression,
         elite,
         notes: String::new(),
+        character: None,
     });
     id
 }

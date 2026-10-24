@@ -1,18 +1,18 @@
 //! Sounds of moving through water: a splash going in and under, strokes while swimming, and the
-//! muffled sea while the camera is under water (the zone ambience ducks meanwhile, see audio.rs).
+//! muffled sea while the camera is under water (synthesised: `audio::Voice::Underwater`; the zone
+//! ambience ducks meanwhile, see audio.rs).
 
-use bevy::audio::{AudioSink, AudioSinkPlayback, PlaybackMode, Volume};
+use bevy::audio::{AudioSink, AudioSinkPlayback, Volume};
 use bevy::prelude::*;
 
 use super::movement::InWater;
-use crate::audio::AudioSettings;
+use crate::audio::{AudioLib, AudioSettings, Voice};
 use crate::walk::WalkState;
 
 #[derive(Resource)]
 struct Sfx {
     splash: Handle<AudioSource>,
     swim: Handle<AudioSource>,
-    under: Handle<AudioSource>,
 }
 
 #[derive(Component)]
@@ -33,7 +33,6 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(Sfx {
         splash: server.load("audio/motion/splash_0.mp3"),
         swim: server.load("audio/motion/swim_0.mp3"),
-        under: server.load("audio/motion/underwater_0.mp3"),
     });
 }
 
@@ -50,6 +49,7 @@ fn one_shot(commands: &mut Commands, h: &Handle<AudioSource>, vol: f32) {
 fn play(
     mut commands: Commands,
     sfx: Option<Res<Sfx>>,
+    lib: Res<AudioLib>,
     walk: Res<WalkState>,
     settings: Res<AudioSettings>,
     time: Res<Time>,
@@ -73,16 +73,15 @@ fn play(
             }
         }
         Err(_) if want > 0.0 => {
-            commands.spawn((
-                Name::new("Underwater ambience"),
-                UnderwaterBed { current: 0.0 },
-                AudioPlayer(sfx.under.clone()),
-                PlaybackSettings {
-                    mode: PlaybackMode::Loop,
-                    volume: Volume::Linear(0.0),
-                    ..default()
-                },
-            ));
+            if let Some(h) = lib.synth(Voice::Underwater) {
+                // an endless stream: played once, it never ends
+                commands.spawn((
+                    Name::new("Underwater ambience"),
+                    UnderwaterBed { current: 0.0 },
+                    AudioPlayer(h),
+                    PlaybackSettings::ONCE.with_volume(Volume::Linear(0.0)),
+                ));
+            }
         }
         Err(_) => {}
     }

@@ -87,6 +87,16 @@ pub fn local_owned() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Records a pack as owned on this computer (prefs `market_owned`): a purchase the website
+/// confirmed. Never removed by a refresh, sign-out or update, so a bought pack stays usable.
+pub fn record_owned(pack: &str) {
+    let mut owned = local_owned();
+    if !owned.iter().any(|p| p == pack) {
+        owned.push(pack.to_string());
+        crate::prefs::set("market_owned", serde_json::json!(owned));
+    }
+}
+
 impl MarketBackend for LocalBackend {
     fn source(&self) -> Source {
         Source::Bundled
@@ -168,9 +178,9 @@ pub(super) fn post_json(
     request(url, token, Some(body), 40)
 }
 
-/// A large download (models, packs): up to five minutes.
+/// A large download (models, packs; a whole pack is over 100 MB): up to half an hour.
 pub(super) fn download(url: &str, token: Option<&str>) -> Result<(u16, Vec<u8>), String> {
-    request(url, token, None, 300)
+    request(url, token, None, 1800)
 }
 
 fn request(

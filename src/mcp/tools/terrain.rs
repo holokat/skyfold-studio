@@ -78,6 +78,7 @@ Strength 1 covers the stroke's middle in one pass; use `passes` for full cover a
                 "type": "object",
                 "properties": {
                     "layer": enum_schema(ids(&Layer::ALL), "ground material"),
+                    "material": { "type": "string", "description": "instead of `layer`: a ground material id from the Paint tab's library (e.g. green_meadow, lush_green_lawn, mossy_grass): it takes the slot that already holds it, else an unused one" },
                     "path": points_schema("stroke centre line [[x, z], …]", 1),
                     "points": points_schema("stamp spots instead of a stroke", 1),
                     "radius": { "type": "number", "minimum": 1, "maximum": 1500, "default": 30 },
@@ -305,8 +306,29 @@ fn sculpt(In(args): In<Value>, mut d: WorldData) -> R {
     ))
 }
 
-fn paint(In(args): In<Value>, mut d: WorldData) -> R {
-    let layer = opt_pick(&args, "layer", &Layer::ALL, "ground layer", Layer::name)?;
+fn paint(
+    In(args): In<Value>,
+    mut d: WorldData,
+    lib: Res<crate::terrain::textures::TerrainLibrary>,
+) -> R {
+    let mut layer = opt_pick(&args, "layer", &Layer::ALL, "ground layer", Layer::name)?;
+    if let Some(id) = crate::mcp_tools::opt_arg::<String>(&args, "material")? {
+        let m = lib
+            .materials
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| format!("no ground material `{id}` in the library"))?;
+        let i = crate::terrain::textures::slot_for(&d.layer_choices, &d.terrain, &id)
+            .ok_or("all 12 ground slots are in use: paint with a `layer` instead, or clear some paint")?;
+        if let Some(surf) = crate::terrain::layers::Surface::ALL
+            .iter()
+            .find(|x| format!("{x:?}") == m.surface)
+        {
+            d.ed.layer_surface[i] = *surf;
+        }
+        d.layer_choices.set(i, &id);
+        layer = Some(Layer::from_index(i));
+    }
     let erase = opt_bool(&args, "erase")?.unwrap_or(false);
     let layer = match (layer, erase) {
         (Some(l), _) => l,
@@ -362,7 +384,14 @@ fn paint(In(args): In<Value>, mut d: WorldData) -> R {
     let what = if erase {
         "cleared".to_string()
     } else {
-        format!("mostly {}", layer.name())
+        // (a library material shows by its own name, not its slot's)
+        let id = d.layer_choices.get(layer as usize);
+        let name = lib
+            .materials
+            .iter()
+            .find(|m| m.id == id)
+            .map_or(layer.name().to_string(), |m| m.name.clone());
+        format!("mostly {name}")
     };
     text(format!(
         "Painted {} dabs × {passes} pass(es), radius {radius:.0} m: {}% of the stroke centre is {what}. One undo step.",

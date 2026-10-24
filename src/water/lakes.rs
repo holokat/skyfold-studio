@@ -1249,14 +1249,15 @@ pub fn deform(
             ShapeMode::Smooth => p[i] = p[i].lerp((a + b) * 0.5, (amount * 0.6 * w).min(0.9)),
         }
     }
-    // relax what moved a little so pushing never makes kinks
+    // even out how far neighbours moved so pushing never makes kinks (smoothing the movement,
+    // not the positions: relaxing positions pulls a curved shore inward and undoes Expand)
     if mode != ShapeMode::Smooth {
-        let moved = p.clone();
+        let moved: Vec<Vec2> = (0..n).map(|i| p[i] - before[i]).collect();
         for i in 0..n {
             let w = weight(before[i]);
             if w > 0.0 {
                 let avg = (moved[(i + n - 1) % n] + moved[(i + 1) % n]) * 0.5;
-                p[i] = moved[i].lerp(avg, 0.25 * w);
+                p[i] = before[i] + moved[i].lerp(avg, 0.5 * w);
             }
         }
     }
@@ -1268,4 +1269,38 @@ pub fn deform(
         .into_iter()
         .map(|q| q.to_array())
         .collect();
+}
+
+#[cfg(test)]
+mod shore_brush_tests {
+    use super::*;
+
+    fn circle(r: f32, n: usize) -> Vec<[f32; 2]> {
+        (0..n)
+            .map(|i| {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect()
+    }
+
+    fn area(o: &[[f32; 2]]) -> f32 {
+        let p: Vec<Vec2> = o.iter().map(|q| Vec2::from_array(*q)).collect();
+        signed_area(&p).abs()
+    }
+
+    /// One second of brushing at 60 fps over the shore actually moves it (the kink relax used to
+    /// pull a round shore inward as fast as Expand pushed it out).
+    #[test]
+    fn expand_and_shrink_move_a_round_shore() {
+        let start = circle(60.0, 48);
+        let a0 = area(&start);
+        let (mut grown, mut shrunk) = (start.clone(), start.clone());
+        for _ in 0..60 {
+            deform(&mut grown, Vec2::new(60.0, 0.0), 40.0, 0.6 * 14.0 / 60.0, ShapeMode::Expand);
+            deform(&mut shrunk, Vec2::new(60.0, 0.0), 40.0, 0.6 * 14.0 / 60.0, ShapeMode::Shrink);
+        }
+        assert!(area(&grown) > a0 * 1.03, "expand: {a0} -> {}", area(&grown));
+        assert!(area(&shrunk) < a0 * 0.97, "shrink: {a0} -> {}", area(&shrunk));
+    }
 }

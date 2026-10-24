@@ -10,6 +10,7 @@
 //! - `-trees`, `-plants`, `-rocks`, `-debris`, `-structures`, `-objects`: hide those placed objects;
 //! - `-billboards`, `-grass`, `-nature` (procedural nature; `-n0`…`-n5` one of its layers, see
 //!   `NatureEntity`): hide that layer;
+//! - `-ocean`, `-water` (the sea, or every water surface), `-fields` (the crops): hide them;
 //! - `noshadow`: sun shadows off from this phase on (Bevy can't turn them back on mid-run);
 //! - `detail=0.7`: the graphics detail setting from this phase on; `draw=900`: the draw distance
 //!   (walk mode's V presets are `draw=900+detail=0.6`, `draw=3000+detail=1`, `draw=7000+detail=1.6`);
@@ -146,7 +147,14 @@ fn run_phases(
     store: Res<ObjectStore>,
     lib: Option<Res<Library>>,
     mut objects: Query<(&PlacedObject, &mut Visibility), Without<NatureEntity>>,
-    mut named: Query<(&Name, &mut Visibility), (Without<PlacedObject>, Without<NatureEntity>)>,
+    mut named: Query<
+        (&Name, &mut Visibility),
+        (
+            Without<PlacedObject>,
+            Without<NatureEntity>,
+            Without<MeshMaterial3d<crate::water::WaterMaterial>>,
+        ),
+    >,
     mut grass: Query<
         &mut Visibility,
         (
@@ -163,10 +171,30 @@ fn run_phases(
     all: Query<()>,
     mut lights: Query<&mut DirectionalLight>,
     mut exit: MessageWriter<AppExit>,
-    (mut render_scale, mut lighting, mut filtering): (
+    (mut render_scale, mut lighting, mut filtering, mut water, mut crops): (
         ResMut<crate::render_scale::RenderScale>,
         ResMut<crate::sky::Lighting>,
         Query<&mut bevy::light::ShadowFilteringMethod, With<crate::camera::MainCamera>>,
+        Query<
+            (Option<&Name>, &mut Visibility),
+            (
+                With<MeshMaterial3d<crate::water::WaterMaterial>>,
+                Without<PlacedObject>,
+                Without<NatureEntity>,
+                Without<MeshMaterial3d<crate::grass::GrassMaterial>>,
+            ),
+        >,
+        Query<
+            &mut Visibility,
+            (
+                With<MeshMaterial3d<crate::fields::render::CropMaterial>>,
+                Without<PlacedObject>,
+                Without<NatureEntity>,
+                Without<Name>,
+                Without<MeshMaterial3d<crate::grass::GrassMaterial>>,
+                Without<MeshMaterial3d<crate::water::WaterMaterial>>,
+            ),
+        >,
     ),
 ) {
     let Ok(spec) = std::env::var("WB_BENCH") else {
@@ -299,6 +327,20 @@ fn run_phases(
             if *c != m {
                 *c = m;
             }
+        }
+    }
+    if hide("-ocean") || hide("-water") {
+        for (n, mut v) in &mut water {
+            if (hide("-water") || n.is_some_and(|n| n.as_str() == "Ocean surface"))
+                && *v != Visibility::Hidden
+            {
+                *v = Visibility::Hidden;
+            }
+        }
+    }
+    if hide("-fields") {
+        for mut v in &mut crops {
+            *v = Visibility::Hidden;
         }
     }
     if hide("-grass") {

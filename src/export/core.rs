@@ -249,6 +249,13 @@ pub struct Snapshot {
     /// per-vertex grass map (density, dryness, tint, height) at the terrain's resolution
     pub grass: Option<Vec<[u8; 4]>>,
     pub grass_amount: f32,
+    /// the meadow's blade length multiplier and lushness (0..1), and whether the world is
+    /// hand-painted (its grass is stylised)
+    pub grass_height: f32,
+    pub grass_lushness: f32,
+    pub painted: bool,
+    /// how much the tree crowns darken the sky light under them (0..1, `nature::shade`)
+    pub canopy_shade: f32,
     /// editor camera eye and focus
     pub camera: (Vec3, Vec3),
     /// procedural nature as density maps + rules (its instances are baked into `objects`)
@@ -259,6 +266,8 @@ pub struct Snapshot {
     pub cave_holes: std::collections::HashSet<IVec2>,
     /// Skyfold Studio's navmesh files (`nav::capture`; empty when not asked for)
     pub navmesh: Vec<(String, Vec<u8>)>,
+    /// animated characters to write (Labs: `crate::characters::export`)
+    pub characters: crate::characters::export::Snapshot,
     /// the world's dungeons, their maps read from their folders (`dungeons::export::gather`;
     /// an error while a dungeon's map is open)
     pub dungeons: Result<Vec<crate::dungeons::export::DungeonExport>, String>,
@@ -367,6 +376,19 @@ pub fn snapshot(world: &World) -> Snapshot {
             .filter(|(_, n)| *n == t.n())
             .map(|(d, _)| d.to_vec()),
         grass_amount: world.resource::<crate::objects::NatureAmounts>().grass,
+        grass_height: world.resource::<crate::objects::NatureAmounts>().grass_height,
+        grass_lushness: world
+            .get_resource::<crate::nature::NatureAppearance>()
+            .map(|a| a.grass_lushness)
+            .unwrap_or(0.0),
+        painted: world
+            .resource::<crate::world::WorldMeta>()
+            .art_style
+            .painted(),
+        canopy_shade: world
+            .get_resource::<crate::nature::NatureAppearance>()
+            .map(|a| a.sanitized().canopy_shade)
+            .unwrap_or(1.0),
         camera: (orbit.eye(), orbit.focus),
         nature,
         caves: world
@@ -380,6 +402,7 @@ pub fn snapshot(world: &World) -> Snapshot {
         navmesh: vec![],
         dungeons,
         fires,
+        characters: crate::characters::export::snapshot(world),
     }
 }
 
