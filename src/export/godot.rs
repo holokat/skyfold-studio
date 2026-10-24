@@ -1098,7 +1098,95 @@ fn write_canopy(
 
 /// The weather and atmosphere data `wb_atmosphere.gd` runs on: the zone and biome maps (the
 /// terrain's own grid), every weather's parameters (`Weather::params`), each zone's weather,
-/// clouds, wind, haze and lighting mood, each biome's weather and mood, the world's clouds, wind
+/// clouds, wind, haze and lighting mood, each biome's weather and mood, the world's clouds, wind/// The distance fog colours the weather runtimes blend between (sRGB under the engine's
+/// exposure): clear haze, storm, sunlit weather fog and dust, and the clear air and zone fog
+/// densities.
+pub(super) fn atmosphere_fog(s: &Snapshot, light: &core::LightOut, exposure: f32) -> Value {
+    let lk = &s.look;
+    let colour_haze = if light.haze_enabled { lk.color_haze.clamp(0.0, 1.0) } else { 0.0 };
+    let haze = Haze::of(s, light, exposure);
+    let storm = Vec3::new(0.42, 0.45, 0.5) * (1.0 - light.night * 0.9);
+    let dust = Vec3::new(0.75, 0.6, 0.4) * (1.0 - light.night * 0.85);
+    json!({
+        "air": Haze::AIR,
+        "zone_density": crate::sky::ZONE_FOG_DENSITY,
+        "clear_color": haze.color,
+        "storm_color": Haze::tone(s, storm, colour_haze, exposure),
+        // weather fog is sunlit air: a light warm grey (calibrated against the editor's
+        // fog, rain and snow), dark at night
+        "weather_color": linear_to_srgb(
+            (Vec3::new(0.80, 0.74, 0.64) * (1.0 - light.night * 0.9) * 0.36 / exposure)
+                .min(Vec3::ONE)
+                .to_array()
+        ),
+        "dust_color": Haze::tone(s, dust, colour_haze, exposure),
+    })
+}
+
+/// The weather tables both engines' runtimes read: weathers by id (`clear`, `cloudy`, `rain`,
+/// `storm`, `snow`, `fog`, `sandstorm`) with their parameters, the zones by map id (their weather,
+/// clouds, wind, haze, lighting mood and play rules: entry banner, flying, mounts, rested area)
+/// and the biome presets by map id (their weather and mood).
+pub(super) fn weather_tables(
+    s: &Snapshot,
+) -> (
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+) {
+    use crate::world::Weather;
+    // weathers by id (`clear`, `cloudy`, `rain`, `storm`, `snow`, `fog`, `sandstorm`)
+    let id = |w: Weather| format!("{w:?}").to_lowercase();
+    let params = |w: Weather| {
+        let p = w.params();
+        json!({ "name": w.name(), "clouds": p.clouds, "fog": p.fog, "wet": p.wet, "rain": p.rain, "snow": p.snow, "dim": p.dim, "dust": p.dust })
+    };
+    let weathers: serde_json::Map<String, Value> =
+        Weather::ALL.iter().map(|w| (id(*w), params(*w))).collect();
+    let zones: serde_json::Map<String, Value> = s
+        .zones
+        .iter()
+        .map(|z| {
+            (
+                z.id.to_string(),
+                json!({
+                    "name": z.name,
+                    "weather_enabled": z.weather_enabled,
+                    "weather": id(z.weather),
+                    "intensity": z.weather_intensity,
+                    "clouds_enabled": z.clouds_enabled,
+                    "cloud_cover": z.cloud_cover,
+                    "wind_enabled": z.wind_enabled,
+                    "wind_speed": z.wind_speed,
+                    "haze_mode": serde_json::to_value(z.haze.mode).unwrap_or(Value::Null),
+                    "haze_amount": z.haze.amount,
+                    "light": z.own_light(),
+                    "banner": format!("{}  ·  {}", z.level_label(), z.zone_type.name()),
+                    "level_min": z.level_min,
+                    "level_max": z.level_max,
+                    "allow_flying": z.allow_flying,
+                    "allow_mounts": z.allow_mounts,
+                    "rested_area": z.rested_area,
+                    "temperature_c": z.temperature,
+                }),
+            )
+        })
+        .collect();
+    let biomes: serde_json::Map<String, Value> = crate::biomes::BiomePreset::ALL
+        .iter()
+        .map(|b| {
+            let d = b.def();
+            let light = (d.mood != crate::world::Mood::Natural).then(|| d.mood.light());
+            (
+                b.id().to_string(),
+                json!({ "name": d.name, "weather": id(d.weather), "intensity": d.weather_intensity, "light": light }),
+            )
+        })
+        .collect();
+    (weathers, zones, biomes)
+}
+
+
 /// and look, and the fog colours for clear, stormy and dusty air under this export's exposure.
 fn write_atmosphere(s: &Snapshot, ctx: &Ctx, canopy: Option<Value>) -> Result<(), String> {
     use crate::world::Weather;
@@ -1198,52 +1286,9 @@ fn write_atmosphere(s: &Snapshot, ctx: &Ctx, canopy: Option<Value>) -> Result<()
     let exposure = godot_exposure(&light, &night);
     let lk = &s.look;
     let l = &s.lighting;
-    let colour_haze = if light.haze_enabled { lk.color_haze.clamp(0.0, 1.0) } else { 0.0 };
-    let haze = Haze::of(s, &light, exposure);
     let wl = water_light(s, &light);
-    let storm = Vec3::new(0.42, 0.45, 0.5) * (1.0 - light.night * 0.9);
-    let dust = Vec3::new(0.75, 0.6, 0.4) * (1.0 - light.night * 0.85);
-    // weathers by id (`clear`, `cloudy`, `rain`, `storm`, `snow`, `fog`, `sandstorm`)
+    let (weathers, zones, biomes) = weather_tables(s);
     let id = |w: Weather| format!("{w:?}").to_lowercase();
-    let params = |w: Weather| {
-        let p = w.params();
-        json!({ "name": w.name(), "clouds": p.clouds, "fog": p.fog, "wet": p.wet, "rain": p.rain, "snow": p.snow, "dim": p.dim, "dust": p.dust })
-    };
-    let weathers: serde_json::Map<String, Value> =
-        Weather::ALL.iter().map(|w| (id(*w), params(*w))).collect();
-    let zones: serde_json::Map<String, Value> = s
-        .zones
-        .iter()
-        .map(|z| {
-            (
-                z.id.to_string(),
-                json!({
-                    "name": z.name,
-                    "weather_enabled": z.weather_enabled,
-                    "weather": id(z.weather),
-                    "intensity": z.weather_intensity,
-                    "clouds_enabled": z.clouds_enabled,
-                    "cloud_cover": z.cloud_cover,
-                    "wind_enabled": z.wind_enabled,
-                    "wind_speed": z.wind_speed,
-                    "haze_mode": serde_json::to_value(z.haze.mode).unwrap_or(Value::Null),
-                    "haze_amount": z.haze.amount,
-                    "light": z.own_light(),
-                }),
-            )
-        })
-        .collect();
-    let biomes: serde_json::Map<String, Value> = crate::biomes::BiomePreset::ALL
-        .iter()
-        .map(|b| {
-            let d = b.def();
-            let light = (d.mood != crate::world::Mood::Natural).then(|| d.mood.light());
-            (
-                b.id().to_string(),
-                json!({ "name": d.name, "weather": id(d.weather), "intensity": d.weather_intensity, "light": light }),
-            )
-        })
-        .collect();
     ctx.write_json(
         &format!("{DATA}/atmosphere/atmosphere.json"),
         &json!({
@@ -1265,20 +1310,7 @@ fn write_atmosphere(s: &Snapshot, ctx: &Ctx, canopy: Option<Value>) -> Result<()
                 "wind": { "dir": [s.wind[0], s.wind[1]], "speed": s.wind[2], "gustiness": s.wind[3] },
             },
             "look": { "haze": lk.haze, "color_haze": lk.color_haze, "haze_distance": lk.haze_distance, "air": lk.air, "sunbeams": lk.sunbeams, "mist": lk.mist },
-            "fog": {
-                "air": Haze::AIR,
-                "zone_density": crate::sky::ZONE_FOG_DENSITY,
-                "clear_color": haze.color,
-                "storm_color": Haze::tone(s, storm, colour_haze, exposure),
-                // weather fog is sunlit air: a light warm grey (calibrated against the editor's
-                // fog, rain and snow), dark at night
-                "weather_color": linear_to_srgb(
-                    (Vec3::new(0.80, 0.74, 0.64) * (1.0 - light.night * 0.9) * 0.36 / exposure)
-                        .min(Vec3::ONE)
-                        .to_array()
-                ),
-                "dust_color": Haze::tone(s, dust, colour_haze, exposure),
-            },
+            "fog": atmosphere_fog(s, &light, exposure),
             "zones": zones,
             "biomes": biomes,
             "clouds": {

@@ -43,6 +43,13 @@ def actors():
         return None
 
 
+def editor_world():
+    try:
+        return unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    except Exception:
+        return unreal.EditorLevelLibrary.get_editor_world()
+
+
 def spawn(cls, location=None, rotation=None, label=None):
     location = location or unreal.Vector(0.0, 0.0, 0.0)
     rotation = rotation or unreal.Rotator(0.0, 0.0, 0.0)
@@ -197,12 +204,22 @@ def write_landscape_files():
         row.byteswap()  # PNG is big-endian
         rows.append(row.tobytes())
     write_png(os.path.join(folder, "heightmap_ue.png"), n, n, rows, 16)
+    # the same, raw little-endian, for the Skyfold Studio plugin's CreateLandscape
+    with open(os.path.join(folder, "heightmap_ue.r16"), "wb") as f:
+        for row in rows:
+            le = array("H")
+            le.frombytes(row)
+            le.byteswap()
+            f.write(le.tobytes())
     os.makedirs(os.path.join(folder, "weights_ue"), exist_ok=True)
     for layer in t["layers"]:
         with open(os.path.join(folder, layer["weights_raw"]), "rb") as f:
             w = f.read()
         rows = [bytes(w[j * n + i] for i, j in (index(c, r) for c in range(n))) for r in range(n)]
         write_png(os.path.join(folder, "weights_ue", layer["key"] + ".png"), n, n, rows, 8)
+        with open(os.path.join(folder, "weights_ue", layer["key"] + ".r8"), "wb") as f:
+            f.write(b"".join(rows))
+    write_hole_file(n, index)
     log("wrote Landscape/heightmap_ue.png and %d weightmaps oriented for this editor" % len(t["layers"]))
     tiles = t.get("tiles_per_side", 1)
     if tiles > 1 and AXES[:2] != [(0, 1.0), (2, 1.0)]:
@@ -220,6 +237,74 @@ def write_landscape_files():
                     rows.append(row.tobytes())
                 write_png(os.path.join(out, "heightmap_x%d_y%d.png" % (tx, ty)), q + 1, q + 1, rows, 16)
         warn("rewrote the heightmap tiles for the measured axes (weightmap tiles: paint layers from weights_ue/*.png)")
+
+
+def write_hole_file(n, index):
+    """The cave mouths for the landscape's visibility layer (`Landscape/holes_ue.r8`, one byte per
+    vertex, 255 = hole): a landscape quad is a hole when its centre lies in a cave cell of the
+    editor's terrain grid; Unreal hides a quad by its first (lowest X / Y) vertex."""
+    path = os.path.join(HERE, "Data", "caves.json")
+    out = os.path.join(HERE, "Landscape", "holes_ue.r8")
+    if os.path.exists(out):
+        os.remove(out)
+    if not os.path.exists(path):
+        return False
+    caves = json.load(open(path))
+    cells = set(tuple(h) for h in caves.get("holes", []))
+    grid = caves.get("holes_grid", 0)
+    if not cells or not grid:
+        return False
+    # landscape quad (c, r) -> world grid quad (i, j): corners map through the axis permutation
+    vis = bytearray(n * n)
+    k = grid / float(n - 1)
+    for r in range(n - 1):
+        for c in range(n - 1):
+            a = index(c, r)
+            b = index(c + 1, r + 1)
+            ci = int((a[0] + b[0]) * 0.5 * k)
+            cj = int((a[1] + b[1]) * 0.5 * k)
+            if (ci, cj) in cells:
+                vis[r * n + c] = 255
+    with open(out, "wb") as f:
+        f.write(bytes(vis))
+    return True
+
+
+def create_landscape(material):
+    """The Landscape itself, with the Skyfold Studio plugin (Plugins/SkyfoldStudio, compiled
+    with the project). Without it the landscape stays a manual import (the table printed at
+    the end). Returns the landscape or None."""
+    lib = getattr(unreal, "SkyfoldStudioLibrary", None)
+    if lib is None:
+        warn("the Skyfold Studio plugin isn't compiled in this project: import the landscape by hand (below)")
+        return None
+    if DATA["landscape"].get("tiles_per_side", 1) > 1:
+        warn("World Partition tiles: import the landscape by hand (below)")
+        return None
+    label = "WB Landscape"
+    sub = actors()
+    for a in (sub.get_all_level_actors() if sub else []):
+        if isinstance(a, unreal.LandscapeProxy) and a.get_actor_label() == label:
+            sub.destroy_actor(a)
+    t = DATA["landscape"]
+    v = landscape_values()
+    folder = os.path.join(HERE, "Landscape")
+    names = [l["name"] for l in t["layers"]]
+    files = [os.path.join(folder, "weights_ue", l["key"] + ".r8") for l in t["layers"]]
+    holes = os.path.join(folder, "holes_ue.r8")
+    try:
+        land = lib.create_landscape(
+            os.path.join(folder, "heightmap_ue.r16"), v["resolution"],
+            unreal.Vector(*v["location"]), unreal.Vector(*v["scale"]), material,
+            names, files, DEST + "/Landscape", holes if os.path.exists(holes) else "", label)
+    except Exception as e:
+        warn("landscape: %s" % e)
+        return None
+    if land is None:
+        warn("the landscape couldn't be created (see LogSkyfoldStudio)")
+        return None
+    log("landscape %d x %d with %d layers%s" % (v["resolution"], v["resolution"], len(names), ", cave mouths open" if os.path.exists(holes) else ""))
+    return land
 
 
 def landscape_values():
@@ -328,6 +413,11 @@ def landscape_material(layers, tex):
         MEL.connect_material_property(normal_blend, "", unreal.MaterialProperty.MP_NORMAL)
         MEL.connect_material_property(rough_blend, "", unreal.MaterialProperty.MP_ROUGHNESS)
         MEL.connect_material_property(ao_blend, "", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION)
+        if os.path.exists(os.path.join(HERE, "Landscape", "holes_ue.r8")):
+            # cave mouths: the visibility layer cuts the ground open
+            vis = MEL.create_material_expression(mat, unreal.MaterialExpressionLandscapeVisibilityMask, -300, 1600)
+            MEL.connect_material_property(vis, "", unreal.MaterialProperty.MP_OPACITY_MASK)
+            mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_MASKED)
         MEL.recompile_material(mat)
         unreal.EditorAssetLibrary.save_loaded_asset(mat)
         log("created landscape material " + mat.get_path_name())
@@ -338,36 +428,76 @@ def landscape_material(layers, tex):
 
 
 def water_material(tex):
+    """M_WB_Water: Unreal's Single Layer Water shading with the editor's water optics (its
+    extinction per metre and in-scatter albedo per style, `water::water_optics`) as scattering
+    and absorption coefficients, two drifting ripple normal maps faded with distance."""
     try:
         mat = new_asset("M_WB_Water", DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
-        mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
-        try:
-            mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE_PER_PIXEL_LIGHTING)
-        except Exception:
-            pass
-        color = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -400, 0)
-        color.set_editor_property("parameter_name", "Color")
-        color.set_editor_property("default_value", unreal.LinearColor(0.05, 0.3, 0.35, 1.0))
-        MEL.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
-        for name, value, prop, y in (("Opacity", 0.75, unreal.MaterialProperty.MP_OPACITY, 200), ("Roughness", 0.05, unreal.MaterialProperty.MP_ROUGHNESS, 300), ("Specular", 0.5, unreal.MaterialProperty.MP_SPECULAR, 400)):
+        mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_SINGLE_LAYER_WATER)
+        mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_OPAQUE)
+        black = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, -200)
+        black.set_editor_property("constant", unreal.LinearColor(0.0, 0.0, 0.0, 1.0))
+        MEL.connect_material_property(black, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        # Opacity is the coverage of a layer drawn over the water (foam): none by default
+        # (unconnected it counts as 1 under Substrate: an opaque black top layer)
+        for name, value, prop, y in (("Roughness", 0.04, unreal.MaterialProperty.MP_ROUGHNESS, -100), ("Specular", 0.5, unreal.MaterialProperty.MP_SPECULAR, 0), ("Foam", 0.0, unreal.MaterialProperty.MP_OPACITY, 100)):
             p = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -400, y)
             p.set_editor_property("parameter_name", name)
             p.set_editor_property("default_value", value)
             MEL.connect_material_property(p, "", prop)
+        out = MEL.create_material_expression(mat, unreal.MaterialExpressionSingleLayerWaterMaterialOutput, 0, 400)
+        for name, value, pin, y in (("Scattering", (0.0, 0.0022, 0.0083), "ScatteringCoefficients", 300), ("Absorption", (0.0045, 0.0007, 0.0002), "AbsorptionCoefficients", 450)):
+            p = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -400, y)
+            p.set_editor_property("parameter_name", name)
+            p.set_editor_property("default_value", unreal.LinearColor(value[0], value[1], value[2], 1.0))
+            MEL.connect_material_expressions(p, "", out, pin)
+        # the bed seen through the water at its own colour; light scattered mostly forwards
+        for value, pin, y in ((1.0, "ColorScaleBehindWater", 600), (0.3, "PhaseG", 680)):
+            c = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -400, y)
+            c.set_editor_property("r", value)
+            MEL.connect_material_expressions(c, "", out, pin)
         normal = next((t for n, t in tex.items() if n.lower().startswith("water_normal")), None)
         if normal is not None:
-            uv = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -900, 500)
-            uv.set_editor_property("u_tiling", 24.0)
-            uv.set_editor_property("v_tiling", 24.0)
-            pan = MEL.create_material_expression(mat, unreal.MaterialExpressionPanner, -700, 500)
-            pan.set_editor_property("speed_x", 0.01)
-            pan.set_editor_property("speed_y", 0.006)
-            MEL.connect_material_expressions(uv, "", pan, "Coordinate")
-            s = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, 500)
-            s.set_editor_property("texture", normal)
-            s.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
-            MEL.connect_material_expressions(pan, "", s, "UVs")
-            MEL.connect_material_property(s, "RGB", unreal.MaterialProperty.MP_NORMAL)
+            # two ripple layers drifting across each other (world-aligned, 9 m and 23 m), flattened
+            # with distance so the far sea doesn't shimmer
+            wp = MEL.create_material_expression(mat, unreal.MaterialExpressionWorldPosition, -1400, 700)
+            mask = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -1250, 700)
+            mask.set_editor_property("r", True)
+            mask.set_editor_property("g", True)
+            mask.set_editor_property("b", False)
+            MEL.connect_material_expressions(wp, "", mask, "")
+            samples = []
+            for k, (size, sx, sy) in enumerate(((900.0, 0.004, 0.0025), (2300.0, -0.0015, 0.003))):
+                div = MEL.create_material_expression(mat, unreal.MaterialExpressionDivide, -1100, 650 + k * 160)
+                div.set_editor_property("const_b", size)
+                MEL.connect_material_expressions(mask, "", div, "A")
+                pan = MEL.create_material_expression(mat, unreal.MaterialExpressionPanner, -950, 650 + k * 160)
+                pan.set_editor_property("speed_x", sx)
+                pan.set_editor_property("speed_y", sy)
+                MEL.connect_material_expressions(div, "", pan, "Coordinate")
+                smp = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -780, 650 + k * 160)
+                smp.set_editor_property("texture", normal)
+                smp.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+                MEL.connect_material_expressions(pan, "", smp, "UVs")
+                samples.append(smp)
+            add = MEL.create_material_expression(mat, unreal.MaterialExpressionAdd, -640, 700)
+            MEL.connect_material_expressions(samples[0], "RGB", add, "A")
+            MEL.connect_material_expressions(samples[1], "RGB", add, "B")
+            blend = MEL.create_material_expression(mat, unreal.MaterialExpressionNormalize, -540, 700)
+            MEL.connect_material_expressions(add, "", blend, "")
+            dist = MEL.create_material_expression(mat, unreal.MaterialExpressionPixelDepth, -720, 900)
+            far = MEL.create_material_expression(mat, unreal.MaterialExpressionDivide, -560, 900)
+            far.set_editor_property("const_b", 60000.0)
+            MEL.connect_material_expressions(dist, "", far, "A")
+            sat = MEL.create_material_expression(mat, unreal.MaterialExpressionSaturate, -440, 900)
+            MEL.connect_material_expressions(far, "", sat, "")
+            flat = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -440, 820)
+            flat.set_editor_property("constant", unreal.LinearColor(0.0, 0.0, 1.0, 1.0))
+            lerp = MEL.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -300, 760)
+            MEL.connect_material_expressions(blend, "", lerp, "A")
+            MEL.connect_material_expressions(flat, "", lerp, "B")
+            MEL.connect_material_expressions(sat, "", lerp, "Alpha")
+            MEL.connect_material_property(lerp, "", unreal.MaterialProperty.MP_NORMAL)
         MEL.recompile_material(mat)
         unreal.EditorAssetLibrary.save_loaded_asset(mat)
         return mat
@@ -376,13 +506,26 @@ def water_material(tex):
         return None
 
 
+# Unreal's water light model scatters less than the editor's for the same albedo (its in-scatter
+# goes through an isotropic phase): the editor's in-scatter albedo is scaled up by this
+WATER_ALBEDO_GAIN = 5.0
+
+
 def water_instance(parent, name, style):
     try:
         mi = new_asset("MI_WB_" + name, DEST + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
         mi.set_editor_property("parent", parent)
-        c = style["shallow_linear"]
-        MEL.set_material_instance_vector_parameter_value(mi, "Color", unreal.LinearColor(c[0], c[1], c[2], 1.0))
-        MEL.set_material_instance_scalar_parameter_value(mi, "Opacity", 1.0 - 0.45 * style["transparency"])
+        ext = style.get("extinct")
+        if ext:
+            # per metre -> per centimetre (Unreal's units)
+            alb = [min(0.98, a * WATER_ALBEDO_GAIN) for a in style["inscat"]]
+            sc = [alb[k] * ext[k] * 0.01 for k in range(3)]
+            ab = [max(0.0, ext[k] * 0.01 - sc[k]) for k in range(3)]
+            # opaque styles (paint-like: gold, blood, void) see nothing behind them
+            t = max(0.02, style.get("transparency", 1.0))
+            ab = [a / t for a in ab]
+            MEL.set_material_instance_vector_parameter_value(mi, "Scattering", unreal.LinearColor(sc[0], sc[1], sc[2], 1.0))
+            MEL.set_material_instance_vector_parameter_value(mi, "Absorption", unreal.LinearColor(ab[0], ab[1], ab[2], 1.0))
         MEL.set_material_instance_scalar_parameter_value(mi, "Roughness", max(0.02, style["roughness"] * 0.5))
         unreal.EditorAssetLibrary.save_loaded_asset(mi)
         return mi
@@ -407,8 +550,15 @@ def ism_actor(label, mesh, transforms, cull_cm, shadows, collide=True, folder=No
         root = sds.k2_gather_subobject_data_for_instance(actor)[0]
         params = unreal.AddNewSubobjectParams(parent_handle=root, new_class=unreal.HierarchicalInstancedStaticMeshComponent, blueprint_context=None)
         handle, reason = sds.add_new_subobject(params)
-        comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(unreal.SubobjectDataBlueprintFunctionLibrary.get_data(handle))
+        lib = unreal.SubobjectDataBlueprintFunctionLibrary
+        # (5.8 renamed GetObject to GetAssociatedObject)
+        get = getattr(lib, "get_associated_object", None) or lib.get_object
+        comp = get(lib.get_data(handle))
         comp.set_static_mesh(mesh)
+        # the actor's root too: a static mesh can't hang under a movable root (Unreal detaches it
+        # when the level starts)
+        if actor.root_component is not None:
+            actor.root_component.set_mobility(unreal.ComponentMobility.STATIC)
         comp.set_mobility(unreal.ComponentMobility.STATIC)
         comp.set_cast_shadow(shadows)
         if not collide:
@@ -428,10 +578,13 @@ def ism_actor(label, mesh, transforms, cull_cm, shadows, collide=True, folder=No
 
 
 def mesh_subsystem():
+    """The static mesh editing functions: the editor subsystem, or (batch runs, where the
+    subsystem isn't there) the older library with the same functions."""
     try:
-        return unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
     except Exception:
-        return None
+        sub = None
+    return sub if sub is not None else getattr(unreal, "EditorStaticMeshLibrary", None)
 
 
 PHYSICAL = {}
@@ -471,7 +624,9 @@ def setup_collision(mesh, m, variant, meshes):
                 body.set_editor_property("collision_trace_flag", unreal.CollisionTraceFlag.CTF_USE_SIMPLE_AS_COMPLEX)
         elif kind == "convex":
             if sub is not None:
-                sub.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.NDOP26)
+                # (5.8 renamed ScriptingCollisionShapeType to ScriptCollisionShapeType)
+                shapes = getattr(unreal, "ScriptCollisionShapeType", None) or unreal.ScriptingCollisionShapeType
+                sub.add_simple_collisions(mesh, shapes.NDOP26)
         else:
             proxy = find_mesh(meshes, variant["collision"]) if variant.get("collision") else None
             if proxy is not None:
@@ -507,7 +662,7 @@ def merge_lods(meshes, variant):
     if lod0 is None:
         return None
     try:
-        sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        sub = mesh_subsystem()
         for k, node in enumerate(variant["lods"][1:], start=1):
             src = find_mesh(meshes, node)
             if src is not None and lod0.get_num_lods() <= k:
@@ -617,7 +772,7 @@ def build_nav_bounds():
             warn("the NavMeshBoundsVolume has no brush: give it a box of %.0f x %.0f x %.0f cm" % tuple(size))
         a.set_folder_path("WorldBuilder")
         try:
-            unreal.NavigationSystemV1.get_navigation_system(unreal.EditorLevelLibrary.get_editor_world()).on_navigation_bounds_updated(a)
+            unreal.NavigationSystemV1.get_navigation_system(editor_world()).on_navigation_bounds_updated(a)
         except Exception:
             pass
         return True
@@ -636,7 +791,7 @@ def build_cave_lights():
         try:
             c = a.light_component
             c.set_editor_property("intensity_units", unreal.LightUnits.LUMENS)
-            c.set_intensity(l["lumens"])
+            c.set_intensity(l["lumens"] * LIGHT_SCALE)
             c.set_light_color(unreal.LinearColor(l["color"][0], l["color"][1], l["color"][2], 1.0))
             c.set_attenuation_radius(l["range"] * 100.0)
             c.set_cast_shadows(False)
@@ -685,6 +840,7 @@ def build_water_volumes():
 
 
 def build_sky():
+    """The sky, sun, sky light, haze, clouds and look; returns them for the atmosphere runtime."""
     l = DATA["light"]
     spawn(unreal.SkyAtmosphere, label="WB Sky Atmosphere")
     to_sun = to_ue(l["sun_direction"])
@@ -703,36 +859,436 @@ def build_sky():
         sky.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
     except Exception as e:
         warn("sky light: %s" % e)
-    if l["fog"]:
-        fog = spawn(unreal.ExponentialHeightFog, label="WB Height Fog")
-        try:
-            fc = fog.component
-            fc.set_editor_property("fog_density", l["fog_density"])
-            fc.set_editor_property("fog_inscattering_luminance", unreal.LinearColor(l["fog_color"][0], l["fog_color"][1], l["fog_color"][2], 1.0))
-        except Exception as e:
-            warn("fog: %s" % e)
+    fog = build_fog(l)
     if l["clouds"] > 0.05:
         try:
             spawn(unreal.VolumetricCloud, label="WB Clouds")
         except Exception as e:
             warn("clouds: %s" % e)
+    return {"sun": sun, "sky_light": sky, "fog": fog, "look": build_look(l)}
+
+
+# the share of the calibrated haze's clear-air term (`Haze::AIR`) that Unreal's sky atmosphere
+# already adds as aerial perspective: little at these distances (measured side by side)
+AIR_PER_M = 0.0
+# The overworld's light units: its sun is 10 lux for Skyfold Studio's 110 000 (the manual
+# exposure is set for that), so the world's lights (fires, crystals; physical lumens) scale alike
+# (the dungeons keep physical units under their own exposure)
+LIGHT_SCALE = 10.0 / 110000.0
+# Unreal's manual exposure (EV bias) that lands its sunlit ground at the editor's brightness
+EXPOSURE_CALIBRATION_EV = -1.3
+# Unreal's filmic tone curve saturates more than the editor's: this global saturation before it
+# lands the editor's colours (the editor's own saturation and contrast are in the LUT)
+TONEMAP_SATURATION = 0.82
+# Godot adds volumetric fog on top of this density; Unreal's height fog carries the editor's
+# whole haze alone (measured side by side)
+FOG_DENSITY_GAIN = 2.5
+# the haze colour (sRGB, under the exposure) as fog in-scattering luminance
+FOG_LUMINANCE = 1.0
+
+
+def build_fog(l):
+    """The editor's distance haze as exponential height fog (calibrated like the Godot and Unity
+    exports: the same density and colour)."""
+    density = l.get("haze_density")
+    if density is None:
+        if not l["fog"]:
+            return
+        density, color = l["fog_density"] / 10.0, l["fog_color"]
+    else:
+        color = [srgb_to_linear(c) for c in l["haze_color"]]
+    extra = max(density - AIR_PER_M, 0.0)
+    fog = spawn(unreal.ExponentialHeightFog, label="WB Height Fog")
+    try:
+        fc = fog.component
+        # Unreal's fog density is per 1000 units (cm): per metre x 10
+        fc.set_editor_property("fog_density", extra * 10.0 * FOG_DENSITY_GAIN)
+        # the editor's haze grows with distance, not with depth below the camera: nearly flat
+        fc.set_editor_property("fog_height_falloff", 0.001)
+        fc.set_editor_property("fog_inscattering_luminance", unreal.LinearColor(color[0] * FOG_LUMINANCE, color[1] * FOG_LUMINANCE, color[2] * FOG_LUMINANCE, 1.0))
+        fog.set_actor_location(to_ue([0.0, DATA["water"].get("sea_level", 0.0) if DATA["water"]["enabled"] else 0.0, 0.0]), False, False)
+    except Exception as e:
+        warn("fog: %s" % e)
+    return fog
+
+
+def srgb_to_linear(v):
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def build_look(l):
+    """An unbound PostProcessVolume with the world's look: manual exposure at the editor's,
+    bloom, vignette, and its colour grade after tonemapping (saturation, contrast, split toning,
+    lift, foliage hue, vibrance) as a colour grading LUT (`Look/grade_lut.png`)."""
     ppv = spawn(unreal.PostProcessVolume, label="WB Look")
     try:
         ppv.set_editor_property("unbound", True)
-        s = ppv.get_editor_property("settings")
-        for key, value in (
-            ("auto_exposure_bias", l["exposure"]),
+        st = ppv.get_editor_property("settings")
+        values = [
+            ("auto_exposure_method", unreal.AutoExposureMethod.AEM_MANUAL),
+            ("auto_exposure_apply_physical_camera_exposure", False),
+            ("auto_exposure_bias", l.get("ev", l["exposure"]) + EXPOSURE_CALIBRATION_EV),
             ("bloom_intensity", l["bloom"]),
             ("vignette_intensity", l["vignette"]),
-        ):
-            s.set_editor_property("override_" + key, True)
-            s.set_editor_property(key, value)
-        for key, v in (("color_saturation", l["saturation"]), ("color_contrast", l["contrast"])):
-            s.set_editor_property("override_" + key, True)
-            s.set_editor_property(key, unreal.Vector4(v, v, v, 1.0))
-        ppv.set_editor_property("settings", s)
+        ]
+        lut = load_lut(l.get("lut"))
+        if lut is not None:
+            k = TONEMAP_SATURATION
+            values += [("color_grading_lut", lut), ("color_grading_intensity", 1.0), ("color_saturation", unreal.Vector4(k, k, k, 1.0))]
+        else:
+            for key, v in (("color_saturation", l["saturation"]), ("color_contrast", l["contrast"])):
+                values.append((key, unreal.Vector4(v, v, v, 1.0)))
+        for key, value in values:
+            try:
+                st.set_editor_property("override_" + key, True)
+            except Exception:
+                pass
+            st.set_editor_property(key, value)
+        ppv.set_editor_property("settings", st)
     except Exception as e:
         warn("post process: %s" % e)
+    return ppv
+
+
+def load_lut(rel):
+    if not rel:
+        return None
+    try:
+        import_files([os.path.join(HERE, rel)], DEST + "/Look")
+        t = assets_in(DEST + "/Look", unreal.Texture2D)
+        lut = next(iter(t.values()), None)
+        if lut is not None:
+            lut.set_editor_property("lod_group", unreal.TextureGroup.TEXTUREGROUP_COLOR_LOOKUP_TABLE)
+            lut.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP)
+            lut.set_editor_property("mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
+            lut.set_editor_property("srgb", False)
+            unreal.EditorAssetLibrary.save_loaded_asset(lut)
+        return lut
+    except Exception as e:
+        warn("look LUT: %s" % e)
+        return None
+
+
+def particle_material(name, snow):
+    """Rain streaks (a faint vertical gradient) or snow flakes (soft discs): unlit, translucent,
+    fading out right in front of the lens."""
+    try:
+        mat = new_asset(name, DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
+        mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+        mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+        mat.set_editor_property("two_sided", True)
+        # (drawn as instances round the camera: compiled for it up front, so they never show as
+        # the default material while it compiles in game)
+        mat.set_editor_property("used_with_instanced_static_meshes", True)
+        col = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -500, 0)
+        col.set_editor_property("constant", unreal.LinearColor(1.0, 1.0, 1.0, 1.0) if snow else unreal.LinearColor(0.75, 0.8, 0.88, 1.0))
+        MEL.connect_material_property(col, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+        uv = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -900, 200)
+        half = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant2Vector, -900, 320)
+        half.set_editor_property("r", 0.5)
+        half.set_editor_property("g", 0.5)
+        sub = MEL.create_material_expression(mat, unreal.MaterialExpressionSubtract, -750, 250)
+        MEL.connect_material_expressions(uv, "", sub, "A")
+        MEL.connect_material_expressions(half, "", sub, "B")
+        if snow:
+            shape_in = sub
+        else:
+            # a streak: fade along its length only
+            mask = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -620, 250)
+            mask.set_editor_property("r", True)
+            MEL.connect_material_expressions(sub, "", mask, "")
+            shape_in = mask
+        ln = MEL.create_material_expression(mat, unreal.MaterialExpressionLength, -500, 250)
+        MEL.connect_material_expressions(shape_in, "", ln, "")
+        k = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -380, 250)
+        k.set_editor_property("const_b", 2.0)
+        MEL.connect_material_expressions(ln, "", k, "A")
+        inv = MEL.create_material_expression(mat, unreal.MaterialExpressionOneMinus, -260, 250)
+        MEL.connect_material_expressions(k, "", inv, "")
+        alpha = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -140, 250)
+        alpha.set_editor_property("const_b", 0.95 if snow else 0.3)
+        MEL.connect_material_expressions(inv, "", alpha, "A")
+        # 0 within 60 cm of the lens, 1 from 3 m
+        depth = MEL.create_material_expression(mat, unreal.MaterialExpressionPixelDepth, -500, 400)
+        off = MEL.create_material_expression(mat, unreal.MaterialExpressionSubtract, -380, 400)
+        off.set_editor_property("const_b", 60.0)
+        MEL.connect_material_expressions(depth, "", off, "A")
+        span = MEL.create_material_expression(mat, unreal.MaterialExpressionDivide, -260, 400)
+        span.set_editor_property("const_b", 240.0)
+        MEL.connect_material_expressions(off, "", span, "A")
+        fade = MEL.create_material_expression(mat, unreal.MaterialExpressionSaturate, -140, 400)
+        MEL.connect_material_expressions(span, "", fade, "")
+        both = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -20, 300)
+        MEL.connect_material_expressions(alpha, "", both, "A")
+        MEL.connect_material_expressions(fade, "", both, "B")
+        MEL.connect_material_property(both, "", unreal.MaterialProperty.MP_OPACITY)
+        MEL.recompile_material(mat)
+        unreal.EditorAssetLibrary.save_loaded_asset(mat)
+        return mat
+    except Exception as e:
+        warn("%s: %s" % (name, e))
+        return None
+
+
+def build_atmosphere(scene):
+    """The weather and play runtime (the plugin's SkyfoldAtmosphere): the zone and biome maps,
+    weathers, zones and biomes, and what it drives (sun, sky light, fog, look, rain and snow)."""
+    cls = getattr(unreal, "SkyfoldAtmosphere", None)
+    lib = getattr(unreal, "SkyfoldStudioLibrary", None)
+    path = os.path.join(HERE, "Data", "atmosphere.json")
+    if cls is None or lib is None or not os.path.exists(path):
+        if cls is None:
+            warn("the Skyfold Studio plugin isn't compiled: no zone weather, rain, snow or explorer in game")
+        return None
+    a = spawn(cls, label="WB Atmosphere")
+    if a is None:
+        return None
+    try:
+        data = json.load(open(path))
+        g = data["grid"]
+        n, cell = g["vertices"], g["cell"]
+        half = (n - 1) * cell * 0.5
+        if not lib.load_atmosphere(a, path, os.path.join(HERE, g["zones"]), os.path.join(HERE, g["biomes"]), n):
+            warn("atmosphere data didn't load")
+        a.set_editor_property("map_origin", to_ue([-half, 0.0, -half]))
+        a.set_editor_property("map_step_i", to_ue([cell, 0.0, 0.0]))
+        a.set_editor_property("map_step_j", to_ue([0.0, 0.0, cell]))
+        for key in ("sun", "sky_light", "fog", "look"):
+            if scene.get(key) is not None:
+                a.set_editor_property(key, scene[key])
+        a.set_editor_property("fog_units_per_metre", 10.0)
+        a.set_editor_property("fog_luminance", FOG_LUMINANCE)
+        a.set_editor_property("particle_mesh", unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Plane.Plane"))
+        a.set_editor_property("rain_material", particle_material("M_WB_Rain", False))
+        a.set_editor_property("snow_material", particle_material("M_WB_Snow", True))
+        a.set_folder_path("WorldBuilder")
+        log("atmosphere: %d zones, %d biomes, weather %s" % (len(data.get("zones", {})), len(data.get("biomes", {})), data["world"].get("override") or "by zone"))
+    except Exception as e:
+        warn("atmosphere: %s" % e)
+    return a
+
+
+def set_game_mode():
+    """Play explores the level as Skyfold Studio's walk mode (the plugin's SkyfoldGameMode)."""
+    gm = getattr(unreal, "SkyfoldGameMode", None)
+    if gm is None:
+        return
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+        world.get_world_settings().set_editor_property("default_game_mode", gm)
+    except Exception as e:
+        warn("game mode: %s" % e)
+
+
+FLAME_HLSL = r"""
+// Skyfold Studio's flame (Godot's wb_flame.gdshader): two neighbouring frames blended, each fire
+// at its own phase and pace (Seed), half mirrored, a wide fire (Spread) one flame as wide as its
+// bed narrowing as it rises; magic fires (Tint.w) take their light's colour. Premultiplied.
+float frames = Grid.z;
+float pace = 1.0 + (frac(Seed * 13.71) - 0.5) * 0.16;
+float f = Time * Grid.w * pace + Seed * frames;
+float i0 = fmod(f, frames);
+float a = floor(i0);
+float b = fmod(a + 1.0, frames);
+float k = i0 - a;
+float2 st = UV;
+float s = max(Spread, 1.0);
+float wide = lerp(s, 1.0, smoothstep(0.06, 0.78, 1.0 - UV.y));
+st.x = 0.5 + (UV.x - 0.5) * s / wide;
+float inside = smoothstep(0.0, 0.04, st.x) * smoothstep(1.0, 0.96, st.x);
+st.x = saturate(st.x);
+if (frac(Seed * 7.31) > 0.5) { st.x = 1.0 - st.x; }
+st = clamp(st, 0.003, 0.997);
+float2 ca = (float2(fmod(a, Grid.x), floor(a / Grid.x)) + st) / Grid.xy;
+float2 cb = (float2(fmod(b, Grid.x), floor(b / Grid.x)) + st) / Grid.xy;
+float4 c = lerp(Texture2DSample(Sheet, SheetSampler, ca), Texture2DSample(Sheet, SheetSampler, cb), k);
+float heat = max(c.r, max(c.g, c.b));
+float3 magic = Tint.rgb * heat * 1.2 + pow(heat, 3.0) * 0.5;
+float3 col = lerp(c.rgb, magic, Tint.w);
+float edge = smoothstep(0.0, 0.06, UV.x) * smoothstep(1.0, 0.94, UV.x) * smoothstep(0.0, 0.1, UV.y);
+float m = edge * inside;
+return float4(col * m, c.a * m);
+"""
+
+
+FLAME_WPO_HLSL = r"""
+// stand the plane (vertices +-50 cm in X and Y) upright facing the camera round the vertical,
+// Size wide and tall (cm), its rows (+Y) running down
+float3 to = Cam - Obj;
+to.z = 0.0;
+to = length(to) > 1e-3 ? normalize(to) : float3(1.0, 0.0, 0.0);
+float3 right = normalize(cross(float3(0.0, 0.0, 1.0), to));
+float3 p = Obj + right * (Local.x / 100.0 * Size.x) - float3(0.0, 0.0, 1.0) * (Local.y / 100.0 * Size.y);
+return p - Abs;
+"""
+
+
+def flame_material():
+    """M_WB_Flame: Skyfold Studio's flame flipbooks (premultiplied sheets of `Columns` x `Rows`,
+    `Frames` at `Fps`), unlit and alpha-composited, its glow scaled by `Strength` and its cover by
+    `Occlusion`; each fire's seed and spread come from its custom primitive data (0, 1)."""
+    mat = new_asset("M_WB_Flame", DEST + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_ALPHA_COMPOSITE)
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property("two_sided", True)
+
+    def scalar(name, value, x, y):
+        p = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, x, y)
+        p.set_editor_property("parameter_name", name)
+        p.set_editor_property("default_value", value)
+        return p
+
+    def rgba(p, x, y):
+        """A vector parameter as a float4 (its default output is RGB)."""
+        a = MEL.create_material_expression(mat, unreal.MaterialExpressionAppendVector, x, y)
+        MEL.connect_material_expressions(p, "", a, "A")
+        MEL.connect_material_expressions(p, "A", a, "B")
+        return a
+
+    custom = MEL.create_material_expression(mat, unreal.MaterialExpressionCustom, -400, 200)
+    custom.set_editor_property("code", FLAME_HLSL)
+    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
+    names = ["UV", "Time", "Grid", "Seed", "Spread", "Tint", "Sheet"]
+    inputs = []
+    for n in names:
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", n)
+        inputs.append(ci)
+    custom.set_editor_property("inputs", inputs)
+    MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -900, 0), "", custom, "UV")
+    MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionTime, -900, 80), "", custom, "Time")
+    grid = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -900, 160)
+    grid.set_editor_property("parameter_name", "Grid")
+    grid.set_editor_property("default_value", unreal.LinearColor(8.0, 6.0, 48.0, 24.0))
+    MEL.connect_material_expressions(rgba(grid, -760, 160), "", custom, "Grid")
+    for k, (n, v) in enumerate((("Seed", 0.0), ("Spread", 1.0))):
+        d = scalar(n, v, -900, 260 + k * 80)
+        d.set_editor_property("use_custom_primitive_data", True)
+        d.set_editor_property("primitive_data_index", k)
+        MEL.connect_material_expressions(d, "", custom, n)
+    tint = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -900, 440)
+    tint.set_editor_property("parameter_name", "Tint")
+    tint.set_editor_property("default_value", unreal.LinearColor(1.0, 0.62, 0.3, 0.0))
+    MEL.connect_material_expressions(rgba(tint, -760, 440), "", custom, "Tint")
+    sheet = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureObjectParameter, -900, 540)
+    sheet.set_editor_property("parameter_name", "Sheet")
+    MEL.connect_material_expressions(sheet, "", custom, "Sheet")
+    rgb = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -200, 160)
+    for c in ("r", "g", "b"):
+        rgb.set_editor_property(c, True)
+    MEL.connect_material_expressions(custom, "", rgb, "")
+    glow = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -60, 160)
+    MEL.connect_material_expressions(rgb, "", glow, "A")
+    MEL.connect_material_expressions(scalar("Strength", 2.2, -200, 60), "", glow, "B")
+    MEL.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    alpha = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -200, 300)
+    alpha.set_editor_property("a", True)
+    MEL.connect_material_expressions(custom, "", alpha, "")
+    cover = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -60, 300)
+    MEL.connect_material_expressions(alpha, "", cover, "A")
+    MEL.connect_material_expressions(scalar("Occlusion", 0.35, -200, 400), "", cover, "B")
+    MEL.connect_material_property(cover, "", unreal.MaterialProperty.MP_OPACITY)
+    # the billboard: a world position offset (each fire's size in its custom data 2, 3)
+    wpo = MEL.create_material_expression(mat, unreal.MaterialExpressionCustom, -400, 800)
+    wpo.set_editor_property("code", FLAME_WPO_HLSL)
+    wpo.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+    ins = []
+    for n in ("Local", "Obj", "Cam", "Abs", "Size"):
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", n)
+        ins.append(ci)
+    wpo.set_editor_property("inputs", ins)
+    MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionLocalPosition, -900, 700), "", wpo, "Local")
+    MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionObjectPositionWS, -900, 760), "", wpo, "Obj")
+    MEL.connect_material_expressions(MEL.create_material_expression(mat, unreal.MaterialExpressionCameraPositionWS, -900, 820), "", wpo, "Cam")
+    absp = MEL.create_material_expression(mat, unreal.MaterialExpressionWorldPosition, -900, 880)
+    absp.set_editor_property("world_position_shader_offset", unreal.WorldPositionIncludedOffsets.WPT_EXCLUDE_ALL_SHADER_OFFSETS)
+    MEL.connect_material_expressions(absp, "", wpo, "Abs")
+    sw = scalar("Width", 50.0, -1060, 940)
+    sw.set_editor_property("use_custom_primitive_data", True)
+    sw.set_editor_property("primitive_data_index", 2)
+    sh = scalar("Height", 80.0, -1060, 1000)
+    sh.set_editor_property("use_custom_primitive_data", True)
+    sh.set_editor_property("primitive_data_index", 3)
+    size = MEL.create_material_expression(mat, unreal.MaterialExpressionAppendVector, -900, 960)
+    MEL.connect_material_expressions(sw, "", size, "A")
+    MEL.connect_material_expressions(sh, "", size, "B")
+    MEL.connect_material_expressions(size, "", wpo, "Size")
+    MEL.connect_material_property(wpo, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    MEL.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_loaded_asset(mat)
+    return mat
+
+
+def build_fires(fires, folder="WorldBuilder/Fires", overworld=True):
+    """Braziers, torches, campfires and candles: Skyfold Studio's flame flipbooks (the plugin's
+    SkyfoldFire: a camera-facing sheet and its flickering light, in lumens)."""
+    cls = getattr(unreal, "SkyfoldFire", None)
+    if not fires or cls is None:
+        return 0
+    sheets = DATA.get("flames", {})
+    try:
+        base = flame_material()
+        files = [os.path.join(HERE, "Flames", v["file"]) for v in sheets.values() if os.path.exists(os.path.join(HERE, "Flames", v["file"]))]
+        import_files(files, DEST + "/Flames")
+        tex = assets_in(DEST + "/Flames", unreal.Texture2D)
+    except Exception as e:
+        warn("fires: %s" % e)
+        return 0
+    mats = {}
+    n = 0
+    plane = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Plane.Plane")
+    for f in fires:
+        kind = f["fire"]
+        sh = sheets.get(kind)
+        if sh is None:
+            continue
+        key = (kind, tuple(round(c, 3) for c in f["color_linear"]), f["strength"], round(f.get("magic", 0.0), 2))
+        mi = mats.get(key)
+        if mi is None:
+            try:
+                mi = new_asset("MI_WB_Flame_%s_%d" % (kind, len(mats)), DEST + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+                mi.set_editor_property("parent", base)
+                t = tex.get(os.path.splitext(sh["file"])[0])
+                if t is not None:
+                    MEL.set_material_instance_texture_parameter_value(mi, "Sheet", t)
+                MEL.set_material_instance_vector_parameter_value(mi, "Grid", unreal.LinearColor(float(sh["columns"]), float(sh["rows"]), float(sh["frames"]), float(sh["fps"])))
+                MEL.set_material_instance_scalar_parameter_value(mi, "Strength", float(f["strength"]))
+                c = f["color_linear"]
+                MEL.set_material_instance_vector_parameter_value(mi, "Tint", unreal.LinearColor(c[0], c[1], c[2], float(f.get("magic", 0.0))))
+                unreal.EditorAssetLibrary.save_loaded_asset(mi)
+            except Exception as e:
+                warn("flame material %s: %s" % (kind, e))
+                continue
+            mats[key] = mi
+        w, h = f["frame"]
+        bottom = f["frame_bottom"]
+        centre = [f["foot"][0], bottom + h * 0.5, f["foot"][2]]
+        a = spawn(cls, to_ue(centre), None, "WB Fire %s %d" % (kind, n))
+        if a is None:
+            continue
+        try:
+            a.flame.set_static_mesh(plane)
+            a.flame.set_material(0, mi)
+            a.set_editor_property("size", unreal.Vector2D(w * 100.0, h * 100.0))
+            a.set_editor_property("seed", (n * 0.618034) % 1.0)
+            a.set_editor_property("spread", float(f.get("spread", 1.0)))
+            if f.get("light", True):
+                lc = a.light
+                lc.set_editor_property("intensity_units", unreal.LightUnits.LUMENS)
+                lc.set_intensity(f["light_lumens"] * (LIGHT_SCALE if overworld else 1.0))
+                lc.set_attenuation_radius(f["light_range"] * 100.0)
+                c = f["color_linear"]
+                lc.set_light_color(unreal.LinearColor(c[0], c[1], c[2], 1.0))
+                lp = to_ue(f["light_position"])
+                lc.set_world_location(lp, False, False)
+            else:
+                a.light.set_visibility(False)
+            a.set_folder_path(folder)
+            n += 1
+        except Exception as e:
+            warn("fire %d: %s" % (n, e))
+    return n
 
 
 def build_markers():
@@ -758,18 +1314,32 @@ def build_markers():
 # --------------------------------------------------------------------------- dungeons
 
 
-def tagged_trigger(t, label, tags):
-    """A TriggerBox over a Skyfold trigger (center, rotation, half size), its link in the tags:
-    `wb_portal`, `wb_level=<level>`, `wb_via=<way in>`, `wb_arrive=x,y,z,lx,ly,lz` (Unreal cm and
-    axes). Travel is the game's: on overlap, OpenLevel the `wb_level` tag's level."""
-    a = spawn(unreal.TriggerBox, to_ue(t["center"]), to_ue_rotator(t["rotation"]), label)
+def tagged_trigger(t, label, tags, level=None, arrive=None):
+    """A portal over a Skyfold trigger (center, rotation, half size): with the Skyfold Studio
+    plugin a SkyfoldPortal that opens `level` on overlap and puts the explorer at `arrive`; else a
+    TriggerBox. Either way its link is in the tags: `wb_portal`, `wb_level=<level>`,
+    `wb_via=<way in>`, `wb_arrive=x,y,z,lx,ly,lz` (Unreal cm and axes)."""
+    portal = getattr(unreal, "SkyfoldPortal", None)
+    a = spawn(portal or unreal.TriggerBox, to_ue(t["center"]), to_ue_rotator(t["rotation"]), label)
     if a is None:
         return None
     try:
         h = t["half_size"]
-        a.collision_component.set_box_extent(unreal.Vector(*[abs(h[AXES[k][0]]) * 100.0 for k in range(3)]))
+        extent = unreal.Vector(*[abs(h[AXES[k][0]]) * 100.0 for k in range(3)])
+        if portal is not None:
+            a.box.set_box_extent(extent)
+            if level:
+                a.set_editor_property("level", level)
+            if arrive:
+                p = to_ue(arrive["position"])
+                lv = to_ue(arrive["look"])
+                a.set_editor_property("arrive_location", p)
+                a.set_editor_property("arrive_yaw", math.degrees(math.atan2(lv.y, lv.x)))
+            a.set_editor_property("label", label)
+        else:
+            a.collision_component.set_box_extent(extent)
     except Exception as e:
-        warn("trigger size for %s: %s" % (label, e))
+        warn("trigger for %s: %s" % (label, e))
     a.tags = [unreal.Name(x) for x in ["wb_portal"] + tags]
     a.set_folder_path("WorldBuilder/Dungeons")
     return a
@@ -894,7 +1464,7 @@ def build_ways_in(levels):
     n = 0
     for w in DATA.get("ways_in", []):
         level = levels.get(w["dungeon"], w["level"])
-        if tagged_trigger(w, "WB Way In %s" % w["label"], ["wb_level=" + level, "wb_via=%d" % w["via"], arrive_tag(w["arrive"])]) is not None:
+        if tagged_trigger(w, "WB Way In %s" % w["label"], ["wb_level=" + level, "wb_via=%d" % w["via"], arrive_tag(w["arrive"])], level, w["arrive"]) is not None:
             n += 1
     return n
 
@@ -907,7 +1477,7 @@ def build_dungeons():
     if not ds and not DATA.get("ways_in"):
         return []
     les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
-    world = unreal.EditorLevelLibrary.get_editor_world()
+    world = editor_world()
     main = world.get_path_name().split(".")[0] if world else ""
     levels = {d["safe_name"]: DEST + "/Dungeons/" + d["level"] for d in ds}
     if not main or main.startswith("/Temp"):
@@ -942,13 +1512,15 @@ def build_dungeons():
             ps.set_folder_path("WorldBuilder")
         if d.get("exit"):
             tags = ["wb_level=" + main] + [arrive_tag(a) + ",via=%d" % a["via"] for a in d["exit"].get("arrivals", [])]
-            tagged_trigger(d["exit"], "WB Way Out", tags)
+            arrivals = d["exit"].get("arrivals", [])
+            tagged_trigger(d["exit"], "WB Way Out", tags, main, arrivals[0] if arrivals else None)
+        set_game_mode()
         les.save_current_level()
         made.append(path)
     les.load_level(main)
     n = build_ways_in(levels)
     les.save_current_level()
-    log("%d dungeon levels, %d ways in (TriggerBoxes tagged wb_portal / wb_level=<level>: OpenLevel it on overlap)" % (len(made), n))
+    log("%d dungeon levels, %d ways in" % (len(made), n))
     return made
 
 
@@ -964,7 +1536,7 @@ def main():
         task.enter_progress_frame(1, "Landscape files and material")
         write_landscape_files()
         tex = import_textures(DATA["landscape"]["layers"])
-        landscape_material(DATA["landscape"]["layers"], tex)
+        land = create_landscape(landscape_material(DATA["landscape"]["layers"], tex))
         task.enter_progress_frame(1, "Models and instances")
         placed = place_models()
         task.enter_progress_frame(1, "Water")
@@ -990,8 +1562,12 @@ def main():
             caves = len(place_static(DATA["caves"], "Caves", "WB Cave", collide=True))
             build_cave_lights()
             log("%d cave meshes (open the landscape's cave mouths with the Visibility tool over Caves/holes.png)" % caves)
-        task.enter_progress_frame(1, "Sky")
-        build_sky()
+        task.enter_progress_frame(1, "Sky, weather and fires")
+        build_atmosphere(build_sky())
+        fires = build_fires(DATA.get("fires", []))
+        if fires:
+            log("%d fires" % fires)
+        set_game_mode()
         task.enter_progress_frame(1, "Markers")
         markers = build_markers()
         if build_nav_bounds():
@@ -999,6 +1575,10 @@ def main():
         dungeon_levels = build_dungeons()
     v = landscape_values()
     tiled = v["tiles"] > 1
+    if land is not None:
+        log("done: landscape, %d instances, %d water surfaces, %d road meshes, %d markers." % (placed, water, roads, markers))
+        unreal.EditorDialog.show_message("Skyfold Studio", "Imported the landscape, %d instances, %d water surfaces, %d roads, %d markers." % (placed, water, roads, markers), unreal.AppMsgType.OK)
+        return
     steps = (
         "Landscape (manual, Landscape mode > Manage > New > Import from File%s):\n"
         "  Heightmap: %s\n"
@@ -1014,4 +1594,6 @@ def main():
     unreal.EditorDialog.show_message("Skyfold Studio", "Imported %d instances, %d water surfaces, %d roads, %d markers.\n\n%s" % (placed, water, roads, markers, steps), unreal.AppMsgType.OK)
 
 
-main()
+# (run as a script: Tools > Execute Python Script, py "...", or runpy with run_name "__main__")
+if __name__ == "__main__":
+    main()

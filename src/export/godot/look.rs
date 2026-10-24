@@ -115,7 +115,12 @@ pub fn grade(lk: &LookParams, srgb: [f32; 3]) -> [f32; 3] {
 /// The grade as a Godot 3D-texture PNG: `LUT_SIZE` slices side by side (blue across the slices,
 /// red across, green down each slice).
 pub fn grade_lut(lk: &LookParams) -> image::RgbImage {
-    let n = LUT_SIZE;
+    grade_lut_sized(lk, LUT_SIZE)
+}
+
+/// The grade as a strip of `n` slices of `n` x `n` (blue across the slices, red across, green
+/// down each slice): Godot's 3D texture at 32, Unreal's colour grading LUT at 16.
+pub fn grade_lut_sized(lk: &LookParams, n: u32) -> image::RgbImage {
     let mut img = image::RgbImage::new(n * n, n);
     let at = |i: u32| i as f32 / (n - 1) as f32;
     for b in 0..n {
