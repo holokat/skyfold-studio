@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
@@ -161,6 +162,9 @@ def main() -> None:
                     help="Passed to package_macos.py (the fish models)")
     ap.add_argument("--skip-build", action="store_true",
                     help="Use the existing target/release/world_builder")
+    ap.add_argument("--reuse-app", type=Path,
+                    help="A hotfix: take the app from this earlier release's DMG (its assets exactly "
+                         "as shipped) and only put in the new binary and version")
     ap.add_argument("--skip-notarize", action="store_true",
                     help="Local test only: sign but don't notarize (never publish such a build)")
     args = ap.parse_args()
@@ -195,14 +199,56 @@ def main() -> None:
 
     step("Staging the app")
     stage = out / "dmg"
+    if args.reuse_app:
+        reuse_app(args.reuse_app.resolve(), stage, binary, args.version)
+    else:
+        package(sp, stage, binary, meta, public_key, args)
+    meta.unlink()
+    app = stage / APP_NAME
+    sign_and_ship(app, stage, out, ident, profile, account, sp, notes, args)
+
+
+def reuse_app(dmg: Path, stage: Path, binary: Path, version: str) -> None:
+    """The earlier release's app from its DMG, with this build's binary and version."""
+    mount = stage.parent / "reuse-mount"
+    mount.mkdir()
+    run("hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mount, dmg)
+    try:
+        stage.mkdir()
+        # (the DMG's whole layout: the app, the Applications link, the read-me)
+        for entry in sorted(mount.iterdir()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_symlink():
+                os.symlink(os.readlink(entry), stage / entry.name)
+            else:
+                run("/usr/bin/ditto", entry, stage / entry.name)
+    finally:
+        run("hdiutil", "detach", mount)
+        mount.rmdir()
+    app = stage / APP_NAME
+    plist_path = app / "Contents/Info.plist"
+    with plist_path.open("rb") as f:
+        plist = plistlib.load(f)
+    exe = app / "Contents/MacOS" / plist["CFBundleExecutable"]
+    shutil.copy2(binary, exe)
+    plist["CFBundleShortVersionString"] = version
+    plist["CFBundleVersion"] = version
+    with plist_path.open("wb") as f:
+        plistlib.dump(plist, f)
+    print(f"  {app.name}: the earlier release's app, this build's binary, version {version}")
+
+
+def package(sp: Path, stage: Path, binary: Path, meta: Path, public_key: str, args) -> None:
     run(sys.executable, ROOT / "tools/release/package_macos.py", "--output", stage,
         "--binary", binary, "--version", args.version, "--cargo-metadata", meta,
         "--sparkle-framework", sp / "Sparkle.framework", "--feed-url", FEED_URL,
         "--ed-public-key", public_key,
         *(["--include-owner-media"] if args.include_owner_media else []))
-    meta.unlink()
-    app = stage / APP_NAME
 
+
+def sign_and_ship(app: Path, stage: Path, out: Path, ident: str, profile: str, account: str,
+                  sp: Path, notes: Path, args) -> None:
     step("Signing")
     sign_app(app, ident)
 

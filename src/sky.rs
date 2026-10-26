@@ -3,8 +3,6 @@
 //! lighting & style is blended into the look in `look.rs`). The volumetric clouds live in
 //! `clouds.rs` and follow `SkyState` (cover, wind drift).
 
-mod probe;
-
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::Exposure;
 use bevy::light::light_consts::lux;
@@ -257,7 +255,6 @@ pub struct SkySystems;
 
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(probe::SkyProbePlugin);
         app.init_resource::<Lighting>()
             .init_resource::<SkyState>()
             .insert_resource(DirectionalLightShadowMap { size: 4096 })

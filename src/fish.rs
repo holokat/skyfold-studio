@@ -101,7 +101,12 @@ impl Plugin for FishPlugin {
             .add_systems(PreStartup, model::init_clock)
             .add_systems(
                 Update,
-                (model::finish_skins, model::tick_clock, sync_fish, swim).chain(),
+                (model::finish_skins, model::tick_clock, sync_fish).chain(),
+            )
+            // (after the camera moved this frame: see `swim`)
+            .add_systems(
+                PostUpdate,
+                swim.before(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
@@ -186,18 +191,47 @@ fn swim(
     water: Res<WaterBodies>,
     terrain: Res<Terrain>,
     mut clock: Local<f32>,
-    mut q: Query<(&Fish, &mut Transform)>,
+    mut q: Query<(&Fish, &mut Transform), Without<crate::camera::MainCamera>>,
+    cam: Query<(&Transform, &Projection), With<crate::camera::MainCamera>>,
 ) {
     // fish hold still with the rest of the world while editing (wind::Motion)
     if motion.live {
         *clock += time.delta_secs();
     }
     let t = *clock;
-    let schools: HashMap<u32, &FishSchool> = water.fish.iter().map(|s| (s.id, s)).collect();
+    // Where a fish is depends only on the clock, so schools out of view aren't moved: each of a
+    // fish's parts is a mesh instance the renderer would upload again (a school of trout is
+    // thousands a frame), and in view again they are exactly where they would have been.
+    // (this frame's view: the camera's `Frustum` is last frame's until transforms propagate)
+    let frustum = cam.single().ok().map(|(t, p)| {
+        use bevy::camera::CameraProjection;
+        p.compute_frustum(&GlobalTransform::from(*t))
+    });
+    let schools: HashMap<u32, (&FishSchool, bool)> = water
+        .fish
+        .iter()
+        .map(|s| {
+            let seen = frustum.is_none_or(|f| {
+                f.intersects_sphere(
+                    &bevy::camera::primitives::Sphere {
+                        center: Vec3::from_array(s.center).into(),
+                        // (the loop breathes to the radius and drifts an eighth of it, plus a
+                        // body length)
+                        radius: s.radius * 1.2 + s.species.info().length * 1.5 + 2.0,
+                    },
+                    false,
+                )
+            });
+            (s.id, (s, seen))
+        })
+        .collect();
     for (fish, mut tf) in &mut q {
-        let Some(s) = schools.get(&fish.school) else {
+        let Some(&(s, seen)) = schools.get(&fish.school) else {
             continue;
         };
+        if !seen {
+            continue;
+        }
         let info = s.species.info();
         let c = Vec3::from_array(s.center);
         let r = s.radius * fish.orbit;
