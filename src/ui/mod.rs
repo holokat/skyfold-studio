@@ -166,6 +166,8 @@ pub struct UiState<'w> {
     pub field_tool: ResMut<'w, crate::fields::ui::FieldTool>,
     /// Terrain › Caves (crate::caves)
     pub caves: Res<'w, crate::caves::Caves>,
+    /// File › New world's Fantasy / Sci-Fi pick (crate::world_kind)
+    pub world_kind: ResMut<'w, crate::world_kind::TemplateRequest>,
     pub cave_tool: ResMut<'w, crate::caves::ui::CaveTool>,
     pub cave_world: ResMut<'w, crate::caves::render::CaveWorld>,
     /// Dungeons (crate::dungeons): the world's list, the open dungeon's map, the builder
@@ -268,8 +270,12 @@ pub(crate) fn editor_ui(
     shell::top(&ctx, &mut s, &mut out, screen);
     shell::rail(&ctx, &mut s, &mut out, screen);
     search::poll(&ctx, &mut s);
-    // (the Characters lab draws one big window of its own: crate::characters::view)
-    let inspector = if s.ed.tab == crate::editor::Tab::Characters {
+    // (the Characters lab and Images draw one big window of their own: crate::characters::view,
+    // crate::images::view)
+    // (the Marketplace covers them too: crate::market::view)
+    let inspector = if matches!(s.ed.tab, crate::editor::Tab::Characters | crate::editor::Tab::Images)
+        || s.market.open
+    {
         false
     } else {
         panels::left_panel(&ctx, &mut s, &mut out, &tex, screen);
@@ -284,7 +290,9 @@ pub(crate) fn editor_ui(
     crate::dungeons::ui::guide_bar(&ctx, &mut s);
     if let Ok((cam, cam_t)) = camera.single() {
         zone_labels::draw(&ctx, &s, cam, cam_t, inspector);
-        if s.ed.tab != crate::editor::Tab::Characters {
+        if !matches!(s.ed.tab, crate::editor::Tab::Characters | crate::editor::Tab::Images)
+            && !s.market.open
+        {
             shell::status(&ctx, &s, cam, cam_t, screen);
         }
         coast_preview(&ctx, &s, cam, cam_t);

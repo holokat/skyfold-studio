@@ -149,6 +149,7 @@ namespace WorldBuilder
             BuildMarkers(w, report);
             BuildWaysIn(w, folder, report);
             BuildFires(w.fires, w, folder, true);
+            BuildFixtureLights(w, report);
             var camera = BuildCamera(w);
             BuildLook(w, folder, gen, camera);
             Step("Navigation", 0.97f);
@@ -1253,6 +1254,34 @@ namespace WorldBuilder
             }
         }
 
+        /// The placed models' light fixtures (downlights, lanterns, street lights): a point or spot
+        /// light each under "Fixture Lights".
+        static void BuildFixtureLights(WorldData w, List<string> report)
+        {
+            if (w.fixtureLights == null || w.fixtureLights.Length == 0) return;
+            var root = new GameObject("Fixture Lights");
+            foreach (var l in w.fixtureLights)
+            {
+                var lg = new GameObject(l.spot ? "Spot Light" : "Point Light");
+                lg.transform.SetParent(root.transform, false);
+                lg.transform.position = V(l.position);
+                var light = lg.AddComponent<Light>();
+                light.type = l.spot ? LightType.Spot : LightType.Point;
+                if (l.spot)
+                {
+                    var d = V(l.direction);
+                    if (d.sqrMagnitude > 1e-6f)
+                        lg.transform.rotation = Quaternion.LookRotation(d, Mathf.Abs(d.normalized.y) > 0.98f ? Vector3.forward : Vector3.up);
+                    light.spotAngle = l.angle;
+                }
+                light.color = Rgb(l.color);
+                light.intensity = l.intensity;
+                light.range = l.range;
+                light.shadows = l.shadows ? LightShadows.Soft : LightShadows.None;
+            }
+            report.Add(w.fixtureLights.Length + " fixture lights");
+        }
+
         /// A fire's material: its flipbook sheet (premultiplied colour), drawn additively and unlit
         /// in either pipeline; saved next to the sheet.
         static Material FlameMaterial(string folder, FlameSheet sheet, float[] color)
@@ -1554,6 +1583,7 @@ namespace WorldBuilder
         public string portalSheets;
         public FlameSheet[] flames;
         public DungeonFire[] fires;
+        public FixtureLightData[] fixtureLights;
         public NavMeshSettingsData navMesh;
         public LightData light;
         public MarkerData[] markers;
@@ -1767,6 +1797,18 @@ namespace WorldBuilder
         public float[] rotation;
         public float[] halfSize;
         public LookData arrive;
+    }
+
+    [Serializable] public class FixtureLightData
+    {
+        public float[] position;
+        public bool spot;
+        public float[] direction;
+        public float angle;
+        public float[] color;
+        public float intensity;
+        public float range;
+        public bool shadows;
     }
 
     [Serializable] public class CaveLightData

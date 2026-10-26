@@ -334,6 +334,7 @@ fn seed(mut frame: Local<u32>, mut done: Local<bool>, mut data: crate::io::World
             scale,
             stretch: None,
             locked: false,
+            glow: None,
         });
     };
     put(&mut data, "Boulder", camp + Vec2::new(28.0, 26.0), 3.0, 1.2);

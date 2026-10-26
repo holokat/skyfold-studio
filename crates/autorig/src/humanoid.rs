@@ -186,6 +186,8 @@ pub fn map_bones(sk: &Skeleton) -> Vec<Option<&'static str>> {
     let t = template();
     let mut out: Vec<Option<&'static str>> = vec![None; sk.bones.len()];
     let mut used = std::collections::HashSet::new();
+    // (Skyfold's own moving-part bones, `sf_…`, never play a body bone)
+    let ours: Vec<bool> = sk.bones.iter().map(|b| b.name.starts_with("sf_")).collect();
     // 1: exact (case-insensitive) canonical names
     for (i, b) in sk.bones.iter().enumerate() {
         let n = strip_prefix(&b.name);
@@ -209,6 +211,11 @@ pub fn map_bones(sk: &Skeleton) -> Vec<Option<&'static str>> {
     }
     // 3: keywords, with the spine spread over its chain
     keyword_pass(sk, &mut out, &mut used);
+    for (o, ours) in out.iter_mut().zip(ours) {
+        if ours {
+            *o = None;
+        }
+    }
     out
 }
 

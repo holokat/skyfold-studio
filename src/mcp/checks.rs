@@ -27,6 +27,8 @@ fn registry() -> Vec<McpTool> {
     crate::scenes::mcp::register(&mut app);
     crate::fields::mcp::register(&mut app);
     crate::characters::mcp::register(&mut app);
+    crate::celestial::mcp::register(&mut app);
+    crate::world_kind::mcp::register(&mut app);
     Plugin::build(&crate::export::ExportPlugin, &mut app);
     Plugin::build(&crate::bigworld::BigWorldPlugin, &mut app);
     app.world().resource::<McpTools>().tools.clone()
@@ -383,7 +385,7 @@ fn no_tool_can_change_asset_pack_entitlements() {
         .map(|t| t.name)
         .filter(|n| n.starts_with("market"))
         .collect();
-    assert_eq!(market, ["market_packs", "market_listings"]);
+    assert_eq!(market, ["market_packs", "market_listings", "market_view"]);
     assert!(market.iter().all(|t| super::tools::READ_ONLY.contains(t)));
     const WORDS: [&str; 12] = [
         "purchase",
@@ -455,6 +457,7 @@ fn test_world() -> World {
                         scale: 1.0,
                         stretch: None,
                         locked: false,
+                        glow: None,
                     });
                     h.commit(&store);
                 });

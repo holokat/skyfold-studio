@@ -4,7 +4,8 @@
 //! as `radius`, `height` or `pulse`). This module indexes them per library model and places them in
 //! the world for each placed object; effects read it: `auras` turns `aura_dark` anchors (the dark
 //! spire's) into a dark aura, `flames` burns the `fire` anchors (braziers, torch stands, fire
-//! pits) and `visuals::chimneys` smokes the `smoke` anchors (chimneys, forge stacks, cauldrons).
+//! pits), `visuals::chimneys` smokes the `smoke` anchors (chimneys, forge stacks, cauldrons) and
+//! `fixture_lights` lights the `light` anchors (downlights, lanterns, street lights).
 //!
 //! The index reloads when a `models.json` changes on disk (a pack released while the editor runs).
 //! MCP: `effect_anchors` lists the anchored models and the placed objects that carry anchors.
@@ -153,7 +154,7 @@ impl Plugin for FxAnchorsPlugin {
             .add_systems(Update, reload);
         app.mcp_tool(McpTool {
             name: "effect_anchors",
-            description: "Effect anchors: the points on a model where engine effects attach (the style packs' `fx_<kind>` nodes: `aura_dark` = a dark aura of rising wisps and motes, low mist, a pulsing purple light and a drone with whispers, e.g. on hp:dark_spire; `fire` on braziers, torch stands and fire pits (burning: `fires`), `smoke` on chimneys, forge stacks and cauldrons (smoking: `smoke`)). Lists the placed objects that carry anchors near `position` ([x, z]) within `radius` (m, default 250; without a position: the whole world), nearest first (at most `limit`, default 50): object id, model, and per anchor its kind, world position, radius and height. `models: true` also lists every library model with anchors. Read-only; auras are tuned with `auras`.",
+            description: "Effect anchors: the points on a model where engine effects attach (the style packs' `fx_<kind>` nodes: `aura_dark` = a dark aura of rising wisps and motes, low mist, a pulsing purple light and a drone with whispers, e.g. on hp:dark_spire; `fire` on braziers, torch stands and fire pits (burning: `fires`), `smoke` on chimneys, forge stacks and cauldrons (smoking: `smoke`), `light` on light fixtures: downlights, cove strips, lanterns, path and street lights (shining: `lights`)). Lists the placed objects that carry anchors near `position` ([x, z]) within `radius` (m, default 250; without a position: the whole world), nearest first (at most `limit`, default 50): object id, model, and per anchor its kind, world position, radius and height. `models: true` also lists every library model with anchors. Read-only; auras are tuned with `auras`.",
             input_schema: || {
                 json!({ "type": "object", "properties": {
                     "position": position_schema("centre of the search"),

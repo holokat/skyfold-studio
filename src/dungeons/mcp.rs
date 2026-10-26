@@ -715,7 +715,7 @@ pub(super) fn register(app: &mut App) {
     });
     app.mcp_tool(McpTool {
         name: "dungeons_entrance_set",
-        description: "Change a way in's portal colour or label. One undo step.",
+        description: "Change a way in's portal colour, label or frame (`frame`: a portal's style, standing where it is now; \"none\" for the liquid alone). One undo step (a frame change is one of its own).",
         input_schema: || {
             obj(
                 vec![
@@ -726,6 +726,10 @@ pub(super) fn register(app: &mut App) {
                         json!({ "type": "string", "enum": PortalColor::ALL.map(|c| c.id()) }),
                     ),
                     ("label", json!({ "type": "string" })),
+                    (
+                        "frame",
+                        json!({ "type": "string", "enum": edit::FRAMES.map(|f| f.asset).into_iter().chain(["none"]).collect::<Vec<_>>(), "description": "a portal's style: its frame model (stone arch, ruined arch, rune ring, temple gate, dwarven door, crystal spires), or \"none\" for the liquid alone" }),
+                    ),
                 ],
                 &["id", "entrance"],
             )
@@ -897,14 +901,14 @@ pub(super) fn register(app: &mut App) {
     });
     app.mcp_tool(McpTool {
         name: "dungeons_lights_auto",
-        description: "Auto-light the open dungeon: torches along walls (alternating in corridors), braziers round big rooms and boss daises, candles in crypts and shrines, chandeliers or hanging fires over halls, crystals in caverns — in the style's own fixtures (ordinary objects). Replaces earlier auto lights; lights placed by hand stay. `density` 0.4..2.5 (1 = normal). One undo step.",
-        input_schema: || obj(vec![("density", json!({ "type": "number" })), ("room", json!({ "type": "integer", "description": "just this room (its earlier auto lights are replaced; the rest stay)" }))], &[]),
+        description: "Auto-light the open dungeon: torches along walls (alternating in corridors), braziers round big rooms and boss daises, candles in crypts and shrines, chandeliers or hanging fires over halls, crystals in caverns — in the style's own fixtures (ordinary objects). Replaces earlier auto lights; lights placed by hand stay (`clear`: just remove the auto lights and their fixtures). `density` 0.4..2.5 (1 = normal). One undo step.",
+        input_schema: || obj(vec![("clear", json!({ "type": "boolean" })), ("density", json!({ "type": "number" })), ("room", json!({ "type": "integer", "description": "just this room (its earlier auto lights are replaced; the rest stay)" }))], &[]),
         run: |w, a| sys!(w, mcp_lights_auto, a),
     });
     app.mcp_tool(McpTool {
         name: "dungeons_decals_age",
-        description: "Age the open dungeon's walls: cracks up the walls, damp drips and stains (in damp styles and moods), soot over torches and round braziers, blood in prisons, lairs, arenas and boss rooms, glowing rune circles on ritual, shrine and boss floors. Replaces earlier aged decals; ones placed by hand stay. `density` 0.3..3 (1 = the style's own). One undo step.",
-        input_schema: || obj(vec![("density", json!({ "type": "number" }))], &[]),
+        description: "Age the open dungeon's walls: cracks up the walls, damp drips and stains (in damp styles and moods), soot over torches and round braziers, blood in prisons, lairs, arenas and boss rooms, glowing rune circles on ritual, shrine and boss floors. Replaces earlier aged decals; ones placed by hand stay (`clear`: just remove the aged decals). `density` 0.3..3 (1 = the style's own). One undo step.",
+        input_schema: || obj(vec![("clear", json!({ "type": "boolean" })), ("density", json!({ "type": "number" }))], &[]),
         run: |w, a| sys!(w, mcp_decals_age, a),
     });
     app.mcp_tool(McpTool {
@@ -993,8 +997,12 @@ pub(super) fn register(app: &mut App) {
     });
     app.mcp_tool(McpTool {
         name: "dungeons_light_add",
-        description: "Add a light source to the open dungeon (no fixture object: place one from the library if wanted). One undo step.",
-        input_schema: || obj(light_schema(), &["kind", "position"]),
+        description: "Add a light source to the open dungeon (no fixture object: place one from the library if wanted). `fixture` true (brazier or candles), like Brazier here / Candles here: the style's own brazier or candles stand on the floor at `position` (the floor point) with the light over them; the other settings are then the kind's own (dungeons_light_set after). One undo step.",
+        input_schema: || {
+            let mut p = light_schema();
+            p.push(("fixture", json!({ "type": "boolean", "description": "brazier / candles: stand the style's fixture object on the floor at `position` with its light (applied this frame)" })));
+            obj(p, &["kind", "position"])
+        },
         run: |w, a| sys!(w, mcp_light_add, a),
     });
     app.mcp_tool(McpTool {
@@ -1301,14 +1309,34 @@ fn mcp_entrance_set(In(a): In<Value>, mut d: WorldData) -> Result<Vec<McpContent
     let (id, eid): (u32, u32) = (arg(&a, "id")?, arg(&a, "entrance")?);
     let color = enum_arg(&a, "color", PortalColor::from_id)?;
     let label: Option<String> = opt_arg(&a, "label")?;
-    edit::update_entrance(&mut d, id, eid, "Change way in", |e| {
-        if let Some(c) = color {
-            e.color = c;
+    let frame = match opt_arg::<String>(&a, "frame")?.as_deref().map(str::trim) {
+        None => None,
+        Some("none" | "") => Some(String::new()),
+        Some(f) => {
+            let f = edit::frame_named(f).ok_or_else(|| {
+                let names: Vec<_> = edit::FRAMES.iter().map(|f| f.asset).collect();
+                format!(
+                    "unknown frame `{f}`; the frames are: {}, none",
+                    names.join(", ")
+                )
+            })?;
+            crate::market::check(f.asset)?;
+            Some(f.asset.to_string())
         }
-        if let Some(l) = label {
-            e.label = l;
-        }
-    })?;
+    };
+    if color.is_some() || label.is_some() {
+        edit::update_entrance(&mut d, id, eid, "Change way in", |e| {
+            if let Some(c) = color {
+                e.color = c;
+            }
+            if let Some(l) = label {
+                e.label = l;
+            }
+        })?;
+    }
+    if let Some(f) = frame {
+        edit::set_frame(&mut d, id, eid, &f)?;
+    }
     json_out(dungeon_json(d.dungeons.get(id).unwrap()))
 }
 
@@ -1886,16 +1914,18 @@ fn mcp_lights_auto(
     In(a): In<Value>,
     mut tool: ResMut<super::ui::DungeonTool>,
 ) -> Result<Vec<McpContent>, String> {
+    let clear: bool = opt_arg(&a, "clear")?.unwrap_or(false);
     let density: f32 = opt_arg(&a, "density")?.unwrap_or(1.0);
     let room: Option<u32> = opt_arg(&a, "room")?;
-    tool.requests.push(match room {
-        Some(id) => super::ui::Request::AutoLightRoom(id),
-        None => super::ui::Request::AutoLight {
+    tool.requests.push(match (clear, room) {
+        (true, _) => super::ui::Request::ClearAutoLights,
+        (false, Some(id)) => super::ui::Request::AutoLightRoom(id),
+        (false, None) => super::ui::Request::AutoLight {
             density: density.clamp(0.3, 3.0),
         },
     });
     json_out(
-        json!({ "queued": "auto-light", "note": "applied this frame; dungeons_lights lists them" }),
+        json!({ "queued": if clear { "clear auto lights" } else { "auto-light" }, "note": "applied this frame; dungeons_lights lists them" }),
     )
 }
 
@@ -1903,12 +1933,17 @@ fn mcp_decals_age(
     In(a): In<Value>,
     mut tool: ResMut<super::ui::DungeonTool>,
 ) -> Result<Vec<McpContent>, String> {
+    let clear: bool = opt_arg(&a, "clear")?.unwrap_or(false);
     let density: f32 = opt_arg(&a, "density")?.unwrap_or(1.0);
-    tool.requests.push(super::ui::Request::AgeWalls {
-        density: density.clamp(0.3, 3.0),
+    tool.requests.push(if clear {
+        super::ui::Request::ClearAged
+    } else {
+        super::ui::Request::AgeWalls {
+            density: density.clamp(0.3, 3.0),
+        }
     });
     json_out(
-        json!({ "queued": "age the walls", "note": "applied this frame; dungeons_decals lists them" }),
+        json!({ "queued": if clear { "clear aging" } else { "age the walls" }, "note": "applied this frame; dungeons_decals lists them" }),
     )
 }
 
@@ -2401,9 +2436,28 @@ fn mcp_lights(In(_): In<Value>, d: WorldData) -> Result<Vec<McpContent>, String>
     json_out(json!({ "lights": m.lights.iter().map(light_json).collect::<Vec<_>>() }))
 }
 
-fn mcp_light_add(In(a): In<Value>, mut d: WorldData) -> Result<Vec<McpContent>, String> {
+fn mcp_light_add(
+    In(a): In<Value>,
+    mut d: WorldData,
+    mut tool: ResMut<super::ui::DungeonTool>,
+) -> Result<Vec<McpContent>, String> {
     let kind = enum_arg(&a, "kind", LightKind::from_id)?.ok_or("give `kind`")?;
     let pos: [f32; 3] = arg(&a, "position")?;
+    if opt_arg(&a, "fixture")?.unwrap_or(false) {
+        if !matches!(kind, LightKind::Brazier | LightKind::Candles) {
+            return Err("`fixture` is for kind brazier or candles (wall torches and lanterns: dungeons_wall)".into());
+        }
+        if d.dungeon_map.0.is_none() {
+            return Err("no dungeon is open".into());
+        }
+        tool.requests.push(super::ui::Request::FloorFixture {
+            kind,
+            at: Vec3::from_array(pos),
+        });
+        return json_out(
+            json!({ "queued": format!("{} on the floor", kind.id()), "note": "applied this frame; dungeons_lights lists it" }),
+        );
+    }
     let mut out = None;
     edit::map(&mut d, "Add light", |m| {
         let id = m.alloc_light();

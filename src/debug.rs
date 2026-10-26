@@ -1153,6 +1153,7 @@ pub fn demo_content(mut done: Local<bool>, mut data: crate::io::WorldData) {
                 scale: 1.0,
                 stretch: None,
                 locked: false,
+                glow: None,
             });
         }
     }
@@ -1198,6 +1199,7 @@ pub fn demo_content(mut done: Local<bool>, mut data: crate::io::WorldData) {
                     scale: 1.0,
                     stretch: None,
                     locked: false,
+                    glow: None,
                 });
             }
             z -= step;
@@ -1247,6 +1249,7 @@ pub fn demo_content(mut done: Local<bool>, mut data: crate::io::WorldData) {
                 scale: 0.8 + 0.15 * k as f32,
                 stretch: None,
                 locked: false,
+                glow: None,
             });
         }
         let c = Vec2::new(-0.2, 0.22) * half + Vec2::new(-60.0, 0.0);
@@ -1270,6 +1273,7 @@ pub fn demo_content(mut done: Local<bool>, mut data: crate::io::WorldData) {
                     scale: 1.0,
                     stretch: None,
                     locked: false,
+                    glow: None,
                 });
             }
         }
@@ -1297,6 +1301,7 @@ pub fn demo_content(mut done: Local<bool>, mut data: crate::io::WorldData) {
             scale: s,
             stretch: None,
             locked: false,
+            glow: None,
         });
     }
     // --- fish in the sea off the south coast

@@ -1116,6 +1116,7 @@ fn update_params(
             [0.36, 0.5, 0.07],
         ]
     };
+    let alien = appearance.alien.pack();
     let params = GrassParams {
         grid: Vec4::new(
             terrain.half(),
@@ -1136,8 +1137,9 @@ fn update_params(
         base: lin(base),
         tip: lin(tip),
         dry: lin(dry),
-        cold: lin(cold),
-        warm: lin(warm),
+        // w: alien flora (`nature::alien`) in the spare channels, 1 + its pair (1 = off)
+        cold: lin(cold).with_w(1.0 + alien.y),
+        warm: lin(warm).with_w(1.0 + alien.x),
         // y selects the realistic leaf treatment. z is a separate, persisted appearance dial:
         // zero preserves the current recipe; one asks the shader for the full layered meadow.
         amount: Vec4::new(

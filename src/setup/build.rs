@@ -656,12 +656,15 @@ pub fn start(world: &mut World, plan: WorldPlan) {
         stage: 6,
         f: plan_gathering,
     });
-    run.push_back(call(
-        7,
-        "look_set",
-        format!("The look: {}", p.look.replace('_', " ")),
-        json!({ "preset": p.look, "apply_scene": false }),
-    ));
+    let scifi = p.kind == crate::world_kind::WorldKind::SciFi;
+    if !scifi {
+        run.push_back(call(
+            7,
+            "look_set",
+            format!("The look: {}", p.look.replace('_', " ")),
+            json!({ "preset": p.look, "apply_scene": false }),
+        ));
+    }
     // (again after the look: an untouched Natural look gets the painted baseline in hand-painted worlds)
     run.push_back(call(
         7,
@@ -675,6 +678,37 @@ pub fn start(world: &mut World, plan: WorldPlan) {
         "The time of day",
         json!({ "hour": p.hour }),
     ));
+    if scifi {
+        // the alien template over the finished land (its canyons would cut through the towns
+        // and roads, so the land keeps its shape): alien ground, spires and floating rocks,
+        // alien scrub, then the chosen Sci-Fi look (its sky, air and plants) at the chosen hour
+        run.push_back(call(
+            7,
+            "world_kind_apply",
+            "Sci-Fi: rock spires, floating rocks, monoliths and alien scrub",
+            json!({ "kind": "scifi", "parts": ["props", "flora"] }),
+        ));
+        run.push_back(call(
+            7,
+            "terrain_ground_palette",
+            "Alien ground: red dust, ochre sand, layered sandstone",
+            json!({ "palette": "scifi" }),
+        ));
+        let look = crate::world_kind::looks::ScifiLook::from_id(&p.scifi_look)
+            .unwrap_or(crate::world_kind::looks::ScifiLook::AlienDusk);
+        run.push_back(call(
+            7,
+            "look_scifi_set",
+            format!("The look: {}", look.name()),
+            json!({ "look": look.id() }),
+        ));
+        run.push_back(call(
+            7,
+            "lighting_set",
+            "The time of day",
+            json!({ "hour": p.hour }),
+        ));
+    }
     run.push_back(call(
         7,
         "weather_set",

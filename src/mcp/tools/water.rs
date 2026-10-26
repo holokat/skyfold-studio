@@ -266,7 +266,50 @@ Spilling from a river it takes the river's water. Returns its id. One undo step.
         },
         run: |w, a| run(w, add_fish, a),
     });
+    app.mcp_tool(McpTool {
+        name: "water_shape_lake",
+        description: "Shape a drawn lake's shore with the Shore brush (like Water › Shape Lake): `mode` expand (push the shore out), shrink (pull it in) or smooth (relax kinks), brushing at `position` [x, z] on or near the shore, or along a stroke of `points` [[x, z], …]. `radius` is the brush size (m), `strength` 0.05..1 and `seconds` how long the brush scrubs there (at full strength about 0.9 × the brush size in metres per second). The basin, beach and shore plants are re-carved to the new shore. Basin lakes have no shore to shape (change their water level with water_set_style). One undo step (the old shore and ground come back).",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "drawn lake id (water_list)" },
+                    "mode": enum_schema(ids(&SHAPE_MODES), "expand, shrink or smooth"),
+                    "position": xz_schema("where the brush works (within 1.5 × `radius` of the shore)"),
+                    "points": points_schema("instead of `position`: a stroke the brush moves along", 1),
+                    "radius": { "type": "number", "minimum": 4, "maximum": 200, "default": 25, "description": "brush size (m)" },
+                    "strength": { "type": "number", "minimum": 0.05, "maximum": 1, "default": 0.5 },
+                    "seconds": { "type": "number", "minimum": 0.05, "maximum": 10, "default": 1, "description": "how long the brush scrubs (spread along a stroke)" }
+                },
+                "required": ["id", "mode"]
+            })
+        },
+        run: |w, a| run(w, shape_lake, a),
+    });
+    app.mcp_tool(McpTool {
+        name: "fish_set",
+        description: "Change a fish school in place by `id` (water_list › fish_schools), like its card in the Water tab: `species` (see water_presets), `count` of fish and swim area `radius` (m; shrunk to fit the water around it). Exported as a fishing spot. One undo step.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "fish school id (water_list)" },
+                    "species": enum_schema(FishSpecies::ALL.iter().map(|f| f.id()).collect(), "species id (see water_presets)"),
+                    "count": { "type": "integer", "minimum": 1, "maximum": 60 },
+                    "radius": { "type": "number", "minimum": 3, "maximum": 80, "description": "swim area (m); shrunk to fit the water" }
+                },
+                "required": ["id"]
+            })
+        },
+        run: |w, a| run(w, set_fish, a),
+    });
 }
+
+const SHAPE_MODES: [lakes::ShapeMode; 3] = [
+    lakes::ShapeMode::Expand,
+    lakes::ShapeMode::Shrink,
+    lakes::ShapeMode::Smooth,
+];
 
 /// Applies `preset`, `behaviour` and the style fields in `args`. Returns whether anything was set.
 fn apply_style(st: &mut WaterStyle, args: &Value, body: BodyKind) -> Result<bool, String> {
@@ -444,7 +487,7 @@ fn set_style(In(args): In<Value>, mut d: WorldData) -> R {
         WaterSel::Lake(_) => BodyKind::Lake,
         _ => {
             return Err(format!(
-                "{id} is a fish school: remove it and use fish_add to change it"
+                "{id} is a fish school: change its species, count and swim area with fish_set"
             ));
         }
     };
@@ -1018,6 +1061,151 @@ fn add_fish(In(args): In<Value>, mut d: WorldData) -> R {
         if fresh { "fresh" } else { "sea" }
     );
     d.water.fish.push(school);
+    d.water.selected = Some(WaterSel::Fish(id));
+    d.history.commit(&d.store);
+    d.meta.dirty = true;
+    text(msg)
+}
+
+fn shape_lake(In(args): In<Value>, mut d: WorldData) -> R {
+    let id = crate::mcp_tools::arg::<u32>(&args, "id")?;
+    let lake = d
+        .water
+        .lakes
+        .iter()
+        .find(|l| l.id == id)
+        .ok_or_else(|| format!("no lake with id {id} (see water_list)"))?;
+    if !lake.is_drawn() {
+        return Err(format!(
+            "lake {id} is a basin lake: only drawn lakes have a shore to shape (set its `level` with water_set_style)"
+        ));
+    }
+    let mode = pick(
+        &SHAPE_MODES,
+        opt_str(&args, "mode")?.ok_or("missing `mode` (expand, shrink or smooth)")?,
+        "mode",
+        |m| match m {
+            lakes::ShapeMode::Expand => "Expand",
+            lakes::ShapeMode::Shrink => "Shrink",
+            lakes::ShapeMode::Smooth => "Smooth",
+        },
+    )?;
+    let brush = d.ed.water_tools.brush;
+    let radius = num_in(&args, "radius", brush.size, 4.0, 200.0)?;
+    let strength = num_in(&args, "strength", brush.strength, 0.05, 1.0)?;
+    let seconds = num_in(&args, "seconds", 1.0, 0.05, 10.0)?;
+    let stroke: Vec<Vec2> = match (opt_points(&args, "points")?, opt_xz(&args, "position")?) {
+        (Some(p), _) if p.is_empty() => return Err("`points` needs at least 1 point".into()),
+        (Some(p), _) if p.len() == 1 => p,
+        (Some(p), _) => along(&p, (radius * 0.25).max(1.0)),
+        (None, Some(p)) => vec![p],
+        (None, None) => return Err("give a `position` [x, z] or a stroke of `points`".into()),
+    };
+    // the brush must touch the shore somewhere along the stroke (as the brush picks its lake)
+    let poly: Vec<Vec2> = lake.outline.iter().map(|q| Vec2::from_array(*q)).collect();
+    let area_before = lakes::signed_area(&poly).abs();
+    let near = stroke
+        .iter()
+        .map(|p| lakes::sdf(&poly, *p).abs())
+        .fold(f32::MAX, f32::min);
+    if near >= radius * 1.5 {
+        return Err(format!(
+            "the brush is {near:.0} m from lake {id}'s shore: brush within {:.0} m of it (1.5 × `radius`), or make `radius` bigger",
+            radius * 1.5
+        ));
+    }
+    // frames of the Shore brush: 0.05 s each, spread evenly along the stroke
+    let speed = (radius * 0.9).max(12.0);
+    let frames = ((seconds / 0.05).round() as usize).max(1);
+    let amount = strength * speed * seconds / frames as f32;
+    d.history.begin("Shape lake");
+    d.history.touch_water(&d.water);
+    let prev = lake.clone();
+    {
+        let l = d.water.lakes.iter_mut().find(|l| l.id == id).unwrap();
+        for f in 0..frames {
+            let at = stroke[(f * stroke.len() / frames).min(stroke.len() - 1)];
+            lakes::deform(&mut l.outline, at, radius, amount, mode);
+        }
+    }
+    let WorldData {
+        terrain,
+        history,
+        store,
+        water,
+        lib,
+        ..
+    } = &mut d;
+    crate::water::recarve_lake(terrain, history, store, lib.as_deref(), water, id, &prev);
+    water.selected = Some(WaterSel::Lake(id));
+    water.dirty = true;
+    let l = water.lakes.iter().find(|l| l.id == id).unwrap();
+    let poly: Vec<Vec2> = l.outline.iter().map(|q| Vec2::from_array(*q)).collect();
+    let msg = format!(
+        "Lake {id} \"{}\": shore {} ({:.0} m brush, strength {strength:.2}, {seconds:.2} s); {:.0} m² → {:.0} m², basin and shore re-carved. One undo step.",
+        l.name,
+        match mode {
+            lakes::ShapeMode::Expand => "expanded",
+            lakes::ShapeMode::Shrink => "shrunk",
+            lakes::ShapeMode::Smooth => "smoothed",
+        },
+        radius,
+        area_before,
+        lakes::signed_area(&poly).abs(),
+    );
+    d.history.commit(&d.store);
+    d.meta.dirty = true;
+    text(msg)
+}
+
+fn set_fish(In(args): In<Value>, mut d: WorldData) -> R {
+    let id = crate::mcp_tools::arg::<u32>(&args, "id")?;
+    let old = d
+        .water
+        .fish
+        .iter()
+        .find(|f| f.id == id)
+        .cloned()
+        .ok_or_else(|| format!("no fish school with id {id} (see water_list)"))?;
+    let species = match opt_str(&args, "species")? {
+        Some(s) => FishSpecies::parse(s).ok_or_else(|| {
+            format!(
+                "unknown fish species `{s}`; one of: {}",
+                FishSpecies::ALL.map(|f| f.id()).join(", ")
+            )
+        })?,
+        None => old.species,
+    };
+    let count = num_in(&args, "count", old.count as f32, 1.0, 60.0)?.round() as u32;
+    let radius = opt_num(&args, "radius")?.map(|r| r.clamp(3.0, 80.0));
+    if opt_str(&args, "species")?.is_none() && opt_num(&args, "count")?.is_none() && radius.is_none() {
+        return Err("nothing to change: give `species`, `count` and/or `radius`".into());
+    }
+    let center = Vec3::from_array(old.center);
+    let fresh = crate::fish::is_fresh(&d.water, &d.terrain, center.xz());
+    d.history.begin("Edit fish school");
+    d.history.touch_water(&d.water);
+    // a new swim area is fitted to the water round the school, as fish_add does
+    let fitted = radius.map(|r| {
+        FishSchool::new(id, species, center, count, r, &d.terrain, &d.water).radius
+    });
+    let f = d.water.fish.iter_mut().find(|f| f.id == id).unwrap();
+    f.species = species;
+    f.count = count;
+    if let Some(r) = fitted {
+        f.radius = r;
+    }
+    let hint = crate::fish::habitat_hint(species, fresh)
+        .map(|h| format!(" Note: {h}."))
+        .unwrap_or_default();
+    let msg = format!(
+        "Fish school {id}: {} {} swimming within {:.0} m of [{:.0}, {:.0}]. One undo step.{hint}",
+        f.count,
+        species.name(),
+        f.radius,
+        f.center[0],
+        f.center[2]
+    );
     d.water.selected = Some(WaterSel::Fish(id));
     d.history.commit(&d.store);
     d.meta.dirty = true;

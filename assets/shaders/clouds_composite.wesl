@@ -11,7 +11,8 @@ import bevy_pbr::render::{
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var cloud_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var cloud_smp: sampler;
-// x: cloud base altitude, y: nearest distance any cloud can be (near fade), z: earth radius
+// x: cloud base altitude, y: nearest distance any cloud can be (near fade), z: earth radius,
+// w: top altitude of the cloud sea (0: none)
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var<uniform> params: vec4<f32>;
 
 struct CompositeOut {
@@ -44,6 +45,23 @@ fn fragment(in: VertexOutput) -> CompositeOut {
         let b = r0 * d.y;
         let den = b + sqrt(max(b * b + k, 0.0));
         t_min = max(t_min, select(2.0e6, k / den, den > 1.0e-3));
+    }
+    // from above the cloud sea its clouds lie beyond its (curved) top: the nearest is the
+    // cumulus' or the sea's
+    if params.w != 0.0 && h > params.w {
+        let r0 = params.z + h;
+        let rs = params.z + params.w;
+        let k = (r0 - rs) * (r0 + rs);
+        let b = r0 * d.y;
+        let disc = b * b - k;
+        var t_sea = 2.0e6;
+        if b < 0.0 && disc > 0.0 {
+            t_sea = k / (-b + sqrt(disc));
+        }
+        t_min = min(t_min, max(params.y, t_sea));
+    } else if params.w != 0.0 {
+        // inside or under the sea: it is ground fog right round the eye
+        t_min = min(params.y, 2.0);
     }
     t_min = min(t_min, 2.0e6);
     let clip = view.clip_from_world * vec4<f32>(cam + d * t_min, 1.0);

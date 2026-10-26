@@ -78,6 +78,8 @@ fn sculpt_icon(t: SculptTool) -> &'static str {
         SculptTool::Hills => "Sunrise",
         SculptTool::Terrace => "ChartWaterfall",
         SculptTool::Erode => "Rainy",
+        SculptTool::Strata => "LayersThree",
+        SculptTool::Canyons => "Map",
     }
 }
 
@@ -90,6 +92,10 @@ pub(super) fn sculpt_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut) {
         let sel = SculptTool::ALL.iter().position(|t| *t == s.ed.sculpt_tool);
         if let Some(i) = tool_grid(ui, 4, &items, sel) {
             s.ed.sculpt_tool = SculptTool::ALL[i];
+            // canyonlands want a wide area
+            if s.ed.sculpt_tool == SculptTool::Canyons && s.ed.sculpt_brush.size < 300.0 {
+                s.ed.sculpt_brush.size = 700.0;
+            }
         }
         dim(
             ui,
@@ -97,13 +103,16 @@ pub(super) fn sculpt_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut) {
         );
         hint_small(ui, s.ed.sculpt_tool.hint());
     });
+    if s.ed.sculpt_tool == SculptTool::Canyons {
+        super::canyons_ui::canyons_section(ui, s);
+    }
     bigworld_ui::erosion_section(ui, s, out);
 }
 
 // ------------------------------------------------------------------ Paint
 
 /// The material categories as chips (library `category` ids), then the classic built-in textures.
-const CATS: [(&str, &str); 10] = [
+const CATS: [(&str, &str); 11] = [
     ("", "All"),
     ("grass", "Grass"),
     ("forest", "Forest floor"),
@@ -113,6 +122,7 @@ const CATS: [(&str, &str); 10] = [
     ("rock", "Rock"),
     ("snow", "Snow & ice"),
     ("road", "Paving & roads"),
+    ("city", "City & sci-fi"),
     ("classic", "Classic"),
 ];
 
@@ -184,6 +194,13 @@ pub(super) fn paint_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut, tex: &Ui
     let cur = s.ed.paint_layer as usize;
     let selected_id = s.layer_choices.get(cur).to_string();
     let filter = CATS[cat.min(CATS.len() - 1)].0;
+    if filter == "city" {
+        super::content_pack_note(
+            ui,
+            crate::content::CITY,
+            "These surfaces download the first time you paint with one",
+        );
+    }
     let mut items: Vec<(Option<egui::TextureId>, Color32, String, bool, GroundMat)> = vec![];
     if filter != "classic" {
         for m in s
@@ -429,7 +446,17 @@ pub(super) fn dock(ui: &mut Ui, s: &mut UiState, tex: &UiTextures) -> bool {
             let t = s.ed.sculpt_tool;
             dock_title(ui, sculpt_icon(t), t.name());
             dock_sep(ui);
+            if t == SculptTool::Canyons {
+                super::canyons_ui::canyons_dock(ui, s);
+                altitude(ui, s);
+                dock_sep(ui);
+                dock_hints(ui, &[("Click", "Raise canyonlands"), ("[ ]", "Area")]);
+                return true;
+            }
             brush_sliders(ui, s);
+            if t == SculptTool::Strata {
+                super::canyons_ui::strata_dock(ui, s);
+            }
             if t == SculptTool::Terrace {
                 slider_mini(
                     ui,
@@ -441,7 +468,11 @@ pub(super) fn dock(ui: &mut Ui, s: &mut UiState, tex: &UiTextures) -> bool {
             }
             altitude(ui, s);
             dock_sep(ui);
-            dock_hints(ui, &[("Click", "Sculpt"), ("⌥", "Invert"), ("[ ]", "Size")]);
+            if t == SculptTool::Strata {
+                dock_hints(ui, &[("Click", "Sculpt"), ("[ ]", "Size")]);
+            } else {
+                dock_hints(ui, &[("Click", "Sculpt"), ("⌥", "Invert"), ("[ ]", "Size")]);
+            }
             true
         }
         Tab::Paint => {

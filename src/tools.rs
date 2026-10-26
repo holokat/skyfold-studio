@@ -140,6 +140,11 @@ fn terrain_tools(
     time: Res<Time>,
     mut flatten_target: Local<f32>,
     bigworld: Res<crate::bigworld::BigWorld>,
+    mut canyon_bits: (
+        ResMut<ObjectStore>,
+        ResMut<WaterBodies>,
+        Option<Res<crate::objects::Library>>,
+    ),
 ) {
     if !(stroke.active || stroke.just_ended) {
         return;
@@ -249,6 +254,39 @@ fn terrain_tools(
                     &bigworld.erosion_params(),
                 ),
                 SculptTool::Erode => {}
+                SculptTool::Strata => crate::terrain::strata::strata(
+                    &mut terrain,
+                    &mut history,
+                    &args,
+                    &ed.strata,
+                    seed + 17,
+                ),
+                // one click raises canyonlands over the brush area (dragging does nothing more)
+                SculptTool::Canyons if stroke.just_started && d == 0 => {
+                    let (store, water, lib) = &mut canyon_bits;
+                    let p = ed.canyons;
+                    let lakes = p.lakes > 0.0;
+                    let made = crate::terrain::canyon_ops::canyonlands(
+                        &mut terrain,
+                        &mut history,
+                        store,
+                        lib.as_deref(),
+                        water,
+                        &p,
+                        seed + 19,
+                        Some((hit.xz(), b.size)),
+                        lakes,
+                    );
+                    if let Some((r, n)) = made {
+                        ed.toast(format!(
+                            "Raised canyonlands: plateaus up to {:.0} m, {} floor tiers{}",
+                            r.top - r.floor,
+                            r.tier_heights.len(),
+                            if n > 0 { format!(", {n} lakes") } else { String::new() }
+                        ));
+                    }
+                }
+                SculptTool::Canyons => {}
             },
             Tab::Paint => {
                 let erase = (ed.paint_tool == PaintTool::Erase) ^ inv;

@@ -1020,10 +1020,82 @@ def add_wind(meshes):
     return n
 
 
+def weapon_pipeline():
+    """Interchange pipeline asset for weapon GLBs (made once from the default assets pipeline):
+    every mesh as one skeletal mesh (the glTF's nodes become bones, so the moving parts and the
+    sockets — grip_r, grip_l, muzzle, aim, nock, trail_base / trail_tip — are bones to attach to)
+    and every glTF clip as an AnimSequence. Returns its path, or None."""
+    path = DEST + "/Weapons/WB_WeaponPipeline"
+    try:
+        if not unreal.EditorAssetLibrary.does_asset_exist(path):
+            unreal.EditorAssetLibrary.duplicate_asset("/Interchange/Pipelines/DefaultAssetsPipeline", path)
+        p = unreal.EditorAssetLibrary.load_asset(path)
+        cm = p.get_editor_property("common_meshes_properties")
+        cm.set_editor_property("force_all_mesh_as_type", unreal.InterchangeForceMeshType.IFMT_SKELETAL_MESH)
+        mp = p.get_editor_property("mesh_pipeline")
+        mp.set_editor_property("import_skeletal_meshes", True)
+        mp.set_editor_property("combine_skeletal_meshes_behavior", unreal.InterchangeCombineSkeletalMeshesBehavior.BY_SKELETON)
+        ap = p.get_editor_property("animation_pipeline")
+        ap.set_editor_property("import_animations", True)
+        unreal.EditorAssetLibrary.save_asset(path)
+        return path
+    except Exception as e:
+        warn("weapon import pipeline unavailable (%s): importing with the defaults" % e)
+        return None
+
+
+def import_weapon(file, dest):
+    """Imports a weapon GLB through Interchange with the weapon pipeline."""
+    path = weapon_pipeline()
+    if path is not None:
+        try:
+            params = unreal.ImportAssetParameters()
+            params.set_editor_property("is_automated", True)
+            params.set_editor_property("replace_existing", True)
+            params.set_editor_property("override_pipelines", [unreal.SoftObjectPath(path)])
+            src = unreal.InterchangeManager.create_source_data(file)
+            unreal.InterchangeManager.get_interchange_manager_scripted().import_asset(dest, src, params)
+            return
+        except Exception as e:
+            warn("weapon import with its pipeline failed (%s): importing with the defaults" % e)
+    import_files([file], dest)
+
+
+def place_weapons(m, folder):
+    """A weapon: a skeletal mesh with its clips, one SkeletalMeshActor per placed copy."""
+    dest = DEST + "/Weapons/" + m["safe_name"]
+    import_weapon(os.path.join(HERE, m["file"]), dest)
+    skels = assets_in(dest, unreal.SkeletalMesh)
+    anims = assets_in(dest, unreal.AnimSequence)
+    if not skels:
+        warn("no skeletal mesh imported from " + m["file"] + "; the weapon is not placed")
+        return 0
+    mesh = list(skels.values())[0]
+    log("%s: skeletal mesh %s, clips %s" % (m["name"], mesh.get_name(), sorted(anims.keys())))
+    data = m["instances"]
+    n = 0
+    for k in range(0, len(data) - 8, 9):
+        t = unreal.Transform(to_ue(data[k + 1 : k + 4]), to_ue_rotator(data[k + 4 : k + 8]), unreal.Vector(data[k + 8], data[k + 8], data[k + 8]))
+        a = spawn(unreal.SkeletalMeshActor, t.translation, t.rotation.rotator(), "WB %s" % m["safe_name"])
+        a.set_actor_scale3d(t.scale3d)
+        comp = a.skeletal_mesh_component
+        comp.set_skeletal_mesh_asset(mesh) if hasattr(comp, "set_skeletal_mesh_asset") else comp.set_skeletal_mesh(mesh)
+        try:
+            a.set_folder_path(folder + "/Weapons")
+        except Exception:
+            pass
+        a.tags = [unreal.Name("wb_weapon")]
+        n += 1
+    return n
+
+
 def place_models(models=None, folder="WorldBuilder/Instances"):
     total = 0
     for m in DATA["models"] if models is None else models:
         if not m["instances"]:
+            continue
+        if m.get("weapon"):
+            total += place_weapons(m, folder)
             continue
         dest = DEST + "/Models/" + m["safe_name"]
         import_files([os.path.join(HERE, m["file"])], dest)
@@ -1666,6 +1738,40 @@ def build_fires(fires, folder="WorldBuilder/Fires", overworld=True):
     return n
 
 
+def build_fixture_lights(lights, folder="WorldBuilder/Lights"):
+    """The placed models' light fixtures (downlights, lanterns, street lights): a point or spot
+    light each, in the fire lights' units (`engine_lumens` x LIGHT_SCALE); street and path lights
+    (`night_only`) at the exported hour's share (`on`)."""
+    n = 0
+    for l in lights:
+        share = float(l.get("on", 1.0))
+        if share <= 0.0:
+            continue
+        spot = bool(l.get("spot"))
+        a = spawn(unreal.SpotLight if spot else unreal.PointLight, to_ue(l["position"]), None, "WB Fixture Light %d" % n)
+        if a is None:
+            continue
+        try:
+            c = a.spot_light_component if spot else a.point_light_component
+            c.set_editor_property("intensity_units", unreal.LightUnits.LUMENS)
+            c.set_intensity(l["engine_lumens"] * LIGHT_SCALE * share)
+            c.set_attenuation_radius(l["range"] * 100.0)
+            cl = l["color_linear"]
+            c.set_light_color(unreal.LinearColor(cl[0], cl[1], cl[2], 1.0))
+            c.set_cast_shadows(bool(l.get("shadows", False)))
+            if spot:
+                d = to_ue(l["direction"])
+                a.set_actor_rotation(unreal.MathLibrary.make_rot_from_x(d), False)
+                half = float(l.get("angle_deg", 70.0)) * 0.5
+                c.set_outer_cone_angle(half)
+                c.set_inner_cone_angle(half * 0.7)
+            a.set_folder_path(folder)
+            n += 1
+        except Exception as e:
+            warn("fixture light %d: %s" % (n, e))
+    return n
+
+
 def build_markers():
     n = 0
     for m in DATA["markers"]:
@@ -1942,6 +2048,9 @@ def main():
         fires = build_fires(DATA.get("fires", []))
         if fires:
             log("%d fires" % fires)
+        fixtures = build_fixture_lights(DATA.get("fixture_lights", []))
+        if fixtures:
+            log("%d fixture lights" % fixtures)
         set_game_mode()
         task.enter_progress_frame(1, "Markers")
         markers = build_markers()

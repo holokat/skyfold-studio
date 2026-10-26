@@ -95,6 +95,13 @@ Without preset, assets or category, thin / remove act on all nature. Placement f
         run: |w, a| run(w, appearance, a),
     });
     app.mcp_tool(McpTool {
+        name: "alien_flora",
+        description: "Alien flora, saved with the world (off by default): the green of every tree, bush, plant, ground-cover scan and blade of grass, near and far, turns to another hue, keeping the photoscans' texture and light (bark, flowers, straw and rock keep their colours). No new assets, no frame cost to speak of. \
+`preset` crimson (red alien scrub), scarlet, magenta, violet, teal or amber turns it on with that colour; or set `enable`, `hue` (degrees), `amount` and `saturation`. `mode` makes the plants something other than recoloured leaves (and turns it on): recolour (default), charred (burnt grey-black, bark blackened), frosted (pale icy with a glassy sheen), glow (recoloured and glowing softly in the hue, readable at night), petrified (stone grey-ochre, the whole plant); hue and saturation tint the mode. One undo step. With no arguments, reports the setting.",
+        input_schema: crate::nature::alien::AlienFlora::mcp_schema,
+        run: |w, a| run(w, alien_flora, a),
+    });
+    app.mcp_tool(McpTool {
         name: "ground_cover",
         description: "Read or set the ground cover, saved with the world: the dense knee-high layer round the viewer (realistic art style). \
 `undergrowth` 0..2 (1 = a full woodland floor): ferns and broad-leaved herbs (photoscanned weed rosettes, nettles, leafy stalks) growing in clumps under tree crowns; \
@@ -256,6 +263,16 @@ fn amounts(In(args): In<Value>, mut d: WorldData) -> R {
         a.berries * 100.0,
         a.debris * 100.0
     ))
+}
+
+fn alien_flora(In(args): In<Value>, mut d: WorldData) -> R {
+    let mut after = d.appearance.sanitized();
+    if args.as_object().is_some_and(|o| !o.is_empty()) {
+        after.alien.apply_mcp(&args)?;
+        crate::nature::set_appearance(&mut d.appearance, &mut d.history, after);
+        d.meta.dirty = true;
+    }
+    text(after.alien.describe())
 }
 
 fn appearance(In(args): In<Value>, mut d: WorldData) -> R {

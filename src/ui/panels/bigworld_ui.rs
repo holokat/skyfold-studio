@@ -438,6 +438,22 @@ pub fn new_world_contents(ui: &mut egui::Ui, s: &mut UiState, out: &mut UiOut) -
     }
     ui.add_space(8.0);
     section(ui, "Or start from a blank world");
+    // fantasy (today's worlds) or a whole sci-fi template on top of the land
+    ui.label(
+        RichText::new("World type")
+            .font(FontId::new(13.0, semibold()))
+            .color(TEXT),
+    );
+    segmented(
+        ui,
+        &mut s.world_kind.pick,
+        &[
+            (crate::world_kind::WorldKind::Fantasy, "Fantasy"),
+            (crate::world_kind::WorldKind::SciFi, "Sci-Fi"),
+        ],
+    );
+    dim(ui, s.world_kind.pick.blurb());
+    ui.add_space(6.0);
     dim(
         ui,
         "Choose a starting point. You can paint continents and sculpt everything afterwards.",
@@ -577,6 +593,11 @@ pub fn new_world_contents(ui: &mut egui::Ui, s: &mut UiState, out: &mut UiOut) -
         }
         let biomes = s.ed.new_world_biomes.then_some(s.ed.new_world_climate);
         let cell = s.bigworld.cell;
+        if s.world_kind.pick != crate::world_kind::WorldKind::Fantasy {
+            let (kind, generation) = (s.world_kind.pick, s.terrain.generation);
+            s.world_kind
+                .after_new_world(kind, generation, s.ed.new_world_seed);
+        }
         match s.bigworld.new_shape {
             NewShape::Continent(_) => s.bigworld.requests.push(Request::Generate {
                 new_world: Some((s.ed.new_world_size, cell)),

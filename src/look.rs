@@ -24,10 +24,12 @@ use bevy::post_process::effect_stack::{ChromaticAberration, Vignette};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::camera::MainCamera;
 use crate::haze::{self, HazeState};
-use crate::look_post::{LookPost, LookPostPlugin};
+use crate::grade::{Lut3, UserLut};
+use crate::look_post::{GradeLut, LookPost, LookPostPlugin};
 use crate::sky::{Lighting, SkyState};
 use crate::terrain::Terrain;
 use crate::world::{Mood, ZoneLight, Zones};
@@ -753,6 +755,11 @@ pub struct Look {
     pub custom: Option<LookParams>,
     /// The user's saved style (`look_styles`) these parameters came from, by name.
     pub saved: Option<String>,
+    /// The user's own LUT (Style › Fine-tune › Pro grading › LUT), applied after the grade. It
+    /// stays when another style is picked; zones with their own art style fade it out.
+    pub lut: Option<UserLut>,
+    /// How much of `lut` shows (0..1).
+    pub lut_strength: f32,
 }
 
 impl Default for Look {
@@ -762,6 +769,8 @@ impl Default for Look {
             strength: 1.0,
             custom: None,
             saved: None,
+            lut: None,
+            lut_strength: 1.0,
         }
     }
 }
@@ -778,6 +787,15 @@ impl Look {
         self.custom = None;
         self.saved = None;
     }
+    /// The user LUT and how strongly it shows (the look's strength folded in).
+    pub fn user_lut(&self) -> Option<(&Lut3, f32)> {
+        self.lut.as_ref().map(|l| {
+            (
+                &*l.lut,
+                (self.lut_strength * self.strength).clamp(0.0, 1.0),
+            )
+        })
+    }
 }
 
 /// The look in effect this frame, for the systems that apply it.
@@ -791,6 +809,9 @@ pub struct LookState {
     pub haze: HazeState,
     /// Holding `\` shows Natural for a before/after comparison (the zone's light stays).
     pub comparing: bool,
+    /// The user LUT and its strength this frame (faded out in zones with their own art style,
+    /// off while comparing).
+    pub lut: Option<(Arc<Lut3>, f32)>,
 }
 
 /// Seconds a zone's lighting & style takes to blend in or out at its border.
@@ -846,9 +867,11 @@ impl Plugin for LookPlugin {
                 Update,
                 (
                     update_look_state.before(crate::sky::SkySystems),
+                    bake_grade_lut.after(update_look_state),
                     apply_camera_look.after(crate::sky::SkySystems),
                 ),
-            );
+            )
+            .add_systems(PreUpdate, run_ui_calls);
     }
 }
 
@@ -931,20 +954,114 @@ fn update_look_state(
     fade.current = fade.from.lerp(&target, k);
     let z = fade.current;
     let params = world.with_zone(Some((&z.style, z.style_w)), &z.light);
+    // a zone's own art style replaces the world's colours, its LUT included
+    let lut = lighting
+        .look
+        .lut
+        .as_ref()
+        .filter(|_| !comparing)
+        .map(|l| {
+            let s = (lighting.look.lut_strength * lighting.look.strength).clamp(0.0, 1.0);
+            (l.lut.clone(), s * (1.0 - z.style_w.clamp(0.0, 1.0)))
+        })
+        .filter(|(_, s)| *s > 1e-3);
+    let lut_changed = match (&state.lut, &lut) {
+        (None, None) => false,
+        (Some((a, sa)), Some((b, sb))) => !Arc::ptr_eq(a, b) || (sa - sb).abs() > 1e-4,
+        _ => true,
+    };
     if state.params != params
         || state.comparing != comparing
         || state.zone != z.light
         || state.haze != z.haze
+        || lut_changed
     {
         state.params = params;
         state.zone = z.light;
         state.haze = z.haze;
         state.comparing = comparing;
+        state.lut = lut;
     }
 }
 
 /// The least sharpening under temporal anti-aliasing.
 const TAA_SHARPEN: f32 = 0.3;
+
+/// Tool calls the Style tab asks for that need the whole world (the round-trip capture takes a
+/// screenshot): run at the start of the next frame, their outcome shown as a toast.
+static UI_CALLS: std::sync::Mutex<Vec<(&'static str, serde_json::Value)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn ui_call(name: &'static str, args: serde_json::Value) {
+    UI_CALLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((name, args));
+}
+
+fn run_ui_calls(world: &mut World) {
+    use crate::mcp_tools::{McpContent, McpDeferred};
+    let calls = std::mem::take(&mut *UI_CALLS.lock().unwrap_or_else(|e| e.into_inner()));
+    fn toast(w: &mut World, out: Result<Vec<McpContent>, String>) -> Option<McpDeferred> {
+        let mut msg = None;
+        let mut later = None;
+        match out {
+            Ok(v) => {
+                for c in v {
+                    match c {
+                        McpContent::Text(t) => msg = Some(t),
+                        McpContent::Deferred(d) => later = Some(d),
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => msg = Some(e),
+        }
+        if let Some(m) = msg {
+            w.resource_mut::<crate::editor::Editor>().toast(m);
+        }
+        later
+    }
+    for (name, args) in calls {
+        let out = crate::mcp::call_tool(world, name, args);
+        if let Some(McpDeferred(mut poll)) = toast(world, out) {
+            let wrapped = McpContent::deferred(move |w| {
+                let done = poll(w)?;
+                let _ = toast(w, done);
+                Some(Ok(vec![]))
+            });
+            if let McpContent::Deferred(d) = wrapped {
+                crate::mcp::log_deferred(world, name, d);
+            }
+        }
+    }
+}
+
+/// Bakes the grade (and the user LUT) into the style pass's 3D LUT when either changed.
+fn bake_grade_lut(
+    look: Res<LookState>,
+    grade: Res<GradeLut>,
+    mut images: ResMut<Assets<Image>>,
+    mut last: Local<Option<([f32; 10], u64, f32)>>,
+) {
+    let (hash, strength) = look
+        .lut
+        .as_ref()
+        .map_or((0, 0.0), |(l, s)| (Arc::as_ptr(l) as u64, *s));
+    let key = (crate::grade::runtime_key(&look.params), hash, strength);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let t = std::time::Instant::now();
+    let lut = crate::grade::bake_runtime(
+        &look.params,
+        look.lut.as_ref().map(|(l, s)| (&**l, *s)),
+        crate::grade::RUNTIME_SIZE,
+    );
+    let _ = images.insert(grade.0.id(), crate::look_post::lut_image(&lut));
+    debug!("grade LUT baked in {:.2} ms", t.elapsed().as_secs_f32() * 1000.0);
+}
 
 #[allow(clippy::type_complexity)]
 fn apply_camera_look(
@@ -1054,7 +1171,7 @@ fn apply_camera_look(
         } else {
             0.0
         };
-        if !p.needs_post_pass(contrast) && forest_strength <= 0.001 {
+        if !p.needs_post_pass(contrast) && look.lut.is_none() && forest_strength <= 0.001 {
             if post.is_some() {
                 commands.entity(e).remove::<LookPost>();
             }
@@ -1089,8 +1206,6 @@ fn apply_camera_look(
         };
         let u = LookPost {
             paint: Vec4::new(p.painterly, painterly_px, p.outline, p.grain),
-            shadow: Vec3::from(p.shadow_tint).extend(p.lift),
-            highlight: Vec3::from(p.highlight_tint).extend(p.vibrance),
             sky: Vec4::new(
                 st.red,
                 st.green,
@@ -1101,7 +1216,7 @@ fn apply_camera_look(
             misc: Vec4::new(
                 near,
                 time.elapsed_secs() % 1000.0,
-                p.foliage_hue,
+                0.0,
                 p.haze_distance.max(10.0),
             ),
             cam_right: gt.right().as_vec3().extend(th * aspect),

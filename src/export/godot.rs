@@ -296,6 +296,9 @@ fn model_entry_in(
         "physics": super::collision::physics_json(a.surface),
         "bin": format!("res://{file}"),
         "blocks": blocks,
+        // weapons: each placed copy is an instance of the GLB's scene (its AnimationPlayer
+        // plays fire / draw / ignite; its socket nodes hold it), not a MultiMesh
+        "scene": m.weapon,
     }))
 }
 
@@ -643,7 +646,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     let lut_n = look::LUT_SIZE;
     ctx.write(
         &format!("{DATA}/look/grade_lut.png"),
-        &core::png_rgb(&look::grade_lut(&s.look)),
+        &core::png_rgb(&look::grade_lut(&s.look, s.lighting.look.user_lut())),
     )?;
     ctx.write(
         &format!("{DATA}/look/grade_lut.png.import"),
@@ -1766,6 +1769,8 @@ fn world_scene(
     }
     // the placed objects' fires (braziers, torch stands, fire pits, campfires): real fire and light
     fire_nodes(&mut sc, &s.fires, Some(0.15 + 0.85 * light.night));
+    // their light fixtures (downlights, lanterns, street lights): Omni / Spot lights
+    fixture_light_nodes(&mut sc, &s.lights, light.night);
     if nav_region {
         let nav = sc.ext("NavigationMesh", &res("navigation/navmesh.tres"));
         sc.node(
@@ -2379,6 +2384,43 @@ fn fire_nodes(sc: &mut Scene, fires: &[crate::flames::Fire], lights: Option<f32>
                 &format!("[node name=\"{id}_{k}_light\" type=\"OmniLight3D\" parent=\"Fires\"]"),
                 &format!("transform = {}\nlight_color = Color(1, 0.58, 0.26, 1)\nlight_energy = {}\nomni_range = {}\nscript = {flicker}\nbase_energy = {}\namount = 0.4\nseed = {k}", transform(Mat3::IDENTITY, p), f(energy), f(num(&x["light_range"])), f(energy)),
             );
+        }
+    }
+}
+
+/// The placed objects' light fixtures (`crate::fixture_lights`) under a `Lights` node: an
+/// OmniLight3D or a SpotLight3D each, as strong as the editor's fire lights for the same engine
+/// lumens; street and path lights (`night_only`) only when the exported hour is dusk or night.
+fn fixture_light_nodes(sc: &mut Scene, lights: &[crate::fixture_lights::FixtureLight], night: f32) {
+    let list: Vec<_> = lights
+        .iter()
+        .filter(|l| crate::fixture_lights::on_share(l.night_only, night, false) > 0.0)
+        .collect();
+    if list.is_empty() {
+        return;
+    }
+    sc.node("[node name=\"Lights\" type=\"Node3D\" parent=\".\"]", "");
+    for (k, l) in list.iter().enumerate() {
+        let share = crate::fixture_lights::on_share(l.night_only, night, false);
+        let lm = l.lumens * crate::fixture_lights::LUMEN_SCALE;
+        let energy = ((lm / 300_000.0).sqrt() * 1.5).clamp(0.05, 6.0) * share;
+        let color = format!("Color({}, {}, {}, 1)", f(l.color[0]), f(l.color[1]), f(l.color[2]));
+        let shadow = if l.shadows { 1 } else { 0 };
+        match l.spot {
+            Some((dir, angle)) => {
+                let up = if dir.y.abs() > 0.98 { Vec3::Z } else { Vec3::Y };
+                let rot = Transform::IDENTITY.looking_to(dir, up).rotation;
+                sc.node(
+                    &format!("[node name=\"spot_{k}\" type=\"SpotLight3D\" parent=\"Lights\"]"),
+                    &format!("transform = {}\nlight_color = {color}\nlight_energy = {}\nshadow_enabled = {}\nspot_range = {}\nspot_angle = {}", transform(Mat3::from_quat(rot), l.pos), f(energy), if shadow == 1 { "true" } else { "false" }, f(l.range), f(angle * 0.5)),
+                );
+            }
+            None => {
+                sc.node(
+                    &format!("[node name=\"light_{k}\" type=\"OmniLight3D\" parent=\"Lights\"]"),
+                    &format!("transform = {}\nlight_color = {color}\nlight_energy = {}\nshadow_enabled = {}\nomni_range = {}", transform(Mat3::IDENTITY, l.pos), f(energy), if shadow == 1 { "true" } else { "false" }, f(l.range)),
+                );
+            }
         }
     }
 }

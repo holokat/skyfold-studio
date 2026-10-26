@@ -180,7 +180,8 @@ fn stream(
             let Some(e) = lib.get(&o.asset) else {
                 return true;
             };
-            o.translation().distance(p) > stream_dist(e, g) + DESPAWN_MARGIN
+            o.translation().distance(p)
+                > stream_dist(e, g, crate::objects::size_band(e, o.scale)) + DESPAWN_MARGIN
         })
         .collect();
     for id in gone {
@@ -219,12 +220,17 @@ fn retune(
 ) {
     let mut respawn = vec![];
     for (id, e) in &store.entities {
-        let Some(entry) = store.items.get(id).and_then(|o| lib.get(&o.asset)) else {
+        let Some((o, entry)) = store
+            .items
+            .get(id)
+            .and_then(|o| Some((o, lib.get(&o.asset)?)))
+        else {
             continue;
         };
+        let size = crate::objects::size_band(entry, o.scale);
         let (Some(before), Some(after)) = (
-            crate::objects::lod_ranges(entry, old),
-            crate::objects::lod_ranges(entry, new),
+            crate::objects::lod_ranges(entry, old, size),
+            crate::objects::lod_ranges(entry, new, size),
         ) else {
             continue;
         };
@@ -264,7 +270,7 @@ fn spawn_slice(st: &mut Streamer, store: &mut ObjectStore, lib: &Library, g: &Gr
             };
             let Some(e) = lib.get(&o.asset) else { continue };
             let d = o.translation().distance(p);
-            if d <= stream_dist(e, g) + SPAWN_MARGIN {
+            if d <= stream_dist(e, g, crate::objects::size_band(e, o.scale)) + SPAWN_MARGIN {
                 want.push((d, *id));
             }
         }

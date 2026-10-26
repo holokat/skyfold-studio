@@ -14,14 +14,14 @@ use crate::terrain::textures::{TerrainLayerChoices, TerrainLibrary};
 pub fn register(app: &mut App) {
     app.mcp_tool(McpTool {
         name: "materials_list",
-        description: "The photoscanned CC0 material libraries: ground textures for the paint layers (id, name, category, average colour and the colour it reads as from afar, such as dark green, khaki or grey) with each layer's current choice, and building materials (wood, metal, stone, fabric, roofs…, with their colours too) with each building part's current choice and the categories it accepts. Also the automatic ground style values.",
+        description: "The photoscanned CC0 material libraries: ground textures for the paint layers (grass … paving, plus city: asphalt, slate walkways, pavers, terrazzo, deck plating; id, name, category, average colour and the colour it reads as from afar, such as dark green, khaki or grey) with each layer's current choice, and building materials (wood, metal, stone, fabric, roofs, concrete, plastic, tech panels, facades…, with their colours too) with each building part's current choice and the categories it accepts. Also the automatic ground style values. Entries marked downloads_when_used are in a free content pack this computer hasn't downloaded yet (the city & sci-fi surfaces): choosing one with materials_set downloads it in the background (content_packs shows progress) and it shows once installed.",
         input_schema: || json!({ "type": "object", "properties": {} }),
         run: |w, a| run(w, list, a),
     });
     app.mcp_tool(McpTool {
         name: "materials_set",
         description: "Choose materials (Paint tab › layer texture, Objects tab › Building materials) and the automatic ground style. `ground`: {layer: texture id} repaints everywhere that layer shows (\"\" = built-in; footstep sounds follow). \
-`buildings`: {part: material id} (\"\" = default) for posts, planks, roofs… of every structure. `style`: snow_line (m above sea), snow_blend (m), rock_slope (0.15 rock only on cliffs … 0.9 rock on gentle slopes), beach_height (m), dryness (0..1 dry grass). Settings saved with the world (not undo steps); ids from materials_list.",
+`buildings`: {part: material id} (\"\" = default) for posts, planks, roofs… of every structure. `style`: snow_line (m above sea), snow_blend (m), rock_slope (0.15 rock only on cliffs … 0.9 rock on gentle slopes), beach_height (m), dryness (0..1 dry grass), wet_gullies (0..1 damp soil, mud and stream gravel where rain gathers). `footsteps`: {layer: surface} overrides the footstep sound a ground layer makes (Audio › Footsteps by ground; picking a texture sets it to the texture's own). Settings saved with the world (not undo steps); ids from materials_list.",
         input_schema: || {
             let mut ground = Map::new();
             for l in Layer::ALL {
@@ -43,9 +43,11 @@ pub fn register(app: &mut App) {
                             "snow_blend": { "type": "number", "minimum": 2, "maximum": 150 },
                             "rock_slope": { "type": "number", "minimum": 0.15, "maximum": 0.9 },
                             "beach_height": { "type": "number", "minimum": 0, "maximum": 12 },
-                            "dryness": { "type": "number", "minimum": 0, "maximum": 1 }
+                            "dryness": { "type": "number", "minimum": 0, "maximum": 1 },
+                            "wet_gullies": { "type": "number", "minimum": 0, "maximum": 1 }
                         }
-                    }
+                    },
+                    "footsteps": { "type": "object", "description": "ground layer → footstep surface", "additionalProperties": { "type": "string", "enum": Surface::ALL.iter().map(|x| snake(&format!("{x:?}"))).collect::<Vec<_>>() } }
                 }
             })
         },
@@ -60,23 +62,21 @@ fn list(
     slib: Option<Res<SurfaceLibrary>>,
     parts: Res<SurfaceChoices>,
     t: Res<Terrain>,
+    ed: Res<crate::editor::Editor>,
 ) -> R {
     let mut want: Vec<std::path::PathBuf> = tlib
         .materials
         .iter()
         .map(|m| {
-            crate::terrain::textures::library_dir()
-                .join(&m.id)
-                .join("albedo.png")
+            crate::terrain::textures::library_file(&m.id, "albedo.png")
         })
         .collect();
-    let building_dir = std::path::PathBuf::from(crate::assets_path()).join("textures/materials");
     if let Some(sl) = &slib {
         want.extend(
             sl.entries
                 .iter()
                 .filter(|e| e.tiling)
-                .map(|e| building_dir.join(&e.id).join("albedo.png")),
+                .map(|e| crate::surfaces::item_file(&e.id, "albedo.png")),
         );
     }
     let colors = mean_colors(&want);
@@ -97,10 +97,11 @@ fn list(
         .iter()
         .map(|m| {
             let mut v = json!({ "id": m.id, "name": m.name, "category": m.category });
+            if !crate::terrain::textures::library_available(&m.id) {
+                v["downloads_when_used"] = json!(true);
+            }
             color(
-                crate::terrain::textures::library_dir()
-                    .join(&m.id)
-                    .join("albedo.png"),
+                crate::terrain::textures::library_file(&m.id, "albedo.png"),
                 &mut v,
             );
             v
@@ -110,6 +111,13 @@ fn list(
         .iter()
         .map(|l| (snake(&format!("{l:?}")), json!(layers.get(*l as usize))))
         .collect();
+    let footsteps: Map<String, Value> = Layer::ALL
+        .iter()
+        .map(|l| {
+            let s = ed.layer_surface[*l as usize];
+            (snake(&format!("{l:?}")), json!(snake(&format!("{s:?}"))))
+        })
+        .collect();
     let building: Vec<Value> = slib
         .as_ref()
         .map(|s| {
@@ -118,7 +126,10 @@ fn list(
                 .filter(|e| e.tiling)
                 .map(|e| {
                     let mut v = json!({ "id": e.id, "name": e.name, "category": e.category });
-                    color(building_dir.join(&e.id).join("albedo.png"), &mut v);
+                    if !crate::surfaces::available(&e.id) {
+                        v["downloads_when_used"] = json!(true);
+                    }
+                    color(crate::surfaces::item_file(&e.id, "albedo.png"), &mut v);
                     v
                 })
                 .collect()
@@ -139,7 +150,8 @@ fn list(
         "ground_layers": layer_now,
         "building_materials": building,
         "building_parts": parts_now,
-        "style": { "snow_line": st.snow_line, "snow_blend": st.snow_blend, "rock_slope": st.rock_slope, "beach_height": st.beach_height, "dryness": st.dryness },
+        "style": { "snow_line": st.snow_line, "snow_blend": st.snow_blend, "rock_slope": st.rock_slope, "beach_height": st.beach_height, "dryness": st.dryness, "wet_gullies": st.wet_gullies },
+        "footsteps": footsteps,
         "note": "\"\" means the built-in / default material; color_srgb is each texture's average colour (what it reads as from a distance)",
     }))
 }
@@ -171,6 +183,19 @@ fn set(
                 ));
             }
             ground.push((layer, id.to_string(), mat.map(|m| m.surface.clone())));
+        }
+    }
+    let mut footsteps = vec![];
+    if let Some(Value::Object(m)) = args.get("footsteps") {
+        for (k, v) in m {
+            let layer = pick(&Layer::ALL, k, "ground layer", Layer::name)?;
+            let name = v.as_str().unwrap_or_default();
+            let surf = Surface::ALL
+                .iter()
+                .find(|x| snake(&format!("{x:?}")) == snake(name) || x.sound_stem() == name)
+                .copied()
+                .ok_or_else(|| format!("footsteps.{k}: unknown surface `{name}`"))?;
+            footsteps.push((layer, surf));
         }
     }
     let mut building = vec![];
@@ -222,6 +247,7 @@ fn set(
             ("rock_slope", &mut st.rock_slope, 0.15, 0.9),
             ("beach_height", &mut st.beach_height, 0.0, 12.0),
             ("dryness", &mut st.dryness, 0.0, 1.0),
+            ("wet_gullies", &mut st.wet_gullies, 0.0, 1.0),
         ] {
             if let Some(v) = opt_num(s, k)? {
                 *f = v.clamp(lo, hi);
@@ -229,8 +255,12 @@ fn set(
             }
         }
     }
+    for (layer, surf) in footsteps {
+        ed.layer_surface[layer as usize] = surf;
+        done.push(format!("{} footsteps: {}", layer.name(), surf.sound_stem()));
+    }
     if done.is_empty() {
-        return Err("nothing to change: give `ground`, `buildings` or `style`".into());
+        return Err("nothing to change: give `ground`, `buildings`, `style` or `footsteps`".into());
     }
     meta.dirty = true;
     text(format!("{}.", done.join("; ")))

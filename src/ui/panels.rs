@@ -24,6 +24,7 @@ mod roads_tab;
 
 mod nature_tab;
 mod objects_tab;
+mod canyons_ui;
 mod terrain_tab;
 mod zones_tab;
 
@@ -264,8 +265,8 @@ fn left_tab(ui: &mut egui::Ui, s: &mut UiState, out: &mut UiOut, tex: &UiTexture
         Tab::Dungeons => crate::dungeons::ui::dungeons_left(ui, s),
         Tab::DungeonLook => crate::dungeons::ui::look_left(ui, s),
         Tab::DungeonLights => crate::dungeons::ui::lights_left(ui, s),
-        // (its own big window: crate::characters::view)
-        Tab::Characters => {}
+        // (their own big windows: crate::characters::view, crate::images::view)
+        Tab::Characters | Tab::Images => {}
     }
 }
 
@@ -394,7 +395,7 @@ pub fn right_panel(
         Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => {
             crate::dungeons::ui::dungeons_inspector(s)
         }
-        Tab::Characters => None,
+        Tab::Characters | Tab::Images => None,
     };
     let Some((title, header)) = hook else {
         return false;
@@ -417,7 +418,7 @@ pub fn right_panel(
         Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => {
             crate::dungeons::ui::dungeons_right(ui, s)
         }
-        Tab::Characters => {}
+        Tab::Characters | Tab::Images => {}
     });
     true
 }
@@ -619,6 +620,8 @@ pub fn nature_dials(ui: &mut egui::Ui, s: &mut UiState) {
         .on_hover_text("How much meadow grass still grows under the crowns, where the undergrowth takes over.");
     slider_row(ui, "Clumping", &mut g.clumping, 0.0..=1.0, pct)
         .on_hover_text("0% spreads the cover evenly; 100% grows it in dense patches with bare ground between them.");
+    ui.add_space(6.0);
+    crate::nature::alien::controls(ui, &mut appearance.alien);
     if appearance != before_appearance {
         crate::nature::set_appearance(&mut s.appearance, &mut s.history, appearance);
         s.meta.dirty = true;
@@ -731,9 +734,7 @@ fn mat_swatch(ctx: &egui::Context, m: &GroundMat) -> Option<egui::TextureId> {
     let (key, path) = match m {
         GroundMat::Library(id) => (
             id.clone(),
-            crate::terrain::textures::library_dir()
-                .join(id)
-                .join("swatch.png"),
+            crate::terrain::textures::library_file(id, "swatch.png"),
         ),
         GroundMat::BuiltIn(i) => (
             format!("builtin:{i}"),
@@ -1272,6 +1273,14 @@ fn lighting_left(ui: &mut egui::Ui, s: &mut UiState) {
         );
         toggle(ui, &mut s.lighting.stars, "Stars at night");
     });
+    section_fold(ui, "light_bodies", "Sky bodies", "", |ui| {
+        // new bodies go where the camera looks
+        let eye = crate::camera::OrbitCamera::offset_of(s.orbit.yaw, 0.0, 1.0);
+        let bearing = crate::mcp_tools::dir_bearing(Vec2::new(-eye.x, -eye.z));
+        if crate::celestial::ui::sky_bodies(ui, &mut s.lighting.celestial, bearing) {
+            s.meta.dirty = true;
+        }
+    });
 }
 
 /// World wind: speed, direction, gustiness (zones can override the speed).
@@ -1528,6 +1537,9 @@ fn weather_left(ui: &mut egui::Ui, s: &mut UiState) {
         slider_row(ui, "Shadows", &mut s.lighting.cloud_shadows, 0.0..=1.0, pct);
         hint_small(ui, "Zones can set their own cloud cover.");
     });
+    section_fold(ui, "weather_cloud_sea", "Cloud sea", "", |ui| {
+        crate::clouds::sea::controls(ui, &mut s.lighting.cloud_sea)
+    });
 }
 
 /// The weather where the camera is, and why (the same order as `sky::update_weather`: the
@@ -1749,12 +1761,38 @@ fn style_left(ui: &mut egui::Ui, s: &mut UiState) {
         ui,
         "style_look",
         "Look",
-        &LookPreset::ALL.len().to_string(),
+        &(LookPreset::ALL.len() + crate::world_kind::looks::ScifiLook::ALL.len()).to_string(),
         |ui| {
             hint_small(
                 ui,
                 "Switch the whole world's look in one click. Styles hold through the day/night cycle and weather; zone moods still tint their zones on top.",
             );
+            // Fantasy looks or Sci-Fi looks (opens on the world's own kind)
+            let tab_id = ui.make_persistent_id("style_look_tab");
+            let scifi_world = s.meta.kind == crate::world_kind::WorldKind::SciFi
+                || s.lighting.scifi_look.is_some();
+            let mut tab = ui
+                .ctx()
+                .data(|d| d.get_temp::<crate::world_kind::WorldKind>(tab_id))
+                .unwrap_or(if scifi_world {
+                    crate::world_kind::WorldKind::SciFi
+                } else {
+                    crate::world_kind::WorldKind::Fantasy
+                });
+            segmented(
+                ui,
+                &mut tab,
+                &[
+                    (crate::world_kind::WorldKind::Fantasy, "Fantasy"),
+                    (crate::world_kind::WorldKind::SciFi, "Sci-Fi"),
+                ],
+            );
+            ui.ctx().data_mut(|d| d.insert_temp(tab_id, tab));
+            ui.add_space(4.0);
+            if tab == crate::world_kind::WorldKind::SciFi {
+                scifi_looks(ui, s);
+                return;
+            }
             let ctx = ui.ctx().clone();
             let all = LookPreset::ALL;
             let w = ((ui.available_width() - 5.0) / 2.0).floor();
@@ -1765,7 +1803,7 @@ fn style_left(ui: &mut egui::Ui, s: &mut UiState) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     for p in row {
-                        let sel = cur == *p;
+                        let sel = cur == *p && s.lighting.scifi_look.is_none();
                         let sub = if sel && edited {
                             format!("{} · edited", p.inspired_by())
                         } else {
@@ -1788,6 +1826,7 @@ fn style_left(ui: &mut egui::Ui, s: &mut UiState) {
             }
             if let Some(p) = pick {
                 s.lighting.look.select(p);
+                s.lighting.scifi_look = None;
                 // scene templates bring their time of day, sky and haze along
                 if let Some((hour, clouds, haze)) = p.scene() {
                     s.lighting.hour = hour;
@@ -1807,6 +1846,75 @@ fn style_left(ui: &mut egui::Ui, s: &mut UiState) {
         },
     );
     section_fold(ui, "style_mine", "My styles", "", |ui| my_styles(ui, s));
+}
+
+/// Style › Look › Sci-Fi: whole alien moods (`world_kind::looks`): grade, time, clouds, sky
+/// bodies and the plants' colour in one click.
+fn scifi_looks(ui: &mut egui::Ui, s: &mut UiState) {
+    use crate::world_kind::looks::ScifiLook;
+    let ctx = ui.ctx().clone();
+    let w = ((ui.available_width() - 5.0) / 2.0).floor();
+    let edited = s.lighting.look.custom != s.lighting.scifi_look.map(|l| l.settings_grade());
+    let mut pick = None;
+    for row in ScifiLook::ALL.chunks(2) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            for l in row {
+                let sel = s.lighting.scifi_look == Some(*l);
+                let sub = if sel && edited {
+                    format!("{} · edited", l.blurb())
+                } else {
+                    l.blurb().to_string()
+                };
+                let r = image_card(
+                    ui,
+                    crate::ui::pictures::get(&ctx, &l.picture()),
+                    l.name(),
+                    &sub,
+                    sel,
+                    vec2(w, w * 0.625),
+                );
+                if r.clicked() && !(sel && !edited) {
+                    pick = Some(*l);
+                }
+            }
+        });
+    }
+    if let Some(l) = pick {
+        l.apply(&mut s.lighting, &mut s.appearance.alien);
+        s.meta.dirty = true;
+    }
+    hint_small(
+        ui,
+        "Sets the sky bodies, clouds and plant colours too: fine-tune any of it in Lighting, Weather and Land.",
+    );
+}
+
+/// One line about a free content pack that downloads the first time it is used
+/// (`crate::content`): its size before, its progress while it downloads, Try again after a
+/// failure. Nothing once it is installed (a development checkout has every pack).
+pub(crate) fn content_pack_note(ui: &mut egui::Ui, id: &str, before: &str) {
+    use crate::content;
+    let Some(p) = content::pack(id) else {
+        return;
+    };
+    if content::installed(id) {
+        return;
+    }
+    match content::job(id) {
+        Some(content::Job::Failed(e)) => {
+            dim(ui, &format!("{}: the download failed ({e}).", p.name));
+            if small_button(ui, "Try again").clicked() {
+                let _ = content::download(id);
+            }
+        }
+        Some(_) => {
+            dim(ui, &format!("{}: {}", p.name, content::status_text(id)));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        None => dim(ui, &format!("{before} ({}).", content::size_text(p.bytes))),
+    }
 }
 
 /// Style › World art: Realistic or Hand-painted (`crate::art_style`): what the ground, rock,
@@ -1844,6 +1952,11 @@ fn world_art(ui: &mut egui::Ui, s: &mut UiState) {
             }
         }
     });
+    content_pack_note(
+        ui,
+        crate::content::HANDPAINTED,
+        "Hand-painted downloads its painted surfaces the first time a world uses it",
+    );
     if let Some(a) = pick
         && crate::art_style::set_style(&mut s.meta, &mut s.lighting, &mut s.history, a)
     {
@@ -2109,14 +2222,14 @@ fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [f32; 3]) {
 }
 
 fn style_right(ui: &mut egui::Ui, s: &mut UiState) {
+    let scifi = s.lighting.scifi_look;
     let look = &mut s.lighting.look;
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!(
-                "{} · {}",
-                look.preset.name(),
-                look.preset.inspired_by()
-            ))
+            RichText::new(match scifi {
+                Some(l) => format!("{} · Sci-Fi look", l.name()),
+                None => format!("{} · {}", look.preset.name(), look.preset.inspired_by()),
+            })
             .small()
             .color(TEXT_DIM),
         );
@@ -2127,7 +2240,8 @@ fn style_right(ui: &mut egui::Ui, s: &mut UiState) {
                     .on_hover_text("Back to the style as designed")
                     .clicked()
                 {
-                    look.custom = None;
+                    // a Sci-Fi look's design is its own grade over Golden Hour
+                    look.custom = scifi.map(|l| l.settings_grade());
                     look.saved = None;
                 }
             });
@@ -2229,6 +2343,135 @@ fn style_right(ui: &mut egui::Ui, s: &mut UiState) {
     if !p.approx_eq(&before) {
         look.custom = Some(p);
     }
+
+    pro_grading(ui, s);
+}
+
+/// Style › Fine-tune › Pro grading: the expert colour tools, folded away (closed by default, each
+/// group closed again inside) so the tab stays as simple as it was. Its header names what is on.
+fn pro_grading(ui: &mut egui::Ui, s: &mut UiState) {
+    use crate::grade::{UserLut, files};
+    let stem = |p: &std::path::Path| {
+        p.file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "LUT".into())
+    };
+    // answers of the file dialogs opened below
+    if let Some(path) = crate::dialogs::take_file("grade_lut_load") {
+        match files::load(&path) {
+            Ok(lut) => {
+                let name = stem(&path);
+                s.lighting.look.lut = Some(UserLut::new(&name, lut));
+                s.lighting.look.lut_strength = 1.0;
+                s.ed.toast(format!("Loaded the LUT \"{name}\""));
+            }
+            Err(e) => s.ed.toast(e),
+        }
+    }
+    if let Some(path) = crate::dialogs::take_file("grade_import") {
+        let lut = image::open(&path)
+            .map_err(|e| format!("Could not open {}: {e}", path.display()))
+            .and_then(|img| files::from_round_trip(&img.into_rgb32f()));
+        match lut {
+            Ok(lut) if lut.is_identity(1.5 / 255.0) => s.ed.toast(
+                "The colour strip is unchanged: grade the picture in your photo app first, then save it",
+            ),
+            Ok(lut) => {
+                s.lighting.look.lut = Some(UserLut::new(&format!("Graded: {}", stem(&path)), lut));
+                s.lighting.look.lut_strength = 1.0;
+                s.ed.toast("The grade from your photo app is on the world");
+            }
+            Err(e) => s.ed.toast(e),
+        }
+    }
+    if let Some(path) = crate::dialogs::take_file("grade_capture") {
+        crate::look::ui_call(
+            "look_grade_capture",
+            serde_json::json!({ "path": path.with_extension("png").display().to_string() }),
+        );
+    }
+    if let Some(path) = crate::dialogs::take_file("grade_export") {
+        crate::look::ui_call(
+            "look_lut_export",
+            serde_json::json!({ "path": path.display().to_string() }),
+        );
+    }
+
+    let look = &mut s.lighting.look;
+    let active: Vec<&str> = [look.lut.is_some().then_some("LUT")]
+        .into_iter()
+        .flatten()
+        .collect();
+    let note = active.join(", ");
+    section_fold(ui, "ft_pro", "Pro grading", &note, |ui| {
+        section_fold(ui, "ft_pro_lut", "LUT", if look.lut.is_some() { "on" } else { "" }, |ui| {
+            match &look.lut {
+                Some(l) => {
+                    ui.label(RichText::new(&l.name).color(TEXT));
+                    slider_row(ui, "Strength", &mut look.lut_strength, 0.0..=1.0, pct);
+                }
+                None => dim(
+                    ui,
+                    "Put a colour LUT on top of this style: a .cube file from DaVinci Resolve, Photoshop or Lightroom, or a LUT picture from Unreal, Unity or Godot.",
+                ),
+            }
+            ui.horizontal(|ui| {
+                if small_icon_button(ui, icon::FOLDER_OPEN, "Load LUT…").clicked() {
+                    crate::dialogs::pick_file(
+                        "grade_lut_load",
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("LUT", &["cube", "png", "tif", "tiff", "jpg", "jpeg"]),
+                    );
+                }
+                if look.lut.is_some() && small_button(ui, "Remove").clicked() {
+                    look.lut = None;
+                    look.lut_strength = 1.0;
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Grade it in your photo app").color(TEXT));
+            dim(
+                ui,
+                "1. Capture the view as a picture. 2. Grade it in Photoshop, Lightroom or any photo app with whole-picture adjustments only (no cropping or painting) and save it as PNG. 3. Import it: the world takes on the same colours.",
+            );
+            ui.horizontal(|ui| {
+                if small_icon_button(ui, icon::CAMERA, "Capture…").clicked() {
+                    crate::dialogs::save_file(
+                        "grade_capture",
+                        rfd::AsyncFileDialog::new()
+                            .set_file_name("Skyfold grade.png")
+                            .add_filter("PNG picture", &["png"]),
+                    );
+                }
+                if small_icon_button(ui, icon::DOWNLOAD_SIMPLE, "Import graded…").clicked() {
+                    crate::dialogs::pick_file(
+                        "grade_import",
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Picture", &["png", "tif", "tiff", "jpg", "jpeg"]),
+                    );
+                }
+            });
+            ui.add_space(6.0);
+            if small_icon_button(ui, icon::EXPORT, "Export .cube…")
+                .on_hover_text("Save this style's whole colour grade (and the LUT) as a .cube file for Resolve, Photoshop, Unreal or Unity")
+                .clicked()
+            {
+                crate::dialogs::save_file(
+                    "grade_export",
+                    rfd::AsyncFileDialog::new()
+                        .set_file_name("Skyfold grade.cube")
+                        .add_filter("Cube LUT", &["cube"]),
+                );
+            }
+        });
+        if !active.is_empty() {
+            ui.add_space(4.0);
+            if small_button(ui, "Reset pro grading").clicked() {
+                look.lut = None;
+                look.lut_strength = 1.0;
+            }
+        }
+    });
 }
 
 // ------------------------------------------------------------------ Audio

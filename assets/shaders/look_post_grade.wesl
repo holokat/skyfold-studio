@@ -1,21 +1,18 @@
 // Art-style post pass, after tonemapping: painterly (smooth Kuwahara) filter, ink outlines from
-// depth, colour haze and sky tint, split toning, lift, vibrance, foliage hue and film grain.
-// Colour work happens in display (gamma) space; the input and output are linear.
+// depth, colour haze and sky tint, the look's colour grade (one lookup in a 3D LUT baked on the
+// CPU by `crate::grade`: contrast, split toning, lift, foliage hue, vibrance, the user's LUT) and
+// film grain. Colour work happens in display (gamma) space; the input and output are linear.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
 struct LookPost {
     // x: painterly strength, y: painterly radius (px), z: outline strength, w: film grain
     paint: vec4<f32>,
-    // rgb: shadow tint, w: lift
-    shadow: vec4<f32>,
-    // rgb: highlight tint, w: vibrance
-    highlight: vec4<f32>,
     // rgb: sky tint (linear), w: amount
     sky: vec4<f32>,
     // rgb: haze colour (linear), w: amount
     haze: vec4<f32>,
-    // x: near plane, y: time, z: foliage hue shift, w: haze distance (m)
+    // x: near plane, y: time, w: haze distance (m)
     misc: vec4<f32>,
     // xyz: camera right, w: tan(fov/2) * aspect
     cam_right: vec4<f32>,
@@ -23,14 +20,19 @@ struct LookPost {
     cam_up: vec4<f32>,
     // xyz: camera forward, w: window scale factor
     cam_fwd: vec4<f32>,
-    // x: distance (m) where the colour haze starts, y: contrast (display space)
+    // x: distance (m) where the colour haze starts, y: contrast (display space; film grain)
     extra: vec4<f32>,
+    // x: forest softness, y/z: distance fade (m), w: pixels per point
+    forest: vec4<f32>,
 }
 
 @group(0) @binding(0) var screen_tex: texture_2d<f32>;
 @group(0) @binding(1) var screen_samp: sampler;
 @group(0) @binding(2) var depth_tex: texture_depth_2d;
 @group(0) @binding(3) var<uniform> look: LookPost;
+@group(0) @binding(4) var forest_normals: texture_2d<f32>;
+@group(0) @binding(5) var prepass_depth: texture_depth_2d;
+@group(0) @binding(6) var grade_lut: texture_3d<f32>;
 
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
@@ -46,21 +48,6 @@ fn hash12(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
-}
-
-fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
-    let k = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-    let p = select(vec4<f32>(c.gb, k.xy), vec4<f32>(c.bg, k.wz), c.g < c.b);
-    let q = select(vec4<f32>(p.xyw, c.r), vec4<f32>(c.r, p.yzx), p.x < c.r);
-    let d = q.x - min(q.w, q.y);
-    let e = 1.0e-10;
-    return vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-}
-
-fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
-    let k = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-    let p = abs(fract(c.xxx + k.xyz) * 6.0 - k.www);
-    return c.z * mix(k.xxx, clamp(p - k.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
 }
 
 // Smooth Kuwahara: four overlapping quadrants around the pixel, each summarised by its mean colour
@@ -91,6 +78,52 @@ fn painterly(uv: vec2<f32>, texel: vec2<f32>) -> vec3<f32> {
     return acc / max(wsum, 1.0e-6);
 }
 
+// The normal attachment's spare 2-bit alpha is an app-owned forest tag. Ordinary
+// materials write 1, the clear value is 0, tree materials write 1/3. Never infer trees
+// from their colour: autumn, sakura, snowy and shadowed crowns need the same treatment.
+fn forest_pixel(px: vec2<i32>, depth: f32) -> bool {
+    let dims = vec2<i32>(textureDimensions(forest_normals));
+    if any(px < vec2<i32>(0)) || any(px >= dims) || depth <= 0.0 {
+        return false;
+    }
+    let tag = textureLoad(forest_normals, px, 0).a;
+    let pd = textureLoad(prepass_depth, px, 0);
+    // Some foreground materials skip the prepass. Their current depth must win over
+    // a tree tag behind them. This also prevents softening an opaque water surface.
+    return tag > 0.2 && tag < 0.5 && abs(pd - depth) <= max(1.0e-12, depth * 1.0e-6);
+}
+
+fn soften_forest(px: vec2<i32>, size: vec2<i32>, depth: f32, dist: f32, centre: vec3<f32>) -> vec3<f32> {
+    let fade = smoothstep(look.forest.y, look.forest.z, dist);
+    if look.forest.x <= 0.001 || fade <= 0.0 || !forest_pixel(px, depth) {
+        return centre;
+    }
+    // A bounded 3x3 filter only on distant tree pixels. Untagged destinations, nearby
+    // trees and foreground occluders never enter the filter. Background samples gently
+    // soften the inside of the silhouette without spreading a halo into the sky.
+    let radius = max(1.0, (1.0 + look.forest.x) * look.forest.w);
+    var colour = centre * 4.0;
+    var weight = 4.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            if x == 0 && y == 0 { continue; }
+            let q = clamp(px + vec2<i32>(round(vec2<f32>(f32(x), f32(y)) * radius)), vec2<i32>(0), size - vec2<i32>(1));
+            let nd = textureLoad(depth_tex, q, 0);
+            // Reversed depth: larger values are closer. Keep nearer surfaces out of
+            // the average so a building or foreground branch cannot bleed into trees.
+            let nearer = max(nd / max(depth, 1.0e-9) - 1.0, 0.0);
+            let reject_near = 1.0 - smoothstep(0.01, 0.08, nearer);
+            let tagged = forest_pixel(q, nd);
+            if !tagged && nd > depth + max(1.0e-12, depth * 1.0e-6) { continue; }
+            let spatial = select(1.0, 2.0, x == 0 || y == 0);
+            let w = spatial * reject_near * select(0.35, 1.0, tagged);
+            colour += to_gamma(textureLoad(screen_tex, q, 0).rgb) * w;
+            weight += w;
+        }
+    }
+    return mix(centre, colour / weight, look.forest.x * fade);
+}
+
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(screen_tex));
@@ -104,6 +137,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(look.cam_fwd.xyz + look.cam_right.xyz * (ndc.x * look.cam_right.w) - look.cam_up.xyz * (ndc.y * look.cam_up.w));
     let near = look.misc.x;
     let dist = select(near / max(d, 1.0e-9) / max(dot(dir, look.cam_fwd.xyz), 0.05), 1.0e9, is_sky);
+
+    col = soften_forest(px, size, d, dist, col);
 
     // painterly brushwork (fades out in the far distance where it would only blur)
     if look.paint.x > 0.001 {
@@ -143,32 +178,12 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         col = mix(col, haze_g, clamp(h, 0.0, 0.92));
     }
 
-    // contrast around display mid-grey
-    col = max(vec3<f32>(0.45) + (col - vec3<f32>(0.45)) * look.extra.y, vec3<f32>(0.0));
-
-    // split toning + lift
-    let l = dot(col, LUMA);
-    let ws = 1.0 - smoothstep(0.0, 0.5, l);
-    let wh = smoothstep(0.5, 1.0, l);
-    col *= mix(vec3<f32>(1.0), look.shadow.rgb, ws) * mix(vec3<f32>(1.0), look.highlight.rgb, wh);
-    col = col * (1.0 - look.shadow.w) + vec3<f32>(look.shadow.w);
-
-    // foliage hue: rotate greens towards yellow (-) or teal (+)
-    if abs(look.misc.z) > 0.001 {
-        var hsv = rgb_to_hsv(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)));
-        let g = (1.0 - smoothstep(0.05, 0.13, abs(hsv.x - 0.3))) * smoothstep(0.05, 0.2, hsv.y);
-        hsv.x = fract(hsv.x + look.misc.z * 0.07 * g);
-        col = mix(col, hsv_to_rgb(hsv), g);
-    }
-
-    // vibrance: lift muted colours more than saturated ones
-    if abs(look.highlight.w) > 0.001 {
-        let mxc = max(col.r, max(col.g, col.b));
-        let mnc = min(col.r, min(col.g, col.b));
-        let sat = mxc - mnc;
-        let lv = dot(col, LUMA);
-        col = mix(vec3<f32>(lv), col, 1.0 + look.highlight.w * (1.0 - sat));
-    }
+    // the grade: one trilinear lookup, the cell centres spanning display 0..1
+    let n = f32(textureDimensions(grade_lut).x);
+    let graded = textureSampleLevel(grade_lut, screen_samp, clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)) * ((n - 1.0) / n) + 0.5 / n, 0.0).rgb;
+    // film grain follows the brightness after contrast
+    let l = dot(max(vec3<f32>(0.45) + (col - vec3<f32>(0.45)) * look.extra.y, vec3<f32>(0.0)), LUMA);
+    col = graded;
 
     // film grain (stronger in the shadows, like film)
     if look.paint.w > 0.0001 {

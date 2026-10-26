@@ -66,6 +66,8 @@ pub struct Stage {
     /// model space → clip space of the stage camera (for marker overlays)
     pub clip_from_model: Mat4,
     pub height: f32,
+    /// the stage camera (world space), what characters on it look at
+    pub eye: Option<Vec3>,
     shown: Option<(String, String)>,
     puppet: Option<Entity>,
     camera: Option<Entity>,
@@ -89,6 +91,7 @@ impl Default for Stage {
             egui: None,
             clip_from_model: Mat4::IDENTITY,
             height: 1.8,
+            eye: None,
             shown: None,
             puppet: None,
             camera: None,
@@ -273,6 +276,7 @@ fn update(
         let focus = ORIGIN + Vec3::Y * h * 0.5;
         let dir = Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos());
         *tf = Transform::from_translation(focus + dir * dist).looking_at(focus, Vec3::Y);
+        st.eye = Some(tf.translation);
         if let Projection::Perspective(p) = &mut *proj {
             p.fov = fov;
             p.aspect_ratio = aspect;
@@ -298,6 +302,7 @@ fn teardown(st: &mut Stage, commands: &mut Commands, textures: &mut EguiUserText
         textures.remove_image(&img);
     }
     st.egui = None;
+    st.eye = None;
     st.shown = None;
     st.ready = false;
 }

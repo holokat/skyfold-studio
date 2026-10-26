@@ -29,12 +29,13 @@ object counts by category, water bodies, roads and gameplay counts, nature amoun
     app.mcp_tool(McpTool {
         name: "world_new",
         description: "Start a new world (replaces the open one; it can't be undone). Presets: empty ocean, island, continent, archipelago, flat plains; sizes small 2 km, medium 4 km, large 8 km (4 m grid). \
-With a `climate` the land is filled with climate-driven biomes, ground, forests, plants and water styles (\"none\" for bare terrain). `forest_diversity`, `forest_layout` and `grass_lushness` are staged only for this new world. No zones are created. Refuses if the open world has unsaved changes unless `discard_unsaved` is true.",
+With a `climate` the land is filled with climate-driven biomes, ground, forests, plants and water styles (\"none\" for bare terrain). `kind` scifi puts the whole Sci-Fi template on the new world once it is made (alien canyonlands, dusk grade, a ringed giant in the sky, crimson flora, spires, floating rocks, monoliths, crystals; see world_kind_apply); fantasy (default) is today's world. `forest_diversity`, `forest_layout` and `grass_lushness` are staged only for this new world. No zones are created. Refuses if the open world has unsaved changes unless `discard_unsaved` is true.",
         input_schema: || {
             json!({
                 "type": "object",
                 "properties": {
                     "preset": enum_schema(ids(&WorldPreset::ALL), "starting landmass"),
+                    "kind": { "type": "string", "enum": crate::world_kind::WorldKind::ALL.map(|k| k.id()), "default": "fantasy", "description": "fantasy or scifi world" },
                     "size": { "type": "string", "enum": ["small", "medium", "large"], "default": "medium" },
                     "seed": { "type": "integer", "minimum": 0, "maximum": 999999, "description": "default: random" },
                     "climate": enum_schema(ids(&Climate::ALL).into_iter().chain(["none".to_string()]).collect(), "biomes and nature (default varied)"),
@@ -128,7 +129,7 @@ Default folder: <project>/exports/<world name>; `dir` must be an absolute path."
     });
     app.mcp_tool(McpTool {
         name: "settings_search",
-        description: "Find where a setting, tool or section lives in the editor (the ⌘K search): every labelled control in every tab's panel, inspector and dock, with its path, e.g. \"thunder\" → Atmosphere › Weather › Rain. \
+        description: "Find where a setting, tool or section lives in the editor (the ⌘K search): every labelled control in every tab's panel, inspector and dock, with its path, e.g. thunder → Atmosphere › Weather › Rain. \
 settings_open takes the person there.",
         input_schema: || {
             json!({
@@ -256,7 +257,12 @@ fn summary(w: &mut World) -> String {
     )
 }
 
-fn new_world(In(args): In<Value>, d: WorldData, mut actions: MessageWriter<UiAction>) -> R {
+fn new_world(
+    In(args): In<Value>,
+    d: WorldData,
+    mut actions: MessageWriter<UiAction>,
+    mut template: ResMut<crate::world_kind::TemplateRequest>,
+) -> R {
     if d.meta.dirty && !opt_bool(&args, "discard_unsaved")?.unwrap_or(false) {
         return Err("The open world has unsaved changes: save it (world_save) first, or pass discard_unsaved: true".into());
     }
@@ -287,6 +293,13 @@ fn new_world(In(args): In<Value>, d: WorldData, mut actions: MessageWriter<UiAct
     }
     if let Some(lushness) = opt_num(&args, "grass_lushness")? {
         appearance.grass_lushness = lushness.clamp(0.0, 1.0);
+    }
+    let kind = match opt_str(&args, "kind")? {
+        None => crate::world_kind::WorldKind::Fantasy,
+        Some(k) => crate::world_kind::WorldKind::from_id(k).ok_or("`kind` must be fantasy or scifi")?,
+    };
+    if kind != crate::world_kind::WorldKind::Fantasy {
+        template.after_new_world(kind, d.terrain.generation, seed);
     }
     actions.write(UiAction::NewWorld {
         preset,

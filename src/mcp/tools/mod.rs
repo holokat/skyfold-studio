@@ -2,6 +2,8 @@
 //! the same functions as the UI (brushes, water, scatter, history…) so agents' edits behave,
 //! save and undo exactly like a person's. Shared argument helpers live here.
 
+mod canyons;
+mod ground_palette;
 mod materials;
 mod nature;
 mod objects;
@@ -30,6 +32,8 @@ Returns each call's result compactly. undo, redo, world_new, world_load and batc
     });
     world::register(app);
     terrain::register(app);
+    canyons::register(app);
+    ground_palette::register(app);
     materials::register(app);
     water::register(app);
     nature::register(app);
@@ -53,6 +57,7 @@ pub(super) const READ_ONLY: &[&str] = &[
     "look_style_list",
     "market_packs",
     "market_listings",
+    "market_view",
     "scenes_list",
     "fields_list",
     "zones_list",
@@ -67,6 +72,7 @@ pub(super) const READ_ONLY: &[&str] = &[
     "characters_markers",
     "characters_animations",
     "characters_npcs",
+    "sky_bodies_list",
 ];
 
 /// The `tools/list` result for the registry.

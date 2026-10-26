@@ -35,10 +35,12 @@ pub enum Tab {
     DungeonLights,
     /// Labs: import, rig and animate characters (`crate::characters`)
     Characters,
+    /// generate and keep pictures (`crate::images`)
+    Images,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 20] = [
+    pub const ALL: [Tab; 21] = [
         Tab::Land,
         Tab::Sculpt,
         Tab::Paint,
@@ -59,6 +61,7 @@ impl Tab {
         Tab::DungeonLook,
         Tab::DungeonLights,
         Tab::Characters,
+        Tab::Images,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -82,6 +85,7 @@ impl Tab {
             Tab::DungeonLook => "Dungeon look",
             Tab::DungeonLights => "Dungeon lights",
             Tab::Characters => "Characters",
+            Tab::Images => "Images",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -126,6 +130,7 @@ impl Tab {
             Tab::Characters => {
                 "Import a character, rig it automatically, preview animations and place it in the world"
             }
+            Tab::Images => "Generate pictures with the model you choose and keep them with notes and tags",
         }
     }
     pub fn group(self) -> TabGroup {
@@ -139,6 +144,7 @@ impl Tab {
             Tab::Analyze | Tab::Map => TabGroup::Review,
             Tab::Dungeons | Tab::DungeonLook | Tab::DungeonLights => TabGroup::Dungeons,
             Tab::Characters => TabGroup::Characters,
+            Tab::Images => TabGroup::Images,
         }
     }
 }
@@ -156,6 +162,8 @@ pub enum TabGroup {
     Dungeons,
     /// Labs (testing flag)
     Characters,
+    /// pictures: generate and keep them (`crate::images`)
+    Images,
 }
 
 impl TabGroup {
@@ -191,6 +199,7 @@ impl TabGroup {
             v
         } else {
             let mut v = Self::ALL.to_vec();
+            v.push(TabGroup::Images);
             if crate::characters::labs_enabled() {
                 v.push(TabGroup::Characters);
             }
@@ -209,6 +218,7 @@ impl TabGroup {
             TabGroup::Dungeons if crate::dungeons::in_dungeon() => "Dungeon",
             TabGroup::Dungeons => "Dungeons",
             TabGroup::Characters => "Characters",
+            TabGroup::Images => "Images",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -225,6 +235,7 @@ impl TabGroup {
             }
             TabGroup::Dungeons => "Dungeons: maps of their own behind portals, doors and cave ends",
             TabGroup::Characters => "Labs: characters, rigged for you and animated",
+            TabGroup::Images => "Generate pictures and keep them with notes and tags",
         }
     }
     /// Its tabs, in sub-tab order.
@@ -246,6 +257,7 @@ impl TabGroup {
             }
             TabGroup::Dungeons => &[Tab::Dungeons],
             TabGroup::Characters => &[Tab::Characters],
+            TabGroup::Images => &[Tab::Images],
         }
     }
     /// What the sub-tab of `t` is called inside this group.
@@ -282,10 +294,14 @@ pub enum SculptTool {
     Hills,
     Terrace,
     Erode,
+    /// Rock strata: stepped ledges with eroded edges (`terrain::strata`).
+    Strata,
+    /// Click to raise layered canyonlands over the brush area (`terrain::canyons`).
+    Canyons,
 }
 
 impl SculptTool {
-    pub const ALL: [SculptTool; 8] = [
+    pub const ALL: [SculptTool; 10] = [
         SculptTool::Raise,
         SculptTool::Lower,
         SculptTool::Smooth,
@@ -294,6 +310,8 @@ impl SculptTool {
         SculptTool::Hills,
         SculptTool::Terrace,
         SculptTool::Erode,
+        SculptTool::Strata,
+        SculptTool::Canyons,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -305,6 +323,8 @@ impl SculptTool {
             SculptTool::Hills => "Hills",
             SculptTool::Terrace => "Terraces",
             SculptTool::Erode => "Erode",
+            SculptTool::Strata => "Strata",
+            SculptTool::Canyons => "Canyons",
         }
     }
     pub fn hint(self) -> &'static str {
@@ -317,6 +337,10 @@ impl SculptTool {
             SculptTool::Hills => "Add rolling hills and bumps",
             SculptTool::Terrace => "Cut natural terraces and plateaus",
             SculptTool::Erode => "Simulate rain erosion: gullies and sediment fans",
+            SculptTool::Strata => "Weather slopes into stepped rock layers with ledges",
+            SculptTool::Canyons => {
+                "Click to raise layered canyonlands: plateaus, terraced canyons, mesas"
+            }
         }
     }
 }
@@ -409,6 +433,10 @@ pub struct Editor {
     /// 0..1 coastline raggedness
     pub coast_roughness: f32,
     pub terrace_step: f32,
+    /// Sculpt › Strata brush settings.
+    pub strata: crate::terrain::strata::StrataParams,
+    /// Sculpt › Canyonlands settings (the click tool and the whole-world button).
+    pub canyons: crate::terrain::canyons::CanyonParams,
     pub river_width: f32,
     pub river_depth: f32,
     pub lake_fill: f32,
@@ -495,6 +523,8 @@ impl Default for Editor {
             land_height: 8.0,
             coast_roughness: 0.55,
             terrace_step: 12.0,
+            strata: Default::default(),
+            canyons: Default::default(),
             river_width: 18.0,
             river_depth: 4.0,
             lake_fill: 4.0,
@@ -698,6 +728,8 @@ fn update_terrain_params(
             std::array::from_fn(|i| Vec4::new(t[i * 4], t[i * 4 + 1], t[i * 4 + 2], t[i * 4 + 3]));
     }
     p.tex.w = look.params.texture_soften;
+    // banded strata on cliff rock (canyonlands; 0 in ordinary worlds)
+    p.overlay_image.w = s.strata_bands;
     // rain puddles and the drops' ripples on them (`rain`, `terrain.wesl`)
     p.overlay_image.y = rain.puddles_q(&lighting.rain);
     p.overlay_image.z = if p.overlay_image.y > 0.0 {

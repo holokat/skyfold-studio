@@ -6,6 +6,8 @@
 // the moon at night), three multiple-scattering octaves with a two-lobe Henyey-Greenstein phase,
 // sunset colours and the earth's shadow from Bevy's transmittance LUT, sky light from its
 // sky-view LUT, aerial perspective from its aerial-view LUT. Cirrus: one textured shell.
+// Cloud sea (`clouds/sea.rs`, off unless its extinction is set): a second, low layer marched
+// the same way, a flat-bottomed deck with billowy tops in the valleys.
 //
 // Output: premultiplied in-scattered radiance (times exposure) + opacity, and the cloud depth.
 
@@ -124,9 +126,84 @@ fn density(p: vec3<f32>, hf: f32, w: f32, detail: bool) -> f32 {
     return clamp(raw * 4.0, 0.0, 1.0);
 }
 
+// The cloud sea's values ride in the uniforms' spare channels (see `clouds/sea.rs`).
+fn sea_on() -> bool {
+    return cl.fill_ambient.w > 0.0 && cl.fill_color.w > cl.fill.w;
+}
+
+// The sea's cover: the baked field at two scales and angles averaged (no round cells), off the
+// cumulus pattern, drifting at half the wind (every sea lookup drifts with offset / 2 and tiles).
+// Not thresholded here: the coverage applies to the deck's whole field (`sea_density`).
+fn sea_cover(xz: vec2<f32>) -> f32 {
+    let q = (xz * 4.0 + cl.offset.xy * 2.0) / CLOUD_TILE;
+    let n1 = textureSampleLevel(cover_tex, smp, q + vec2<f32>(0.37, 0.61), 0.0).r;
+    let n2 = textureSampleLevel(cover_tex, smp, vec2<f32>(q.y, -q.x) * 1.5 + vec2<f32>(0.13, 0.29), 0.0).r;
+    return 0.55 * n1 + 0.45 * n2;
+}
+
+// Sea density 0..1 (hf 0..1 in the deck). The deck is a field of the broad cover, the base shape
+// and rounded Worley billows (a hundred-odd metres across): where it clears 1 - coverage there
+// is cloud, and the more it clears, the higher that column's top, so the top heaves in billows
+// and thins out into gaps. Flat, dense base (misty when soft); detail carves the surface.
+fn sea_density(p: vec3<f32>, hf: f32, n: f32, detail: bool) -> f32 {
+    let soft = cl.shade.w;
+    let q = p.xz * 3.0 + cl.offset.xy * 1.5;
+    let evolve = cl.motion.w * EVOLVE;
+    let b = textureSampleLevel(base_tex, smp, vec3<f32>(q.x, p.y * 3.0 + evolve, q.y) / BASE_TILE, 0.0);
+    let wf = b.g * 0.625 + b.b * 0.25 + b.a * 0.125;
+    let shape = remap01(b.r, wf - 1.0, 1.0);
+    let billows = b.g * 0.6 + b.b * 0.4;
+    let f = 0.3 * n + 0.25 * shape + 0.45 * billows;
+    var raw = f - (1.0 - cl.key_color.w) * 0.85 - 0.5 * pow(hf, 1.3) - (1.0 - smoothstep(0.0, mix(0.04, 0.4, soft), hf)) * 0.3;
+    if raw < -0.2 {
+        return 0.0;
+    }
+    var m = 0.5;
+    if detail {
+        let q2 = p.xz * 2.0 + cl.offset.xy;
+        let swirl = (b.gb - 0.5) * (0.35 * (1.0 - 0.5 * hf));
+        let dn = textureSampleLevel(detail_tex, smp, vec3<f32>(q2.x, p.y * 2.0 - evolve, q2.y) / DETAIL_TILE + vec3<f32>(swirl.x, 0.0, swirl.y), 0.0);
+        let df = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
+        m = mix(df, 1.0 - df, clamp(hf * 4.0, 0.0, 1.0));
+    }
+    raw -= m * mix(0.12, 0.06, soft);
+    return clamp(raw * mix(12.0, 3.0, soft), 0.0, 1.0);
+}
+
+// One cloud layer of the march: the cumulus or the sea, its band (altitude, m) and the extinction
+// of its densest cloud (1/m).
+struct Layer {
+    sea: bool,
+    base: f32,
+    top: f32,
+    sigma: f32,
+}
+
+fn cumulus_layer() -> Layer {
+    return Layer(false, cl.layer.x, cl.layer.y, cl.cover.y);
+}
+
+fn sea_layer() -> Layer {
+    return Layer(true, cl.fill.w, cl.fill_color.w, cl.fill_ambient.w);
+}
+
+fn layer_cover(ly: Layer, xz: vec2<f32>) -> f32 {
+    if ly.sea {
+        return sea_cover(xz);
+    }
+    return cover_at(xz);
+}
+
+fn layer_density(ly: Layer, p: vec3<f32>, hf: f32, w: f32, detail: bool) -> f32 {
+    if ly.sea {
+        return sea_density(p, hf, w, detail);
+    }
+    return density(p, hf, w, detail);
+}
+
 // Optical depth toward the light from p (cheap density, growing steps).
-fn light_depth(p: vec3<f32>, l: vec3<f32>) -> f32 {
-    let H = cl.layer.y - cl.layer.x;
+fn light_depth(ly: Layer, p: vec3<f32>, l: vec3<f32>) -> f32 {
+    let H = ly.top - ly.base;
     var od = 0.0;
     var t = 0.0;
     let n = u32(cl.quality.y);
@@ -135,16 +212,16 @@ fn light_depth(p: vec3<f32>, l: vec3<f32>) -> f32 {
         let tm = t + dt * 0.5;
         t += dt;
         let ps = p + l * tm;
-        let hf = (ps.y - cl.layer.x) / H;
+        let hf = (ps.y - ly.base) / H;
         if hf > 1.0 || hf < 0.0 {
             break;
         }
-        let w = cover_at(ps.xz);
+        let w = layer_cover(ly, ps.xz);
         if w > 0.003 {
-            od += density(ps, hf, w, false) * dt;
+            od += layer_density(ly, ps, hf, w, false) * dt;
         }
     }
-    return od * cl.cover.y;
+    return od * ly.sigma;
 }
 
 // Sky light: the sky-view LUT averaged over the upper hemisphere (zenith + four directions).
@@ -230,6 +307,156 @@ fn cirrus(d: vec3<f32>, cam: vec3<f32>, cam_a: vec3<f32>, r0: f32, mu: f32, rc: 
     return o;
 }
 
+// Where the ray (from radius r0, cos zenith mu) is inside the shells rb..rt: (start, end),
+// end < start when it misses; it ends at t_end (the scene, the ground, the march's reach).
+fn segment(r0: f32, mu: f32, rb: f32, rt: f32, t_end: f32) -> vec2<f32> {
+    let hb = sphere(r0, mu, rb);
+    let ht = sphere(r0, mu, rt);
+    var t0 = 0.0;
+    var t1 = -1.0;
+    if r0 < rb {
+        t0 = hb.y;
+        t1 = ht.y;
+    } else if r0 < rt {
+        t1 = ht.y;
+        if hits(hb) && hb.x > 0.0 {
+            t1 = hb.x;
+        }
+    } else if hits(ht) && ht.x > 0.0 {
+        t0 = ht.x;
+        t1 = ht.y;
+        if hits(hb) && hb.x > 0.0 {
+            t1 = hb.x;
+        }
+    }
+    return vec2<f32>(t0, min(t1, t_end));
+}
+
+// Clouds right round the camera fade out (the sea's within tens of metres, `sea::NEAR_FADE`).
+// From inside or under the sea (walking a valley floor) it is ground fog instead: thin round the
+// walker, so nearby plants stay clear, thickening over a few hundred metres into the bank.
+fn near_fade(ly: Layer, t: f32, r0: f32) -> f32 {
+    if ly.sea {
+        let inside = 1.0 - smoothstep(ly.top - 40.0, ly.top + 10.0, r0 - atmosphere.inner_radius);
+        let mist = mix(0.15, 1.0, smoothstep(80.0, 700.0, t));
+        return smoothstep(mix(20.0, 2.0, inside), mix(60.0, 20.0, inside), t) * mix(1.0, mist, inside);
+    }
+    return smoothstep(cl.layer.w * 0.6, cl.layer.w, t);
+}
+
+// What the march has gathered so far: in-scattered light, transmittance and the cloud depth's
+// weighted sum.
+struct March {
+    L: vec3<f32>,
+    T: f32,
+    t_acc: f32,
+    w_acc: f32,
+}
+
+// Phases of the scattering octaves toward the key light (k) and the second light (f).
+struct Phases {
+    k0: f32,
+    k1: f32,
+    k2: f32,
+    f0: f32,
+    f1: f32,
+}
+
+// Marches one layer along the ray, carrying on from what is in front of it.
+fn march(m_in: March, ly: Layer, r0: f32, mu: f32, t_end: f32, cam: vec3<f32>, cam_a: vec3<f32>, d: vec3<f32>, px: vec2<f32>, amb_top: vec3<f32>, ph: Phases) -> March {
+    let Re = atmosphere.inner_radius;
+    let key = cl.key.xyz;
+    let fill = cl.fill.xyz;
+    var T = m_in.T;
+    var L = m_in.L;
+    var t_acc = m_in.t_acc;
+    var w_acc = m_in.w_acc;
+    let rb = Re + ly.base;
+    let rt = Re + ly.top;
+    let tt = segment(r0, mu, rb, rt, t_end);
+    let t0 = tt.x;
+    let t1 = tt.y;
+    let seg = t1 - t0;
+    if seg > 0.0 {
+        // light at the bottom and the top of the layer where the ray crosses it
+        let pm = cam_a + d * (0.5 * (t0 + t1));
+        let upm = pm / length(pm);
+        let k_bot = light_at(upm * rb, key) * cl.key_color.rgb;
+        let k_top = light_at(upm * rt, key) * cl.key_color.rgb;
+        let f_bot = light_at(upm * rb, fill) * cl.fill_color.rgb;
+        let f_top = light_at(upm * rt, fill) * cl.fill_color.rgb;
+        // light bounced off the ground below the clouds
+        let ground = (light_at(upm * (Re + 1.0), key) * cl.key_color.rgb * max(dot(key, upm), 0.0)
+            + light_at(upm * (Re + 1.0), fill) * cl.fill_color.rgb * max(dot(fill, upm), 0.0)) * (0.2 / PI);
+        let amb_bot = amb_top * 0.5 + ground;
+
+        let H = ly.top - ly.base;
+        let sigma = ly.sigma;
+        let n = clamp(seg / 55.0, 24.0, cl.quality.x);
+        let ds0 = seg / n;
+        var t = t0 + ds0 * jitter(px, cl.camera.w);
+        // coarse steps through empty space; entering a cloud backs up one step and marches it
+        // finely, so the light comes from its lit surface rather than from a sample deep inside
+        var fine = 0;
+        for (var i = 0; i < 256; i++) {
+            if t >= t1 || T < 0.01 {
+                break;
+            }
+            let coarse = ds0 * (1.0 + t / 30000.0);
+            let ds = select(coarse, max(coarse * 0.18, 16.0), fine > 0);
+            let pa = cam_a + d * t;
+            let h = length(pa) - Re;
+            let hf = (h - ly.base) / H;
+            let pw = cam + d * t;
+            var dens = 0.0;
+            var p = vec3<f32>(0.0);
+            if hf >= 0.0 && hf <= 1.0 {
+                let w = layer_cover(ly, pw.xz);
+                if w > 0.003 {
+                    p = vec3<f32>(pw.x, h, pw.z);
+                    dens = layer_density(ly, p, hf, w, true) * near_fade(ly, t, r0);
+                }
+            }
+            if dens > 0.001 {
+                if fine == 0 && t - coarse > t0 {
+                    fine = 10;
+                    t -= coarse;
+                    continue;
+                }
+                fine = 10;
+                // extinction LOD: steps grow with distance, so far clouds get a softer optical
+                // depth (their light then comes from near the lit surface, as it should)
+                let lod = 1.0 / (1.0 + t / 12000.0);
+                let st = dens * sigma * lod;
+                let od = light_depth(ly, p, key) * lod;
+                // scattering orders: each sees less extinction, carries less energy and scatters
+                // more evenly (the last one isotropic)
+                // the last term is light diffusing through the whole cloud (falls off ~1/(1 + k tau))
+                let ms = ph.k0 * exp(-od) + MS_GAIN * (0.85 * ph.k1 * exp(-od * 0.3) + 0.72 * ph.k2 * exp(-od * 0.1) + 0.048 / (1.0 + od * 0.12));
+                let msf = ph.f0 * exp(-od) + MS_GAIN * (0.85 * ph.f1 * exp(-od * 0.3) + 0.05 * exp(-od * 0.05));
+                let amb = mix(amb_bot, amb_top, clamp(hf * 1.3, 0.0, 1.0)) * (1.0 - 0.4 * clamp(dens * 1.5, 0.0, 1.0));
+                let lum = mix(k_bot, k_top, hf) * ms + mix(f_bot, f_top, hf) * msf + amb;
+                let s = st * lum;
+                let tr = exp(-st * ds);
+                L += T * (s - s * tr) / max(st, 1e-7);
+                let dt = T * (1.0 - tr);
+                t_acc += t * dt;
+                w_acc += dt;
+                T *= tr;
+            } else if fine > 0 {
+                fine -= 1;
+            }
+            t += ds;
+        }
+    }
+    var m: March;
+    m.T = T;
+    m.L = L;
+    m.t_acc = t_acc;
+    m.w_acc = w_acc;
+    return m;
+}
+
 struct TraceOut {
     @location(0) color: vec4<f32>,
     @location(1) depth: f32,
@@ -266,34 +493,12 @@ fn fragment(in: FullscreenVertexOutput) -> TraceOut {
         t_scene = length(vp.xyz / vp.w);
     }
 
-    // where the ray is inside the cumulus layer
-    let rb = Re + cl.layer.x;
-    let rt = Re + cl.layer.y;
-    let hb = sphere(r0, mu, rb);
-    let ht = sphere(r0, mu, rt);
     let hgr = sphere(r0, mu, Re);
     var t_ground = 1e10;
     if hits(hgr) && hgr.x > 0.0 {
         t_ground = hgr.x;
     }
-    var t0 = 0.0;
-    var t1 = -1.0;
-    if r0 < rb {
-        t0 = hb.y;
-        t1 = ht.y;
-    } else if r0 < rt {
-        t1 = ht.y;
-        if hits(hb) && hb.x > 0.0 {
-            t1 = hb.x;
-        }
-    } else if hits(ht) && ht.x > 0.0 {
-        t0 = ht.x;
-        t1 = ht.y;
-        if hits(hb) && hb.x > 0.0 {
-            t1 = hb.x;
-        }
-    }
-    t1 = min(t1, min(min(t_scene, t_ground), MAX_DIST));
+    let t_end = min(min(t_scene, t_ground), MAX_DIST);
 
     let key = cl.key.xyz;
     let fill = cl.fill.xyz;
@@ -311,83 +516,30 @@ fn fragment(in: FullscreenVertexOutput) -> TraceOut {
     let d_as = direction_world_to_atmosphere(d);
     let sky_far = sample_sky_view_lut(rc, d_as);
 
-    var T = 1.0;
-    var L = vec3<f32>(0.0);
-    var t_acc = 0.0;
-    var w_acc = 0.0;
-    let seg = t1 - t0;
-    if seg > 0.0 {
-        // light at the bottom and the top of the layer where the ray crosses it
-        let pm = cam_a + d * (0.5 * (t0 + t1));
-        let upm = pm / length(pm);
-        let k_bot = light_at(upm * rb, key) * cl.key_color.rgb;
-        let k_top = light_at(upm * rt, key) * cl.key_color.rgb;
-        let f_bot = light_at(upm * rb, fill) * cl.fill_color.rgb;
-        let f_top = light_at(upm * rt, fill) * cl.fill_color.rgb;
-        // light bounced off the ground below the clouds
-        let ground = (light_at(upm * (Re + 1.0), key) * cl.key_color.rgb * max(dot(key, upm), 0.0)
-            + light_at(upm * (Re + 1.0), fill) * cl.fill_color.rgb * max(dot(fill, upm), 0.0)) * (0.2 / PI);
-        let amb_bot = amb_top * 0.5 + ground;
-
-        let H = cl.layer.y - cl.layer.x;
-        let sigma = cl.cover.y;
-        let n = clamp(seg / 55.0, 24.0, cl.quality.x);
-        let ds0 = seg / n;
-        var t = t0 + ds0 * jitter(px, cl.camera.w);
-        // coarse steps through empty space; entering a cloud backs up one step and marches it
-        // finely, so the light comes from its lit surface rather than from a sample deep inside
-        var fine = 0;
-        for (var i = 0; i < 256; i++) {
-            if t >= t1 || T < 0.01 {
-                break;
-            }
-            let coarse = ds0 * (1.0 + t / 30000.0);
-            let ds = select(coarse, max(coarse * 0.18, 16.0), fine > 0);
-            let pa = cam_a + d * t;
-            let h = length(pa) - Re;
-            let hf = (h - cl.layer.x) / H;
-            let pw = cam + d * t;
-            var dens = 0.0;
-            var p = vec3<f32>(0.0);
-            if hf >= 0.0 && hf <= 1.0 {
-                let w = cover_at(pw.xz);
-                if w > 0.003 {
-                    p = vec3<f32>(pw.x, h, pw.z);
-                    dens = density(p, hf, w, true) * smoothstep(cl.layer.w * 0.6, cl.layer.w, t);
-                }
-            }
-            if dens > 0.001 {
-                if fine == 0 && t - coarse > t0 {
-                    fine = 10;
-                    t -= coarse;
-                    continue;
-                }
-                fine = 10;
-                // extinction LOD: steps grow with distance, so far clouds get a softer optical
-                // depth (their light then comes from near the lit surface, as it should)
-                let lod = 1.0 / (1.0 + t / 12000.0);
-                let st = dens * sigma * lod;
-                let od = light_depth(p, key) * lod;
-                // scattering orders: each sees less extinction, carries less energy and scatters
-                // more evenly (the last one isotropic)
-                // the last term is light diffusing through the whole cloud (falls off ~1/(1 + k tau))
-                let ms = pk0 * exp(-od) + MS_GAIN * (0.85 * pk1 * exp(-od * 0.3) + 0.72 * pk2 * exp(-od * 0.1) + 0.048 / (1.0 + od * 0.12));
-                let msf = pf0 * exp(-od) + MS_GAIN * (0.85 * pf1 * exp(-od * 0.3) + 0.05 * exp(-od * 0.05));
-                let amb = mix(amb_bot, amb_top, clamp(hf * 1.3, 0.0, 1.0)) * (1.0 - 0.4 * clamp(dens * 1.5, 0.0, 1.0));
-                let lum = mix(k_bot, k_top, hf) * ms + mix(f_bot, f_top, hf) * msf + amb;
-                let s = st * lum;
-                let tr = exp(-st * ds);
-                L += T * (s - s * tr) / max(st, 1e-7);
-                let dt = T * (1.0 - tr);
-                t_acc += t * dt;
-                w_acc += dt;
-                T *= tr;
-            } else if fine > 0 {
-                fine -= 1;
-            }
-            t += ds;
+    var m: March;
+    m.T = 1.0;
+    m.L = vec3<f32>(0.0);
+    m.t_acc = 0.0;
+    m.w_acc = 0.0;
+    let ph = Phases(pk0, pk1, pk2, pf0, pf1);
+    let cu = cumulus_layer();
+    if sea_on() {
+        // front to back: the sea first from inside or below it, the cumulus first from above
+        let sl = sea_layer();
+        if r0 < Re + sl.top {
+            m = march(m, sl, r0, mu, t_end, cam, cam_a, d, px, amb_top, ph);
+            m = march(m, cu, r0, mu, t_end, cam, cam_a, d, px, amb_top, ph);
+        } else {
+            m = march(m, cu, r0, mu, t_end, cam, cam_a, d, px, amb_top, ph);
+            m = march(m, sl, r0, mu, t_end, cam, cam_a, d, px, amb_top, ph);
         }
+    } else {
+        m = march(m, cu, r0, mu, t_end, cam, cam_a, d, px, amb_top, ph);
     }
+    let T = m.T;
+    let L = m.L;
+    let t_acc = m.t_acc;
+    let w_acc = m.w_acc;
 
     var col = vec3<f32>(0.0);
     var alpha = 0.0;

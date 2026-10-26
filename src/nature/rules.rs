@@ -33,7 +33,7 @@ pub enum ForestEcology {
 pub fn flora_group(kind: AssetKind) -> Option<usize> {
     use AssetKind::*;
     match kind {
-        Flowers | FlowerBush | Lavender => Some(1),
+        Flowers | FlowerBush | Lavender | Tulip => Some(1),
         Mushrooms => Some(2),
         WildStrawberry | Blueberry | Blackberry => Some(3),
         _ if kind_category(kind) == Category::Plants => Some(0),

@@ -1474,6 +1474,7 @@ fn stamp_layout(
             scale: 1.0,
             stretch: None,
             locked: false,
+            glow: None,
         };
         p.set_scale3(pc.scale * e.default_scale);
         d.store.insert(p);

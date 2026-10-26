@@ -107,13 +107,22 @@ pub fn material_surface(name: Option<&str>, extras: Option<&str>) -> Option<Surf
             Surface::Dirt
         } else if has(&["bone", "skull", "ivory", "tusk"]) {
             Surface::Bone
+        } else if has(&["rubber", "plastic", "foam", "vinyl"]) {
+            Surface::Rubber
+        } else if has(&["grate", "grating", "grill", "mesh", "perforated", "walkway"]) {
+            Surface::Grate
         } else if has(&[
             "iron", "steel", "metal", "copper", "bronze", "brass", "gold", "silver", "chain",
         ]) {
             Surface::Metal
+        } else if has(&["asphalt", "tarmac"]) {
+            Surface::Asphalt
+        } else if has(&["concrete", "cement", "pavement", "sidewalk"]) {
+            Surface::Concrete
+        } else if has(&["ceramic", "terrazzo", "porcelain", "tiles_", "tile_floor", "floor_tile"]) {
+            Surface::Tile
         } else if has(&[
-            "stone", "rock", "brick", "slate", "granite", "tile", "plaster", "concrete", "flag",
-            "ashlar",
+            "stone", "rock", "brick", "slate", "granite", "tile", "plaster", "flag", "ashlar",
         ]) {
             Surface::Stone
         } else if has(&[
@@ -483,10 +492,12 @@ pub fn load_gltf_meshes(
                 break;
             };
             // hinged doors swing open as the explorer walks up: never solid (the wall opening
-            // behind one is the way in); nor are chest lids (and what hangs from them), opened or shut
+            // behind one is the way in); nor are chest lids (and what hangs from them), opened or shut,
+            // nor lift cars and their doors (`model_render::lift` carries the explorer on them)
             if n.extras.as_ref().is_some_and(|x| {
                 crate::model_render::door::parse_door(&x.value).is_some()
                     || crate::model_render::lid::parse_lid(&x.value).is_some()
+                    || crate::model_render::lift::not_solid(&x.value)
             }) {
                 continue;
             }
@@ -855,6 +866,10 @@ pub struct Colliders {
     pending: HashMap<u64, (PlacedKey, Task<Option<ObjCollider>>)>,
     /// how many were built (stats / tests)
     pub built: usize,
+    /// objects bigger than `REACH` (a landmark's plaza, a kilometre-high tower): the object grid
+    /// finds things by their origin, which can be far further than `REACH` from where you stand on
+    /// them, so these are always looked at
+    big: HashSet<u64>,
 }
 
 impl Colliders {
@@ -899,7 +914,10 @@ impl Colliders {
                 }
                 None => true,
             });
-        for id in store.query(c, r + REACH) {
+        let mut ids = store.query(c, r + REACH);
+        let extra: Vec<u64> = self.big.iter().copied().filter(|id| !ids.contains(id)).collect();
+        ids.extend(extra);
+        for id in ids {
             let Some(p) = store.items.get(&id) else {
                 continue;
             };
@@ -908,6 +926,9 @@ impl Colliders {
                 continue;
             }
             let Some(e) = lib.get(&p.asset) else { continue };
+            if e.radius * p.scale > REACH {
+                self.big.insert(id);
+            }
             if !is_solid(e) {
                 self.objects.insert(id, (pk, None));
                 continue;
@@ -1036,9 +1057,10 @@ impl Colliders {
 
     /// Ready colliders that could touch a disc of radius `r` around `c`.
     pub fn near(&self, store: &ObjectStore, c: Vec2, r: f32) -> Vec<Arc<ObjCollider>> {
-        store
-            .query(c, r + REACH)
-            .into_iter()
+        let mut ids = store.query(c, r + REACH);
+        let extra: Vec<u64> = self.big.iter().copied().filter(|id| !ids.contains(id)).collect();
+        ids.extend(extra);
+        ids.into_iter()
             .filter_map(|id| self.objects.get(&id).and_then(|(_, o)| o.clone()))
             .chain(self.procedural.values().filter_map(|(_, o)| o.clone()))
             .filter(|o| o.overlaps(c, r, f32::MIN, f32::MAX))
@@ -1094,6 +1116,65 @@ impl Colliders {
             o.cells_in(c, r)
                 .any(|(_, _, b, _)| b > p.y + 0.05 && b < p.y + up)
         })
+    }
+
+    /// How far a ball of radius `r` gets from `from` toward `to` before it touches something big
+    /// and solid (a building's walls, floors and ceilings, a boulder; not trunks, posts or props
+    /// under `min_size` across): 0..=1 of the way. Starting inside something, it counts from where
+    /// it first comes clear. The game camera stays inside rooms with it
+    /// (`crate::characters::play_camera`).
+    pub fn sweep(&self, store: &ObjectStore, from: Vec3, to: Vec3, r: f32, min_size: f32) -> f32 {
+        let d = to - from;
+        let len = d.length();
+        if len < 1e-3 {
+            return 1.0;
+        }
+        let mid = (from + to) * 0.5;
+        let near: Vec<_> = self
+            .near(store, mid.xz(), len * 0.5 + r)
+            .into_iter()
+            .filter(|o| (o.max.x - o.min.x).max(o.max.z - o.min.z) >= min_size)
+            .collect();
+        if near.is_empty() {
+            return 1.0;
+        }
+        let steps = (len / 0.08).ceil().max(1.0) as usize;
+        let mut clear = None;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let p = from + d * t;
+            let c = p.xz();
+            let hit = near.iter().any(|o| {
+                o.overlaps(c, r, p.y - r, p.y + r)
+                    && o.cells_in(c, r).any(|(_, _, b, top)| b < p.y + r && top > p.y - r)
+            });
+            match (hit, clear) {
+                (true, Some(last)) => return last,
+                (false, _) => clear = Some(t),
+                _ => {}
+            }
+        }
+        1.0
+    }
+
+    /// The bounds (min, max) of what roofs `p` (a building's upper floor or roof, a bridge): a
+    /// solid piece over a disc of radius `r` whose underside is `from`..`up` metres above it.
+    pub fn roof_over(
+        &self,
+        store: &ObjectStore,
+        p: Vec3,
+        r: f32,
+        from: f32,
+        up: f32,
+    ) -> Option<(Vec3, Vec3)> {
+        let c = p.xz();
+        self.near(store, c, r)
+            .into_iter()
+            .find(|o| {
+                o.cells_in(c, r)
+                    .any(|(_, _, b, _)| b > p.y + from && b < p.y + up)
+            })
+            .map(|o| (o.min, o.max))
     }
 
     /// Would a body standing at `feet` overlap something solid (beyond what it steps onto)?
@@ -1250,6 +1331,7 @@ mod tests {
             scale: 1.0,
             stretch: None,
             locked: false,
+            glow: None,
         }
     }
 

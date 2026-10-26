@@ -136,7 +136,7 @@ pub fn window(ctx: &egui::Context, s: &mut UiState) {
             s.gallery.selected = Some(items[next as usize].0.clone());
         }
         // (a pack card over the gallery closes first)
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && s.market.card.is_none() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && s.market.card.is_none() && !s.market.open {
             open = false;
         }
     }

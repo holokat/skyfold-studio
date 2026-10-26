@@ -277,7 +277,10 @@ fn vertex(vertex_in: Vertex) -> CropOut {
     }
 
     var wp = vec3<f32>(base.x, ground - 0.02, base.y) + o;
-    if !in_mask || !shown || (fade <= 0.002 && !canopy) {
+    // (the far canopy is a sheet with a vertex every 2 m: dropping the ones outside the outline
+    // would drag its edge down in steps, so it keeps them and the fragments are cut to the
+    // outline instead, `canopy_keep`)
+    if (!in_mask && !canopy) || !shown || (fade <= 0.002 && !canopy) {
         // dropped: a degenerate point under the ground
         wp = vec3<f32>(base.x, ground - 3.0, base.y);
     }
@@ -302,6 +305,9 @@ fn vertex(vertex_in: Vertex) -> CropOut {
         // from afar a field is never one flat colour: patches where it grew better or worse
         let patchy = value_noise2(base / 9.0, 61u) * 0.6 + value_noise2(base / 3.1, 67u) * 0.4;
         c = col.rgb * mix(0.78, 1.14, patchy);
+        // where it starts rising, the plants in front still show the soil between them: it starts
+        // as their mix with the soil and turns to the crop's own colour as it rises
+        c = mix(vec3<f32>(0.045, 0.036, 0.028), c, 0.45 + 0.55 * fade);
     }
     var gust_sheen = gust * bend * 0.5;
     if tulip_part != 0u {
@@ -334,6 +340,32 @@ fn vertex(vertex_in: Vertex) -> CropOut {
 // surface removal works again, so each pixel of a dense field is shaded once, not once a layer.
 // Both draws use this module with the same definitions, only another fragment entry point: the
 // vertex shader compiles to the very same code, so the depths match exactly.
+
+/// Whether this fragment is inside the field's outline, for the far canopy (`uv.y` < -0.5): its
+/// sheets are cut to the outline mask here, per pixel, not at their vertices.
+fn canopy_keep(in: VertexOutput) -> bool {
+    var marker = 0.0;
+@if(VERTEX_UVS_A) {
+    marker = in.uv.y;
+}
+    if marker > -0.5 {
+        return true;
+    }
+    let d = in.world_position.xz - field.frame.xy;
+    let cs = field.frame.z;
+    let sn = field.frame.w;
+    let local = vec2<f32>(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+    let muv = local / max(field.mask.xy, vec2<f32>(1.0));
+    let inside = all(muv >= vec2<f32>(0.0)) && all(muv <= vec2<f32>(1.0))
+        && textureSampleLevel(mask_tex, mask_samp, muv, 0.0).r > 0.5;
+    // near the camera the plants carry the field: the canopy starts where it begins to rise,
+    // in patches over the first part of the rise (a flat sheet there would hide the soil
+    // between the plants tile by tile)
+    let cam = vec3<f32>(crop.gust.z, crop.view.x, crop.gust.w);
+    let rise = (distance(in.world_position.xyz, cam) - field.look.w)
+        / max(field.look.z - field.look.w, 1.0);
+    return inside && rise > value_noise2(in.world_position.xz * 0.8, 71u) * 0.45;
+}
 
 /// The atlas's cut-out alpha at this fragment (true: kept).
 fn cutout_keep(tan: vec4<f32>, wp: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> bool {
@@ -371,7 +403,7 @@ fn fragment_depth(crop_in: CropOut) -> FragmentOutput {
     let dpy = dpdy(wp);
     let duvx = dpdx(tan.xy);
     let duvy = dpdy(tan.xy);
-    if !cutout_keep(tan, wp, dpx, dpy, duvx, duvy) {
+    if !cutout_keep(tan, wp, dpx, dpy, duvx, duvy) || !canopy_keep(in) {
         discard;
     }
     var out: FragmentOutput;
@@ -385,7 +417,7 @@ fn fragment(crop_in: CropOut, @builtin(front_facing) is_front: bool) -> Fragment
     let in = from_crop(crop_in);
     var keep = true;
     var pbr_input = crop_input(in, is_front, &keep);
-    if !keep {
+    if !keep || !canopy_keep(in) {
         discard;
     }
     return lit(pbr_input);

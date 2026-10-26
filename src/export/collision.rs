@@ -56,6 +56,10 @@ pub fn physics(s: Surface) -> (f32, f32) {
         Surface::Metal => (0.4, 0.1),
         Surface::Crystal => (0.3, 0.2),
         Surface::Carpet => (0.8, 0.02),
+        Surface::Concrete | Surface::Asphalt => (0.75, 0.06),
+        Surface::Tile | Surface::Glass => (0.45, 0.1),
+        Surface::Rubber => (0.9, 0.2),
+        Surface::Grate => (0.6, 0.1),
     }
 }
 

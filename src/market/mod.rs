@@ -26,6 +26,7 @@ pub mod install;
 pub mod mcp;
 pub mod site;
 pub mod ui;
+pub mod view;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -813,13 +814,27 @@ mod tests {
         let ids: Vec<&str> = packs.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["polyhaven_scans", "skyborn_village", "skyfold_studio"]
+            [
+                "polyhaven_scans",
+                "skyborn_village",
+                "skyfold_photoreal",
+                "skyfold_studio"
+            ]
         );
         let m = Market::build(packs, [], Dev::Off, Source::Bundled, &lib_packs());
         // CC0 packs are free (Poly Haven's scans, and the public Skyborn village); the packs Skyfold
-        // makes to sell are paid, with 10 free samples
+        // makes to sell are paid (the hand-painted collection with 10 free samples; the photoreal
+        // set pieces too, the pavilion, the lift tower and the spire among them)
         assert_eq!(m.state(m.pack("polyhaven_scans").unwrap()), PackState::Free);
         assert_eq!(m.state(m.pack("skyborn_village").unwrap()), PackState::Free);
+        assert_eq!(m.state(m.pack("skyfold_photoreal").unwrap()), PackState::Locked);
+        for a in [
+            "photoreal:marble_garden_pavilion",
+            "photoreal:glass_lift_tower",
+            "photoreal:sky_spire",
+        ] {
+            assert!(!m.usable(a), "{a} is paid");
+        }
         let dir = std::path::PathBuf::from(crate::assets_path()).join("models");
         let lib: Vec<String> = crate::objects::model_libraries(&dir)
             .iter()

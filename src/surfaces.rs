@@ -74,13 +74,13 @@ impl Slot {
     pub fn categories(self) -> &'static [&'static str] {
         match self {
             Slot::Planks | Slot::Beam | Slot::DarkWood => &["wood"],
-            Slot::Iron | Slot::RustyIron => &["metal", "ore"],
-            Slot::Canvas => &["fabric", "leather"],
+            Slot::Iron | Slot::RustyIron => &["metal", "ore", "tech"],
+            Slot::Canvas => &["fabric", "leather", "plastic"],
             Slot::Rope => &["rope", "fabric"],
-            Slot::StoneBlocks => &["stone", "brick", "ore"],
-            Slot::Cobble => &["stone", "ceramic", "brick"],
-            Slot::Plaster => &["plaster", "brick", "stone"],
-            Slot::RoofTiles | Slot::Thatch => &["roof", "wood"],
+            Slot::StoneBlocks => &["stone", "brick", "ore", "concrete"],
+            Slot::Cobble => &["stone", "ceramic", "brick", "concrete"],
+            Slot::Plaster => &["plaster", "brick", "stone", "concrete", "facade"],
+            Slot::RoofTiles | Slot::Thatch => &["roof", "wood", "metal"],
         }
     }
     /// Library ids in preference order (the bundled CC0 library's best match for the slot).
@@ -279,6 +279,8 @@ pub struct Surfaces {
     applied: SurfaceChoices,
     /// the surface style (`art_style::surfaces`) the arrays hold
     art: crate::art_style::ArtStyle,
+    /// the content packs installed when they were read (`content::revision`)
+    content: u32,
 }
 
 impl Surfaces {
@@ -305,6 +307,18 @@ const SIZE: u32 = 512;
 
 fn library_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(crate::assets_path()).join("textures/materials")
+}
+
+/// One file of a material ("albedo.png"): the app's, or a downloaded content pack's
+/// (`crate::content`; the app keeps every material's swatch).
+pub fn item_file(id: &str, name: &str) -> std::path::PathBuf {
+    crate::paths::asset_file(&format!("textures/materials/{id}/{name}"))
+}
+
+/// Whether a material's files are on this computer (false for a content pack's material that
+/// hasn't been downloaded yet: automatic picks pass over it).
+pub fn available(id: &str) -> bool {
+    crate::content::available(&format!("textures/materials/{id}"))
 }
 
 fn read_library() -> Vec<LibraryEntry> {
@@ -342,16 +356,18 @@ fn pick<'a>(
     let chosen = choices.get(slot);
     if !chosen.is_empty()
         && let Some(e) = entries.iter().find(|e| e.id == chosen)
+        && available(&e.id)
     {
         return Some(e);
     }
+    // (a material still to download is never picked automatically)
     let (cat, tags) = slot.wants();
     slot.ids()
         .iter()
-        .find_map(|id| entries.iter().filter(|e| e.tiling).find(|e| e.id == *id))
+        .find_map(|id| entries.iter().filter(|e| e.tiling && available(&e.id)).find(|e| e.id == *id))
         .or_else(|| {
             tags.iter().find_map(|tag| {
-                entries.iter().filter(|e| e.tiling).find(|e| {
+                entries.iter().filter(|e| e.tiling && available(&e.id)).find(|e| {
                     (e.category.eq_ignore_ascii_case(cat)
                         || cat == "plaster" && e.category.eq_ignore_ascii_case("stone"))
                         && (e.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
@@ -368,13 +384,9 @@ fn load_layer(
     lut: &[f32; 256],
     art: crate::art_style::ArtStyle,
 ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, [f32; 2], [f32; 3])> {
-    let d = library_dir().join(&e.id);
+    let f = |name: &str| item_file(&e.id, name);
     let files = crate::art_style::textures(
-        [
-            d.join("albedo.png"),
-            d.join("normal.png"),
-            d.join("orm.png"),
-        ],
+        [f("albedo.png"), f("normal.png"), f("orm.png")],
         art,
     );
     let read = |f: &std::path::Path| {
@@ -525,6 +537,7 @@ pub fn load(
             tiles,
             applied: none,
             art,
+            content: crate::content::revision(),
         },
         SurfaceLibrary { entries },
     )
@@ -555,7 +568,9 @@ fn apply_choices(
     // the world's art style changed: every slot is read again in the new style (the slots' mean
     // colours, which existing parts' tints are relative to, stay)
     let art = crate::art_style::surfaces(meta.art_style);
-    let restyle = art != sf.art;
+    // (a content pack that landed counts as a restyle: every slot is read again)
+    let rev = crate::content::revision();
+    let restyle = art != sf.art || rev != sf.content;
     if *choices == sf.applied && !restyle {
         return;
     }
@@ -586,6 +601,7 @@ fn apply_choices(
     }
     sf.applied = choices.clone();
     sf.art = art;
+    sf.content = rev;
     if !changed {
         return;
     }

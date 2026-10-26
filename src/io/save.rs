@@ -74,6 +74,7 @@ impl Snapshot {
             building_materials: data.surface_choices.clone(),
             terrain_layers: data.layer_choices.clone(),
             art_style: Some(data.meta.art_style),
+            world_kind: Some(data.meta.kind),
             zones: data.zones.list.clone(),
             rivers: data.water.rivers.clone(),
             lakes: data.water.lakes.clone(),
@@ -96,6 +97,21 @@ impl Snapshot {
             // (older versions of the editor read an empty list here)
             objects: vec![],
             objects_file: Some("objects.bin".to_string()),
+            object_glow: crate::objects::glow::to_save(&data.store.items),
+            object_groups: data
+                .store
+                .items
+                .values()
+                .filter(|p| p.group != 0)
+                .map(|p| (p.id, p.group))
+                .collect(),
+            object_locked: data
+                .store
+                .items
+                .values()
+                .filter(|p| p.locked)
+                .map(|p| p.id)
+                .collect(),
             procedural,
             imports,
             layer_surface: data.ed.layer_surface.to_vec(),
@@ -272,6 +288,7 @@ mod tests {
                 scale: 1.0 + (id % 5) as f32 * 0.1,
                 stretch: (id % 10 == 0).then_some([1.0, 0.5, 0.8]),
                 locked: false,
+                glow: None,
             })
             .collect()
     }

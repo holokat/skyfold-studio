@@ -169,6 +169,9 @@ impl Crop {
         use Crop::*;
         match self {
             Corn | Sunflowers | Hops | Vineyard | Tea | Plowed => ranges[2] * 0.55,
+            // tulip heads stay apart, the soil showing between them, until well into their mid
+            // range: a carpet nearer than that is brighter than the plants in front of it
+            Tulips => ranges[1] * 0.75,
             // thin stalks and small leaves turn sub-pixel early: the canopy carries them from
             // just past their close range (the plants' tops stand out of it)
             _ => ranges[0],
@@ -212,22 +215,45 @@ pub struct Field {
     pub outline: Vec<[f32; 2]>,
     /// the rows' direction (radians, as `Quat::from_rotation_y`: 0 = along x)
     pub rows: f32,
+    /// tulips only: all one colour (`plants::TULIP_COLOUR_NAMES` index); none = bands of colours
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u8>,
+    /// outlines inside it left unplanted (for other fields: a disc, a stripe, a letter)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<[f32; 2]>>,
 }
 
 impl Field {
     pub fn poly(&self) -> Vec<Vec2> {
         self.outline.iter().map(|p| Vec2::from_array(*p)).collect()
     }
+    pub fn hole_polys(&self) -> Vec<Vec<Vec2>> {
+        self.holes
+            .iter()
+            .map(|h| h.iter().map(|p| Vec2::from_array(*p)).collect())
+            .collect()
+    }
+    /// Signed distance to the planted ground: < 0 inside the outline and outside every hole.
+    pub fn sdf(&self, p: Vec2) -> f32 {
+        sdf_with_holes(&self.poly(), &self.hole_polys(), p)
+    }
     pub fn area(&self) -> f32 {
-        poly_area(&self.poly())
+        poly_area(&self.poly()) - self.hole_polys().iter().map(|h| poly_area(h)).sum::<f32>()
     }
     pub fn centre(&self) -> Vec2 {
         let p = self.poly();
         p.iter().copied().sum::<Vec2>() / p.len().max(1) as f32
     }
     pub fn contains(&self, p: Vec2) -> bool {
-        crate::setpieces::poly_sdf(&self.poly(), p) < 0.0
+        self.sdf(p) < 0.0
     }
+}
+
+/// Signed distance to the inside of `poly` less its `holes`.
+pub fn sdf_with_holes(poly: &[Vec2], holes: &[Vec<Vec2>], p: Vec2) -> f32 {
+    holes.iter().fold(crate::setpieces::poly_sdf(poly, p), |d, h| {
+        d.max(-crate::setpieces::poly_sdf(h, p))
+    })
 }
 
 pub fn poly_area(poly: &[Vec2]) -> f32 {
@@ -311,10 +337,28 @@ pub fn add(
     rows: Option<f32>,
     label: &str,
 ) -> Result<u64, String> {
+    add_with_holes(w, crop, outline, &[], rows, label)
+}
+
+/// `add`, leaving `holes` (outlines inside it) unplanted.
+pub fn add_with_holes(
+    w: &mut PlantWorld,
+    crop: Crop,
+    outline: &[Vec2],
+    holes: &[Vec<Vec2>],
+    rows: Option<f32>,
+    label: &str,
+) -> Result<u64, String> {
+    if holes
+        .iter()
+        .any(|h| h.len() < 3 || h.iter().any(|p| crate::setpieces::poly_sdf(outline, *p) > 0.0))
+    {
+        return Err("every hole needs at least 3 corners, all inside the field".into());
+    }
     if outline.len() < 3 {
         return Err("a field needs at least 3 corners".into());
     }
-    let area = poly_area(outline);
+    let area = poly_area(outline) - holes.iter().map(|h| poly_area(h)).sum::<f32>();
     if area < 30.0 {
         return Err(format!(
             "that's only {area:.0} m² — draw a field of at least 30 m²"
@@ -338,7 +382,7 @@ pub fn add(
         let mut x = lo.x + step * 0.5;
         while x < hi.x {
             let p = Vec2::new(x, z);
-            if crate::setpieces::poly_sdf(outline, p) < 0.0 {
+            if sdf_with_holes(outline, holes, p) < 0.0 {
                 inside += 1;
                 let h = w.terrain.height_at(x, z);
                 if h < w.terrain.sea_level + 0.2 || w.water.is_underwater(Vec3::new(x, h, z), 0.2) {
@@ -361,9 +405,15 @@ pub fn add(
         crop,
         outline: outline.iter().map(|p| p.to_array()).collect(),
         rows: rows.unwrap_or_else(|| long_axis(outline)),
+        colour: None,
+        holes: holes
+            .iter()
+            .map(|h| h.iter().map(|p| p.to_array()).collect())
+            .collect(),
     };
     paint_ground(w.terrain, w.history, &f);
     let poly: Vec<Vec2> = outline.to_vec();
+    let holes = holes.to_vec();
     let (lo, hi) = bounds(&poly);
     crate::nature::paint_region(
         w.nature,
@@ -371,7 +421,7 @@ pub fn add(
         label,
         lo - 3.0,
         hi + 3.0,
-        move |q| crate::setpieces::poly_sdf(&poly, q) < 2.5,
+        move |q| sdf_with_holes(&poly, &holes, q) < 2.5,
         &crate::nature::field::Target::All,
         crate::nature::AreaOp::Keep(0.0),
     );
@@ -416,10 +466,50 @@ pub fn edit(
         .ok_or_else(|| format!("no field {id}"))?;
     if let Some(c) = crop {
         f.crop = c;
+        if c != Crop::Tulips {
+            f.colour = None;
+        }
     }
     if let Some(r) = rows {
         f.rows = r;
     }
+    fields.changed();
+    record(history, "Change field", before, fields);
+    Ok(())
+}
+
+/// The tulip colour index of `name` (red, yellow, pink, white, purple, orange).
+pub fn tulip_colour(name: &str) -> Option<u8> {
+    let n = name.trim().to_lowercase();
+    plants::TULIP_COLOUR_NAMES
+        .iter()
+        .position(|c| *c == n)
+        .map(|i| i as u8)
+}
+
+/// Sets a tulip field's colour (`None`: bands of every colour).
+pub fn set_colour(
+    fields: &mut Fields,
+    history: &mut crate::history::History,
+    id: u64,
+    colour: Option<u8>,
+) -> Result<(), String> {
+    let before = Snapshot(fields.list.clone(), fields.next_id);
+    let f = fields
+        .list
+        .iter_mut()
+        .find(|f| f.id == id)
+        .ok_or_else(|| format!("no field {id}"))?;
+    if colour.is_some() && f.crop != Crop::Tulips {
+        return Err(format!(
+            "only tulip fields have a colour (field {id} is {})",
+            f.crop.id()
+        ));
+    }
+    if f.colour == colour {
+        return Ok(());
+    }
+    f.colour = colour;
     fields.changed();
     record(history, "Change field", before, fields);
     Ok(())
@@ -455,7 +545,7 @@ fn paint_ground(t: &mut Terrain, history: &mut crate::history::History, f: &Fiel
     for j in rect.z0..=rect.z1 {
         for i in rect.x0..=rect.x1 {
             let w = t.grid_to_world(i, j);
-            let d = crate::setpieces::poly_sdf(&poly, w);
+            let d = sdf_with_holes(&poly, &f.hole_polys(), w);
             let k = ((1.5 - d) / 3.0).clamp(0.0, 1.0);
             if k <= 0.004 {
                 continue;

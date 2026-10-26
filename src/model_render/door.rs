@@ -3,7 +3,10 @@
 //! `Asset.door_node`) swings about `axis` (node space, through the node's origin: the hinge) up to
 //! `d` degrees; `leaf` is the leaf's centre from the hinge. While walking, a door swings open as
 //! the explorer comes within a couple of metres, away from them (it opens either way), and shuts
-//! once they have gone; agents can hold doors open or shut (`doors` MCP tool). Doors are never
+//! once they have gone. A sliding door adds `"slide": [x, y, z]`: how far the leaf moves when open
+//! (node space, e.g. along the wall), instead of swinging (`axis` is then only for other engines);
+//! `"one_way": true` always swings the positive turn about `axis` (the author picks the axis sign so
+//! that is outward: a cabinet door that must not swing into its insides); agents can hold doors open or shut (`doors` MCP tool). Doors are never
 //! part of a model's walk-in collider, so the wall opening behind a door is the way in. The same
 //! models carry a glTF animation "door_open" for other engines.
 
@@ -58,9 +61,14 @@ pub struct Door {
     /// The leaf's centre from the hinge (node space).
     pub leaf: Vec3,
     pub hold: DoorHold,
-    /// Current swing (radians, signed: which way it opened).
+    /// Current swing (radians, signed: which way it opened); a sliding door: 0 shut .. 1 open.
     pub angle: f32,
+    /// A sliding door: how far its leaf moves when open (node space).
+    pub slide: Option<Vec3>,
+    /// Always opens with the positive turn (not away from the explorer).
+    pub one_way: bool,
     base: Quat,
+    base_t: Vec3,
     /// The explorer is close (with hysteresis).
     near: bool,
 }
@@ -68,12 +76,21 @@ pub struct Door {
 impl Door {
     /// 0 shut .. 1 wide open.
     pub fn openness(&self) -> f32 {
+        if self.slide.is_some() {
+            return self.angle.clamp(0.0, 1.0);
+        }
         (self.angle.abs() / self.open.max(1e-3)).min(1.0)
     }
 }
 
 /// Reads a node's `door` extras: (axis, open radians, leaf centre); None when it has none.
 pub fn parse_door(extras: &str) -> Option<(Vec3, f32, Vec3)> {
+    parse_door_slide(extras).map(|(a, o, l, _)| (a, o, l))
+}
+
+/// Reads a node's `door` extras with a sliding door's travel (`slide`, node space); a sliding door
+/// needs no `axis` (then +Y).
+pub fn parse_door_slide(extras: &str) -> Option<(Vec3, f32, Vec3, Option<Vec3>)> {
     let v: serde_json::Value = serde_json::from_str(extras).ok()?;
     let d = v.get("door")?;
     let vec = |k: &str| -> Option<Vec3> {
@@ -84,11 +101,24 @@ pub fn parse_door(extras: &str) -> Option<(Vec3, f32, Vec3)> {
             a.get(2)?.as_f64()? as f32,
         ))
     };
-    let axis = vec("axis")?.try_normalize()?;
+    let slide = vec("slide").filter(|v| v.length() > 1e-3);
+    let axis = match vec("axis") {
+        Some(a) => a.try_normalize()?,
+        None if slide.is_some() => Vec3::Y,
+        None => return None,
+    };
     let open = (d.get("open_deg").and_then(|x| x.as_f64()).unwrap_or(95.0) as f32)
         .clamp(5.0, 180.0)
         .to_radians();
-    Some((axis, open, vec("leaf").unwrap_or(Vec3::ZERO)))
+    Some((axis, open, vec("leaf").unwrap_or(Vec3::ZERO), slide))
+}
+
+/// A door's `one_way` extra (opens only with its positive turn).
+pub fn door_one_way(extras: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(extras)
+        .ok()
+        .and_then(|v| v.get("door")?.get("one_way")?.as_bool())
+        .unwrap_or(false)
 }
 
 /// Which way to swing (+1 / −1) so the leaf moves away from someone at `from` (all world
@@ -111,16 +141,20 @@ pub fn on_scene_ready(
     let root = ev.event().entity;
     for c in children.iter_descendants(root) {
         let Ok((x, tf)) = nodes.get(c) else { continue };
-        let Some((axis, open, leaf)) = parse_door(&x.value) else {
+        let Some((axis, open, leaf, slide)) = parse_door_slide(&x.value) else {
             continue;
         };
+        let one_way = door_one_way(&x.value);
         commands.entity(c).insert(Door {
             axis,
             open,
             leaf,
             hold: DoorHold::Auto,
             angle: 0.0,
+            slide,
+            one_way,
             base: tf.rotation,
+            base_t: tf.translation,
             near: false,
         });
     }
@@ -129,6 +163,11 @@ pub fn on_scene_ready(
 /// The closed leaf's centre and the direction a positive swing moves it (world space).
 pub fn leaf_frame(door: &Door, gt: &GlobalTransform) -> (Vec3, Vec3) {
     let (scale, rot, pivot) = gt.to_scale_rotation_translation();
+    if let Some(sl) = door.slide {
+        // (where the leaf stands shut: back along its travel; it moves along the slide)
+        let closed = pivot - rot * (scale * sl * door.angle);
+        return (closed + rot * (scale * door.leaf), rot * sl);
+    }
     let closed = rot * Quat::from_axis_angle(door.axis, door.angle).inverse();
     let leaf = pivot + closed * (scale * door.leaf);
     (leaf, closed * door.axis.cross(door.leaf))
@@ -166,13 +205,29 @@ pub fn swing(
             DoorHold::Closed => false,
             DoorHold::Auto => d.near,
         };
+        if let Some(sl) = d.slide {
+            let target = if want_open { 1.0 } else { 0.0 };
+            if (target - d.angle).abs() < 1e-4 {
+                continue;
+            }
+            // (about 0.8 s to open, 1.1 s to shut)
+            let step = if target > d.angle { 1.25 } else { 0.9 } * dt;
+            d.angle += (target - d.angle).clamp(-step, step);
+            let t = d.angle * d.angle * (3.0 - 2.0 * d.angle);
+            tf.translation = d.base_t + d.base * (sl * t);
+            continue;
+        }
         let target = if !want_open {
             0.0
         } else if d.angle.abs() > 1e-3 {
             d.open * d.angle.signum()
         } else {
-            // starting to open: away from the explorer
-            d.open * who.map_or(1.0, |p| away_from(p, leaf, swing_dir))
+            // starting to open: away from the explorer (a one-way door: its positive turn)
+            if d.one_way {
+                d.open
+            } else {
+                d.open * who.map_or(1.0, |p| away_from(p, leaf, swing_dir))
+            }
         };
         if (target - d.angle).abs() < 1e-4 {
             continue;
@@ -203,6 +258,15 @@ mod tests {
         assert!(parse_door(r#"{"spin": {"axis": [0, 1, 0], "rpm": 9}}"#).is_none());
         assert!(parse_door(r#"{"door": {"axis": [0, 0, 0]}}"#).is_none());
         assert_eq!(DoorHold::parse("shut"), Some(DoorHold::Closed));
+        // a sliding door: no axis needed (then +Y), its travel read
+        let (axis, _, leaf, slide) =
+            parse_door_slide(r#"{"door": {"slide": [0.9, 0, 0], "leaf": [0, 1.1, 0]}}"#).unwrap();
+        assert_eq!((axis, leaf, slide), (Vec3::Y, Vec3::new(0.0, 1.1, 0.0), Some(Vec3::new(0.9, 0.0, 0.0))));
+        assert!(parse_door(r#"{"door": {"slide": [0.9, 0, 0]}}"#).is_some());
+        assert_eq!(parse_door_slide(r#"{"door": {"axis": [0, 1, 0]}}"#).unwrap().3, None);
+        // one-way doors: only when asked
+        assert!(door_one_way(r#"{"door": {"axis": [0, 1, 0], "one_way": true}}"#));
+        assert!(!door_one_way(r#"{"door": {"axis": [0, 1, 0]}}"#));
     }
 
     #[test]

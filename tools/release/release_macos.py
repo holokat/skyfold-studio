@@ -11,7 +11,9 @@ generate_appcast with the key in the login keychain; the DMG itself is the updat
 SHA256SUMS.txt. Everything lands in target/release-mac/<version>/; nothing is uploaded.
 
 The feed (SUFeedURL) is the latest GitHub release's appcast.xml, so publishing a release is
-what makes running apps see it. It lists only the new version: the apps before Sparkle can't
+what makes running apps see it. The DMG is an asset of the same release (GitHub refuses assets
+of 2 GiB or more); SKYFOLD_DMG_HOST=r2 instead hosts it on Cloudflare R2 (DOWNLOAD_BASE/v<version>/,
+uploaded by publish_macos.py, up to 5 GiB). It lists only the new version: the apps before Sparkle can't
 read it and every later one updates straight to the newest.
 
 One-time setup (already done on the studio Mac): a Developer ID Application certificate, a
@@ -36,14 +38,19 @@ ROOT = Path(__file__).resolve().parents[2]
 REPO = "holokat/skyfold-studio"
 FEED_URL = f"https://github.com/{REPO}/releases/latest/download/appcast.xml"
 DMG_NAME = "Skyfold-Studio-macOS.dmg"
+# where the DMG lives: "github" (an asset of the release, the default) or "r2" (public R2 bucket
+# skyfold-studio-downloads: v<version>/<DMG_NAME> per release, latest/<DMG_NAME>)
+DMG_HOST = os.environ.get("SKYFOLD_DMG_HOST", "github")
+DOWNLOAD_BASE = "https://downloads.skyfoldstudio.com"
 APP_NAME = "Skyfold Studio.app"
 SPARKLE_VERSION = "2.9.3"
 SPARKLE_URL = (f"https://github.com/sparkle-project/Sparkle/releases/download/"
                f"{SPARKLE_VERSION}/Sparkle-{SPARKLE_VERSION}.tar.xz")
 SPARKLE_SHA256 = "74a07da821f92b79310009954c0e15f350173374a3abe39095b4fc5096916be6"
 CACHE = Path.home() / "Library/Caches/skyfold-release"
-# GitHub refuses release assets of 2 GiB or more
-ASSET_LIMIT = 2 * 1024**3
+# GitHub refuses release assets of 2 GiB or more; R2 takes a single upload up to 5 GiB - 5 MiB
+# (publish_macos.py uploads in one PUT)
+ASSET_LIMIT = 5 * 1024**3 - 5 * 1024**2 if DMG_HOST == "r2" else 2 * 1024**3
 
 
 def run(*cmd, capture=False, **kw) -> str:
@@ -266,8 +273,11 @@ def sign_and_ship(app: Path, stage: Path, out: Path, ident: str, profile: str, a
         "-format", "ULFO", dmg)
     run("/usr/bin/codesign", "--force", "--timestamp", "--sign", ident, dmg)
     if dmg.stat().st_size >= ASSET_LIMIT:
-        raise SystemExit(f"{dmg.name} is {dmg.stat().st_size / 1024**3:.2f} GiB: GitHub's "
-                         "release asset limit is 2 GiB")
+        raise SystemExit(
+            f"{dmg.name} is {dmg.stat().st_size / 1024**3:.2f} GiB: "
+            + ("R2's single-upload limit is 5 GiB" if DMG_HOST == "r2" else
+               "GitHub's release asset limit is 2 GiB. Move content out of the app, or host the "
+               "DMG on R2 (SKYFOLD_DMG_HOST=r2 for both release_macos.py and publish_macos.py)"))
     if not args.skip_notarize:
         step("Notarizing the DMG")
         notarize(dmg, profile)
@@ -281,7 +291,8 @@ def sign_and_ship(app: Path, stage: Path, out: Path, ident: str, profile: str, a
     archive = feed / f"Skyfold-Studio-{args.version}.dmg"
     run("/bin/cp", "-c", dmg, archive)
     shutil.copy(notes, feed / f"Skyfold-Studio-{args.version}.md")
-    prefix = f"https://github.com/{REPO}/releases/download/v{args.version}/"
+    prefix = (f"{DOWNLOAD_BASE}/v{args.version}/" if DMG_HOST == "r2"
+              else f"https://github.com/{REPO}/releases/download/v{args.version}/")
     run(sp / "bin/generate_appcast", "--account", account, "--download-url-prefix", prefix,
         "--embed-release-notes", "--link", "https://skyfoldstudio.com", feed)
     appcast = (feed / "appcast.xml").read_text()

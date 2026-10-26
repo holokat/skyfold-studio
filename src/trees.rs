@@ -603,6 +603,13 @@ pub struct ImpostorAtlas {
     recapture: bool,
 }
 
+impl ImpostorAtlas {
+    /// Takes the distant-tree pictures again (the plants' colours changed: `nature::alien`).
+    pub fn retake(&mut self) {
+        self.recapture = true;
+    }
+}
+
 #[derive(Default, PartialEq)]
 enum CaptureState {
     #[default]

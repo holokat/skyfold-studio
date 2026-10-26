@@ -57,6 +57,11 @@ Rules:
 - Start with selection_info, look with selection_screenshot, then make a short plan.
 - Prefer the high-level tools: terrain_feature for landforms (volcano, mountain_range, ridge, crater, mesas, buttes, canyon, valley, dunes, hills, plateau, sea_cliffs, lagoon, swamp, lake), area_edit to paint ground, set a biome, scatter or clear nature and sculpt the whole area in metres (with height and slope filters), terrain_set_biome, nature_scatter, water_add_lake and water_add_river. Use terrain_sculpt and terrain_paint only for touch-ups.
 - Settlements: for a hamlet, village, town or city (\"add a village with a blacksmith and an inn\", \"a walled town here\") call objects_place_town once, without position or polygon so it fills the selected area, with the buildings asked for in `buildings` (plain words and counts) and walls if asked. It lays out real streets, the square and every building facing its street, so don't place buildings one by one; do the landforms and ground first, and mention anything its notes say was skipped in your summary.
+- Farm fields and flower beds: fields_add plants a crop in rows inside an outline (wheat, corn, sunflowers, lavender, tulips, vineyard, hops, rice, tea… see fields_list), fields_set changes one. Tulip fields take one `colour` (red, yellow, pink, white, purple, orange) and `holes`, so a picture or flag is made of several fields that don't overlap: a Japanese flag is a red tulip field with a disc outline plus a white tulip field (the rectangle) with that disc as a hole.
+- Single flowers and plants are objects (objects_place, assets from objects_library category plants: Tulip, whose `variant` is the colour index of its variant_names, Flowers, Lavender, ferns, bushes, berries…); for many, nature_scatter with `assets` grows them as natural density instead.
+- Crystals in any colour: the Crystals asset (objects_library search \"crystal\") takes `color` (red, green, blue, amber, ruby, emerald… or \"#rrggbb\") and `light` (0 dark … 1 a soft glow with a light round it … 10 a beacon) per item in objects_place; objects_glow recolours placed ones.
+- Roads and paths: roads_create. Ready-made scenes: scenes_list then scenes_place, or objects_place_set_piece. Caves: caves_create. Gameplay markers: the gameplay_ tools.
+- Never tell the user something can't be made before checking: objects_library (search it), fields_list (crops) and the descriptions of your tools.
 - Work in this order: landforms, then water, then biome and ground, then vegetation and objects. For vegetation prefer a biome (area_edit biome or terrain_set_biome): it paints a natural mix of ground layers and grows its own vegetation. Use area_edit scatter or nature_scatter for accents and denser patches, and place single objects only as a few hero pieces.
 - Unpainted ground styles itself: rock on steep slopes, snow above the snow line (selection_info: snow_line_above_sea), sand on low coasts. Paint overrides it, e.g. snow on high ground with area_edit paint snow + min_height, or rock only on steep faces with min_slope_deg.
 - Very dark water presets (blackwater, void) read as black holes from above: use them sparingly.
@@ -711,6 +716,7 @@ pub fn describe_call(name: &str, args: &Value) -> String {
         "objects_place" => "Placing objects…".into(),
         "objects_transform" => "Adjusting objects…".into(),
         "objects_remove" => "Removing objects…".into(),
+        "objects_glow" => "Colouring crystals…".into(),
         "water_add_lake" => "Filling a lake…".into(),
         "water_add_river" => "Drawing a river…".into(),
         "water_set_style" => "Restyling water…".into(),
@@ -1119,18 +1125,20 @@ fn start_run_as(
     let dungeon = world.resource::<crate::dungeons::DungeonMap>().interior();
     let whole_dungeon =
         dungeon && (whole.is_some() || (refine && world.resource::<PromptSession>().whole_dungeon));
-    let allowed = if whole_dungeon {
-        tools::DUNGEON_SHAPE_TOOLS
-    } else if dungeon {
-        tools::DUNGEON_AGENT_TOOLS
-    } else {
-        tools::AGENT_TOOLS
+    let allowed = |name: &str| {
+        if whole_dungeon {
+            tools::DUNGEON_SHAPE_TOOLS.contains(&name)
+        } else if dungeon {
+            tools::DUNGEON_AGENT_TOOLS.contains(&name)
+        } else {
+            tools::area_agent_allows(name)
+        }
     };
     let tools: Vec<crate::mcp_tools::McpTool> = world
         .resource::<crate::mcp_tools::McpTools>()
         .tools
         .iter()
-        .filter(|t| allowed.contains(&t.name))
+        .filter(|t| allowed(t.name))
         .cloned()
         .collect();
     let endpoint = PrivateEndpoint::open(&tools)?;
@@ -1347,7 +1355,14 @@ fn drain_calls(world: &mut World) {
                     MAX_CALLS
                 }
         };
-        if over {
+        let outside = if over {
+            Ok(())
+        } else {
+            area_guard(world, &job.name, &mut job.args)
+        };
+        if let Err(e) = outside {
+            let _ = job.reply.send(Err(e));
+        } else if over {
             let cap = if world.resource::<PromptSession>().whole_dungeon {
                 MAX_CALLS_WHOLE
             } else {
@@ -1373,6 +1388,103 @@ fn drain_calls(world: &mut World) {
         if t0.elapsed() > Duration::from_millis(12) {
             break;
         }
+    }
+}
+
+/// Arguments that hold world positions ([x, z] or [x, y, z], or lists of them).
+const COORD_KEYS: &[&str] = &[
+    "polygon", "points", "position", "path", "holes", "center", "centre", "at", "outline",
+];
+
+/// Collects the [x, z] of every position under a coordinate key of `v`.
+fn coords(v: &Value, under: bool, out: &mut Vec<Vec2>) {
+    match v {
+        Value::Object(m) => {
+            for (k, v) in m {
+                coords(v, under || COORD_KEYS.contains(&k.as_str()), out);
+            }
+        }
+        Value::Array(a) if under => {
+            let nums: Vec<f32> = a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect();
+            if nums.len() == a.len() && (nums.len() == 2 || nums.len() == 3) {
+                out.push(Vec2::new(nums[0], nums[nums.len() - 1]));
+            } else {
+                for v in a {
+                    coords(v, true, out);
+                }
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                coords(v, false, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Keeps an outdoor area agent's tools that the edit mask doesn't cover (fields, roads, caves,
+/// gameplay markers) inside the selected area: positions more than a few metres outside it are
+/// refused, `fields_auto` is limited to the area and `fields_remove` to fields in it.
+fn area_guard(world: &mut World, name: &str, args: &mut Value) -> Result<(), String> {
+    if !tools::unmasked(name) || world.resource::<crate::dungeons::DungeonMap>().interior() {
+        return Ok(());
+    }
+    let Some(poly) = world.resource::<Selection>().polygon().map(|p| p.to_vec()) else {
+        return Ok(());
+    };
+    const SLACK: f32 = 4.0;
+    let inside = |p: Vec2| crate::setpieces::poly_sdf(&poly, p) <= SLACK;
+    let (lo, hi) = selection::bounds(&poly);
+    match name {
+        "fields_auto" => {
+            // (an `area` of its own is narrowed to the selection's bounds)
+            let (mut a, mut b) = (lo, hi);
+            if let Some(r) = args.get("area") {
+                let p = |k: &str| {
+                    r.get(k)
+                        .and_then(|v| serde_json::from_value::<[f32; 2]>(v.clone()).ok())
+                        .map(Vec2::from_array)
+                };
+                if let (Some(p0), Some(p1)) = (p("min"), p("max")) {
+                    a = a.max(p0.min(p1));
+                    b = b.min(p0.max(p1));
+                }
+            }
+            if a.x >= b.x || a.y >= b.y {
+                return Err("that area is outside the selected area".into());
+            }
+            args["area"] = serde_json::json!({ "min": [a.x, a.y], "max": [b.x, b.y] });
+            return Ok(());
+        }
+        "fields_remove" | "fields_set" => {
+            let fields = world.resource::<crate::fields::Fields>();
+            let ids: Vec<u64> = match args.get("ids") {
+                Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
+                None => args.get("id").and_then(|v| v.as_u64()).into_iter().collect(),
+            };
+            if let Some(f) = ids
+                .iter()
+                .filter_map(|id| fields.get(*id))
+                .find(|f| !inside(f.centre()))
+            {
+                return Err(format!(
+                    "field {} is outside the selected area: leave it alone",
+                    f.id
+                ));
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    let mut pts = vec![];
+    coords(args, false, &mut pts);
+    match pts.into_iter().find(|p| !inside(*p)) {
+        Some(p) => Err(format!(
+            "[{:.0}, {:.0}] is outside the selected area (from [{:.0}, {:.0}] to [{:.0}, {:.0}], outline in selection_info): keep everything inside it",
+            p.x, p.y, lo.x, lo.y, hi.x, hi.y
+        )),
+        None => Ok(()),
     }
 }
 
@@ -1563,7 +1675,8 @@ fn dropped_images(
         let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = d else {
             continue;
         };
-        if describing {
+        // (Images takes its own drops: crate::images::view::dropped_files)
+        if describing || ed.tab == crate::editor::Tab::Images {
             continue;
         }
         let ext = path_buf
@@ -1588,5 +1701,62 @@ fn dropped_images(
             ed.toast("Reference image added to the prompt");
         }
         s.panel_open = true;
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn area_agent_gets_build_tools_but_not_world_wide_ones() {
+        for t in [
+            "fields_add",
+            "fields_set",
+            "fields_list",
+            "roads_create",
+            "caves_create",
+            "scenes_place",
+            "objects_place_set_piece",
+            "nature_remove",
+            "water_add_waterfall",
+            "gameplay_add_poi",
+            "world_info",
+            "selection_info",
+        ] {
+            assert!(tools::area_agent_allows(t), "{t} withheld");
+        }
+        for t in [
+            "world_save",
+            "world_load",
+            "undo",
+            "batch",
+            "zones_create",
+            "camera_set",
+            "lighting_set",
+            "water_set_ocean",
+            "dungeons_create",
+            "settings_open",
+        ] {
+            assert!(!tools::area_agent_allows(t), "{t} offered");
+        }
+    }
+
+    #[test]
+    fn coordinates_are_found_under_their_keys_only() {
+        let v = json!({
+            "crop": "tulips",
+            "polygon": [[1, 2], [3, 4], [5, 6]],
+            "holes": [[[7, 8], [9, 10], [11, 12]]],
+            "scale": [1, 1, 1],
+            "items": [{ "position": [13, 14, 15], "scale": [2, 2] }],
+            "area": { "center": [16, 17], "radius": 5 }
+        });
+        let mut pts = vec![];
+        coords(&v, false, &mut pts);
+        let mut xs: Vec<f32> = pts.iter().map(|p| p.x).collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, vec![1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 16.0]);
+        assert!(pts.contains(&Vec2::new(13.0, 15.0)));
     }
 }

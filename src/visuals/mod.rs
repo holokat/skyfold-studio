@@ -11,6 +11,8 @@
 //! * `air`: what sunlit air is full of (dust glinting in sunbeams, pollen, falling leaves and
 //!   petals, ash and embers), by the place, the hour and the weather.
 //! * `chimneys`: smoke rising from the placed models' chimneys, forges and cauldrons.
+//! * `scifi_props`: alien-world rocks — `floating` rocks hanging in the air, `monoliths`, giant
+//!   spires — in a `rock_material` that keeps their grain at any size.
 
 use bevy::prelude::*;
 
@@ -20,9 +22,13 @@ use crate::terrain::material::{TerrainGpu, TerrainMaterial};
 pub mod air;
 pub mod chimneys;
 pub mod ecotone;
+pub mod floating;
 pub mod formations;
 mod hooks;
+pub mod monoliths;
 pub mod motes;
+pub mod rock_material;
+pub mod scifi_props;
 pub mod shore;
 mod volcano;
 
@@ -34,7 +40,11 @@ impl Plugin for VisualsPlugin {
             MaterialPlugin::<volcano::PlumeMaterial>::default(),
             MaterialPlugin::<motes::MoteMaterial>::default(),
         ))
-        .add_plugins((air::AirPlugin, chimneys::ChimneysPlugin))
+        .add_plugins((
+            air::AirPlugin,
+            chimneys::ChimneysPlugin,
+            scifi_props::ScifiPropsPlugin,
+        ))
         .init_resource::<shore::ShoreMap>()
         .init_resource::<volcano::VolcanoState>()
         .add_systems(Startup, motes::spawn_motes)

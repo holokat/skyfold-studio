@@ -383,6 +383,7 @@ fn entrance_into(d: &mut WorldData, id: u32, e: &NewEntrance) -> Result<u32, Str
                     stretch: None,
                     group: 0,
                     locked: false,
+                    glow: None,
                 };
                 p.set_scale3(Vec3::splat(entry.default_scale));
                 d.store.insert(p);
@@ -411,6 +412,7 @@ fn entrance_into(d: &mut WorldData, id: u32, e: &NewEntrance) -> Result<u32, Str
                         stretch: None,
                         group: 0,
                         locked: false,
+                        glow: None,
                     };
                     p.set_scale3(Vec3::splat(entry.default_scale));
                     d.store.insert(p);
@@ -526,6 +528,7 @@ pub fn set_frame(d: &mut WorldData, id: u32, eid: u32, asset: &str) -> Result<()
             stretch: None,
             group: 0,
             locked: false,
+            glow: None,
         };
         p.set_scale3(Vec3::splat(entry.default_scale));
         d.store.insert(p);

@@ -76,18 +76,43 @@ fn safe_entry(name: &str) -> bool {
         && name.split('/').all(|p| p != "..")
 }
 
-fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
-    let list = Command::new("/usr/bin/unzip")
-        .arg("-Z1")
-        .arg(zip)
-        .output()
-        .map_err(|e| format!("unzip: {e}"))?;
-    if !list.status.success() {
-        return Err("the download isn't a readable ZIP".into());
-    }
-    let names = String::from_utf8_lossy(&list.stdout);
+/// The most a download may unpack to (a ZIP bomb stops here, before anything is written).
+const MAX_UNPACKED: u64 = 4 << 30;
+
+/// Unpacks `zip` into `into`, refusing unsafe names, symbolic links and oversized archives
+/// before writing anything (a link made by one part could carry the next part's files out of
+/// the pack's folder).
+pub(crate) fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
+    let zipinfo = |flag: &str| {
+        Command::new("/usr/bin/unzip")
+            .args(["-Z", flag])
+            .arg(zip)
+            .output()
+            .map_err(|e| format!("unzip: {e}"))
+            .and_then(|o| {
+                o.status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .ok_or_else(|| "the download isn't a readable ZIP".to_string())
+            })
+    };
+    let names = zipinfo("-1")?;
     if let Some(bad) = names.lines().find(|n| !safe_entry(n)) {
         return Err(format!("the download has an unsafe file path ({bad})"));
+    }
+    // long listing: one line per entry starting with its Unix mode ("lrwx…" = a link)
+    let long = zipinfo("-l")?;
+    if long.lines().any(|l| l.starts_with('l')) {
+        return Err("the download has a symbolic link".into());
+    }
+    let total: u64 = zipinfo("-t")?
+        .split(" bytes uncompressed")
+        .next()
+        .and_then(|s| s.rsplit(' ').next())
+        .and_then(|n| n.parse().ok())
+        .ok_or("the download isn't a readable ZIP")?;
+    if total > MAX_UNPACKED {
+        return Err("the download unpacks to more than 4 GB".into());
     }
     let ok = Command::new("/usr/bin/unzip")
         .args(["-q", "-o"])
@@ -105,7 +130,7 @@ fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
 }
 
 /// Every file under `dir` (relative, '/'-separated); refuses symlinks.
-fn files_under(dir: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn files_under(dir: &Path) -> Result<Vec<String>, String> {
     let mut out = vec![];
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -195,6 +220,8 @@ pub fn install_into(bytes: &[u8], pack: &str, packs: &Path) -> Result<Descriptor
         let staging = work.join("staging");
         for p in &parts {
             unzip(p, &staging)?;
+            // (and nothing a part left behind may turn into a link the next part writes through)
+            files_under(&staging)?;
         }
         // everything inside the pack's folders, and its library readable
         let prefixes: Vec<String> = desc.roots.iter().map(|r| format!("{r}/")).collect();
@@ -441,6 +468,47 @@ mod tests {
         let textures = files_under(&packs.join("textures/handpainted")).unwrap().len();
         eprintln!("installed {:?}: {n} models, {textures} painted texture files", d.roots);
         assert!(n >= 500 && textures >= 700);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_link_in_one_part_cant_carry_the_next_part_outside_the_pack() {
+        let root = tmp("link");
+        let packs = root.join("packs");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let lib = "models/stylepacks/handpainted";
+        // part 1: a library plus `lib/l -> <outside>`; part 2: `lib/l/evil.txt`
+        let p1 = root.join("p1");
+        std::fs::create_dir_all(p1.join(lib)).unwrap();
+        std::fs::write(p1.join(lib).join("models.json"), r#"{"models":[]}"#).unwrap();
+        std::os::unix::fs::symlink(&outside, p1.join(lib).join("l")).unwrap();
+        let p2 = root.join("p2");
+        std::fs::create_dir_all(p2.join(lib).join("l")).unwrap();
+        std::fs::write(p2.join(lib).join("l/evil.txt"), "x").unwrap();
+        let upload = root.join("upload/pack");
+        std::fs::create_dir_all(&upload).unwrap();
+        for (dir, part) in [(&p1, "part-01.zip"), (&p2, "part-02.zip")] {
+            let ok = Command::new("/usr/bin/zip")
+                .args(["-q", "-r", "-y"]) // -y: store the link as a link
+                .arg(upload.join(part))
+                .arg(".")
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        }
+        std::fs::write(
+            upload.join(DESCRIPTOR),
+            format!(r#"{{"format":1,"pack":"skyfold_studio","roots":["{lib}"],"version":"1"}}"#),
+        )
+        .unwrap();
+        zip_dir(&root.join("upload"), &root.join("download.zip"));
+        let err = install_into(&std::fs::read(root.join("download.zip")).unwrap(), "skyfold_studio", &packs).unwrap_err();
+        assert!(err.contains("symbolic link"), "{err}");
+        assert!(!outside.join("evil.txt").exists(), "nothing written outside the pack");
+        assert!(!packs.join(lib).exists(), "nothing installed");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -90,6 +90,8 @@ pub struct Lighting {
     pub cloud_seed: u32,
     /// Cost / quality of the volumetric clouds.
     pub cloud_quality: crate::clouds::CloudQuality,
+    /// A low deck of cloud in the valleys and canyons (`clouds::sea`), off by default.
+    pub cloud_sea: crate::clouds::sea::CloudSea,
     pub stars: bool,
     pub shadow_quality: ShadowQuality,
     /// Screen-space contact shadows (`camera::contact_shadows`): about a tenth of the frame time
@@ -128,6 +130,10 @@ pub struct Lighting {
     pub look: Look,
     /// Dust, pollen, leaves and ash in the air, and chimney smoke (`visuals::air`).
     pub air: crate::visuals::air::AirSettings,
+    /// Planets, moons, distant suns and black holes in the sky (`celestial`).
+    pub celestial: crate::celestial::SkyBodies,
+    /// The Sci-Fi look last picked in Style (`world_kind::looks`); None for the Fantasy looks.
+    pub scifi_look: Option<crate::world_kind::looks::ScifiLook>,
 }
 
 impl Default for Lighting {
@@ -154,6 +160,7 @@ impl Default for Lighting {
             cirrus: 0.35,
             cloud_seed: 0,
             cloud_quality: crate::clouds::CloudQuality::default(),
+            cloud_sea: Default::default(),
             stars: true,
             shadow_quality: ShadowQuality::High,
             contact_shadows: false,
@@ -169,6 +176,8 @@ impl Default for Lighting {
             rain: crate::rain::RainSettings::default(),
             look: Look::default(),
             air: Default::default(),
+            celestial: Default::default(),
+            scifi_look: None,
         }
     }
 }
@@ -334,7 +343,7 @@ fn spawn_sky(
 }
 
 /// UV sphere with inward-facing triangles (seen from inside).
-fn inward_sphere(r: f32, seg: u32, rings: u32) -> Mesh {
+pub(crate) fn inward_sphere(r: f32, seg: u32, rings: u32) -> Mesh {
     let mut pos = Vec::new();
     let mut nor = Vec::new();
     for j in 0..=rings {
@@ -562,8 +571,15 @@ fn update_sun_moon(
         *t = look(moon_dir);
         let above = smoothstep(-0.02, 0.1, moon_dir.y);
         let lit = 0.12 + 0.88 * moon_illumination(lighting.moon_phase);
-        l.illuminance =
-            MOON_LUX * lighting.moon_strength * lit * night * above * (1.0 - w.dim * 0.7);
+        // an alien sky may hide the world's own moon (`celestial`)
+        let shown = if lighting.celestial.hide_moon { 0.0 } else { 1.0 };
+        l.illuminance = MOON_LUX
+            * lighting.moon_strength
+            * lit
+            * night
+            * above
+            * (1.0 - w.dim * 0.7)
+            * shown;
         l.shadow_maps_enabled = night > 0.6 && moon_dir.y > 0.05;
     }
 
@@ -815,8 +831,11 @@ fn update_sky_meshes(
             0.0
         };
         // the moon is a bright disc at night and a pale ghost in daylight
-        let moon_bright =
-            (0.3 + 2.1 * sky.night) * overcast * lighting.moon_strength.clamp(0.2, 3.0);
+        let moon_bright = if lighting.celestial.hide_moon {
+            0.0
+        } else {
+            (0.3 + 2.1 * sky.night) * overcast * lighting.moon_strength.clamp(0.2, 3.0)
+        };
         if let Some(mut mat) = stars.get_mut(&m.0) {
             mat.params = Vec4::new(
                 vis,

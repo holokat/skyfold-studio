@@ -67,6 +67,7 @@ impl Instance {
             rot: self.rot.to_array(),
             scale: self.scale,
             locked: false,
+            glow: None,
         }
     }
 }
@@ -694,6 +695,7 @@ fn place_cat(
                 | AssetKind::Blueberry
                 | AssetKind::Blackberry
                 | AssetKind::Flowers
+                | AssetKind::Tulip
         ) {
             // These meshes have a true root origin. Tree seating buries their fruit, caps, or
             // blossoms, including the photoreal and painted flower variants.
@@ -710,7 +712,12 @@ fn place_cat(
             entry: entry as u32,
             variant,
             cat: cat as u8,
-            pos: Vec3::new(pos2.x, ground - sink, pos2.y),
+            // (floating rocks, grown by the sci-fi presets, hang in the air above their spot)
+            pos: Vec3::new(
+                pos2.x,
+                ground - sink + crate::visuals::floating::hover_for(Some(kind), scale),
+                pos2.y,
+            ),
             rot,
             scale,
         });

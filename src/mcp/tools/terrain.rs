@@ -14,7 +14,7 @@ use crate::terrain::layers::Layer;
 use crate::terrain::{GridRect, Terrain};
 
 /// Brush time per dab: one dab is one 20 fps frame of holding the mouse button.
-const DAB_DT: f32 = 0.05;
+pub(super) const DAB_DT: f32 = 0.05;
 /// Dabs per point when stamping at `points`: holding the brush still for half a second.
 const HOLD_DABS: usize = 10;
 const MAX_DABS: usize = 20_000;
@@ -46,7 +46,7 @@ layer \"biome\" / \"zone\": one letter per biome / zone (legend included). forma
     app.mcp_tool(McpTool {
         name: "terrain_sculpt",
         description: "Sculpt the ground with the Sculpt brushes along a stroke (`path`, dabs every 0.3 × radius like a mouse drag) or at `points` (the brush held still for half a second on each). \
-Tools: raise, lower, smooth, flatten (to `target_height`, default the height under the first dab), mountains (rugged ridges; invert carves canyons), hills (rolling bumps), terraces (steps of `terrace_step` m), erode (rain gullies and sediment). \
+Tools: raise, lower, smooth, flatten (to `target_height`, default the height under the first dab), mountains (rugged ridges; invert carves canyons), hills (rolling bumps), terraces (steps of `terrace_step` m), erode (rain gullies and sediment), strata (stepped rock ledges with the editor's strata settings; terrain_strata sets them). canyons (the Canyonlands click tool) isn't a brush: use terrain_canyonlands. \
 One pass of a raise stroke with radius 80 and strength 0.5 lifts its centre line by roughly 4-6 m; repeat with `passes` to go further. Each raise dab lifts its centre by strength × (0.35 × radius + 6) × 0.05 m, a `path` lays a dab every 0.3 × radius and each of `points` holds 10 dabs, so wide brushes at points climb fast: cap the change with `max_lift_m` (or use area_edit raise / flatten for exact metres). Objects ride the ground. Returns how much the ground moved. One undo step.",
         input_schema: || {
             json!({
@@ -152,7 +152,7 @@ Returns what grew by category (trees, plants, rocks, debris) and how the grass g
 }
 
 /// Brush dab centres: along `path` at `spacing`, or the given `points`.
-fn dabs(args: &Value, spacing: f32) -> Result<Vec<Vec2>, String> {
+pub(super) fn dabs(args: &Value, spacing: f32) -> Result<Vec<Vec2>, String> {
     if let Some(p) = opt_points(args, "path")?.filter(|p| !p.is_empty()) {
         return Ok(along(&p, spacing));
     }
@@ -165,12 +165,12 @@ fn dabs(args: &Value, spacing: f32) -> Result<Vec<Vec2>, String> {
     Err("give a `path` (a stroke) or `points` (stamp spots)".into())
 }
 
-fn passes(args: &Value) -> Result<usize, String> {
+pub(super) fn passes(args: &Value) -> Result<usize, String> {
     Ok(num(args, "passes", 1.0)?.round().clamp(1.0, 20.0) as usize)
 }
 
 /// Grid rect covering the dabs (± radius).
-fn dab_rect(t: &Terrain, dabs: &[Vec2], radius: f32) -> Option<GridRect> {
+pub(super) fn dab_rect(t: &Terrain, dabs: &[Vec2], radius: f32) -> Option<GridRect> {
     let (lo, hi) = dabs
         .iter()
         .fold((Vec2::MAX, Vec2::MIN), |(a, b), p| (a.min(*p), b.max(*p)));
@@ -178,7 +178,7 @@ fn dab_rect(t: &Terrain, dabs: &[Vec2], radius: f32) -> Option<GridRect> {
     t.rect_for_circle(c, (hi - lo).max_element() * 0.5 + radius * 1.25)
 }
 
-fn check_dabs(t: &Terrain, dabs: &[Vec2], radius: f32, passes: usize) -> Result<(), String> {
+pub(super) fn check_dabs(t: &Terrain, dabs: &[Vec2], radius: f32, passes: usize) -> Result<(), String> {
     if dabs.len() * passes > MAX_DABS {
         return Err(format!(
             "that stroke needs {} dabs (max {MAX_DABS}): use a larger radius, fewer passes or a shorter path",
@@ -195,7 +195,7 @@ fn check_dabs(t: &Terrain, dabs: &[Vec2], radius: f32, passes: usize) -> Result<
     Ok(())
 }
 
-fn heights_in(t: &Terrain, r: GridRect) -> Vec<f32> {
+pub(super) fn heights_in(t: &Terrain, r: GridRect) -> Vec<f32> {
     let mut v = Vec::with_capacity(r.width() * r.height());
     for j in r.z0..=r.z1 {
         for i in r.x0..=r.x1 {
@@ -206,7 +206,7 @@ fn heights_in(t: &Terrain, r: GridRect) -> Vec<f32> {
 }
 
 /// "Ground changed at N points: up to +a m / −b m (mean c m); heights there now lo–hi m."
-fn height_report(t: &Terrain, r: GridRect, before: &[f32]) -> String {
+pub(super) fn height_report(t: &Terrain, r: GridRect, before: &[f32]) -> String {
     let after = heights_in(t, r);
     let (mut n, mut up, mut down, mut sum, mut lo, mut hi) =
         (0usize, 0f32, 0f32, 0f32, f32::MAX, f32::MIN);
@@ -240,6 +240,9 @@ fn sculpt(In(args): In<Value>, mut d: WorldData) -> R {
             SculptTool::ALL.map(|t| t.name().to_lowercase()).join(", ")
         )
     })?;
+    if tool == SculptTool::Canyons {
+        return Err("canyonlands aren't brushed: use terrain_canyonlands (a disc or the whole world)".into());
+    }
     let radius = num_in(&args, "radius", 80.0, 2.0, 2000.0)?;
     let strength = num_in(&args, "strength", 0.5, 0.02, 1.0)?;
     let falloff = num_in(&args, "falloff", 0.7, 0.0, 1.0)?;
@@ -282,6 +285,11 @@ fn sculpt(In(args): In<Value>, mut d: WorldData) -> R {
                     &a,
                     &crate::terrain::erosion::ErosionPreset::default().params(),
                 ),
+                // the editor's strata settings (terrain_strata takes them as arguments)
+                SculptTool::Strata => {
+                    crate::terrain::strata::strata(t, h, &a, &d.ed.strata, seed + 17)
+                }
+                SculptTool::Canyons => {}
             }
         }
     }

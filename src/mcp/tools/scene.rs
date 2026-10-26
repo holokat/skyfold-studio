@@ -45,6 +45,7 @@ pub fn register(app: &mut App) {
     app.mcp_tool(McpTool {
         name: "lighting_set",
         description: "Time of day, sun, moon and shadows (Lighting tab). `hour` 0..24 (or `time`: dawn, morning, noon, dusk, night); the day cycle can `play`. A setting, not an undo step; saved with the world. \
+`cloud_sea` (also in weather_set) lays a low deck of sunlit cloud in the valleys and canyons, peaks standing out of it (off by default). \
 `render_resolution` (Lighting › Performance) is how many pixels the 3D view draws before it is upscaled to the window (the panels stay sharp): the biggest frame-rate setting; saved for this computer, not with the world.",
         input_schema: || {
             json!({
@@ -78,6 +79,7 @@ pub fn register(app: &mut App) {
                     "dof_f_stops": { "type": "number", "minimum": 0.5, "maximum": 32, "description": "depth of field aperture in f-stops (default 2): lower = shallower focus. The blur follows a real lens (the field of view sets the focal length), so close shots and narrow fields of view blur most; a wide landscape stays sharp" },
                     "volumetric_light": enum_schema(ids(&crate::volumetrics::VolumetricQuality::ALL), "lit air (default medium): sunbeams streaming between trees and buildings and through windows, the glow round the sun, ground mist, weather fog that the sun shines into, halos round lamps and fires. Off falls back to flat distance fog. Higher = finer shafts, more GPU (the cost is per froxel, not per pixel). How hazy / misty is the look's `air` and `mist` (look_set)"),
                     "stars": { "type": "boolean" },
+                    "cloud_sea": crate::clouds::sea::CloudSea::mcp_schema(),
                     "bounce_light": { "type": "boolean", "description": "bounce light while walking (default on): sunlit walls, streets and squares throw warm light into the shade round them, and narrow lanes, arcades and rooms get darker where buildings hide the sky (a light volume round the walker, worked out in the background as they go; open ground looks the same either way). The editor view keeps the plain sky light" },
                     "render_resolution": enum_schema(crate::render_scale::RenderResolution::ALL.iter().map(|r| r.id().to_string()).collect(), "percent of the window's pixels (per axis) the 3D view renders: auto (75 on Retina / 5K displays, else 100), 100, 85, 75, 67 or 50"),
                     "save_power_in_background": { "type": "boolean", "description": "while another app is in front the editor updates 10×/s instead of 60 (MCP calls keep it at full speed); saved for this computer" }
@@ -206,9 +208,109 @@ pub fn register(app: &mut App) {
         },
     });
     app.mcp_tool(McpTool {
+        name: "look_lut_import",
+        description: "Loads the user's own colour LUT onto the world's art style (Style › Fine-tune › Pro grading › LUT): a .cube file (from DaVinci Resolve, Photoshop, Lightroom…), a LUT strip picture (.png: Unreal 256 × 16, Unity / Godot 1024 × 32) or a HALD picture. It is applied after the style's own colour grade, faded by `strength` (0..1, default 1), saved with the world and in saved styles, and exported to Unreal, Unity and Godot. It stays when another style is picked; look_lut_set clears it. LUTs are expected to take display (sRGB / Rec.709) colour.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "path": { "type": "string", "description": "absolute path of the .cube or LUT picture" },
+            "strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+            "name": { "type": "string", "maxLength": 80, "description": "shown in the UI (default: the file name)" }
+        }, "required": ["path"] }),
+        run: |w, a| {
+            let path = std::path::PathBuf::from(opt_str(&a, "path")?.ok_or("`path` is required")?);
+            let lut = crate::grade::files::load(&path)?;
+            let name = opt_str(&a, "name")?.map(str::to_string).unwrap_or_else(|| file_stem(&path));
+            let strength = num(&a, "strength", 1.0)?.clamp(0.0, 1.0);
+            set_user_lut(w, Some(crate::grade::UserLut::new(&name, lut)), strength);
+            text(format!("The world's style now uses the LUT \"{name}\" at {:.0}%.", strength * 100.0))
+        },
+    });
+    app.mcp_tool(McpTool {
+        name: "look_lut_set",
+        description: "The world's own colour LUT (look_lut_import, look_grade_import): `strength` (0..1) fades it, `clear` removes it. With neither, says which LUT is on and how strong.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "strength": { "type": "number", "minimum": 0, "maximum": 1 },
+            "clear": { "type": "boolean" }
+        } }),
+        run: |w, a| {
+            if opt_bool(&a, "clear")?.unwrap_or(false) {
+                let had = w.resource::<Lighting>().look.lut.is_some();
+                set_user_lut(w, None, 1.0);
+                return text(if had { "Removed the LUT." } else { "The world has no LUT." }.to_string());
+            }
+            if let Some(s) = a.get("strength").and_then(Value::as_f64) {
+                let mut l = w.resource_mut::<Lighting>();
+                if l.look.lut.is_none() {
+                    return Err("the world has no LUT: look_lut_import loads one".into());
+                }
+                l.look.lut_strength = (s as f32).clamp(0.0, 1.0);
+                w.resource_mut::<crate::world::WorldMeta>().dirty = true;
+            }
+            let look = &w.resource::<Lighting>().look;
+            json_out(match &look.lut {
+                Some(l) => json!({ "lut": l.name, "strength": look.lut_strength, "size": l.lut.size }),
+                None => json!({ "lut": null }),
+            })
+        },
+    });
+    app.mcp_tool(McpTool {
+        name: "look_lut_export",
+        description: "Writes the world's whole colour grade as it shows now (the art style's saturation, contrast, split toning, lift, greens, vibrance and the user's LUT; not exposure, light or haze) as a .cube LUT at `path` (absolute), for DaVinci Resolve, Photoshop, Unreal, Unity or any app that reads .cube. It takes and gives display (sRGB) colour after tonemapping.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "path": { "type": "string", "description": "absolute path of the .cube file to write" },
+            "size": { "type": "integer", "minimum": 17, "maximum": 65, "default": 33 }
+        }, "required": ["path"] }),
+        run: |w, a| {
+            let mut path = std::path::PathBuf::from(opt_str(&a, "path")?.ok_or("`path` is required")?);
+            if !path.is_absolute() {
+                return Err("`path` must be absolute".into());
+            }
+            if path.extension().is_none_or(|e| e != "cube") {
+                path.set_extension("cube");
+            }
+            let n = num(&a, "size", 33.0)?.clamp(17.0, 65.0) as usize;
+            let look = &w.resource::<Lighting>().look;
+            let lk = look.effective();
+            let user = look.user_lut();
+            let lut = crate::grade::Lut3::from_fn(n, |c| crate::grade::srgb(&lk, user, c));
+            let title = w.resource::<crate::world::WorldMeta>().name.clone();
+            std::fs::write(&path, crate::grade::files::write_cube(&lut, &title))
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            text(format!("Wrote the grade ({n}³) to {}.", path.display()))
+        },
+    });
+    app.mcp_tool(McpTool {
+        name: "look_grade_capture",
+        description: "Step 1 of grading in another app (Photoshop, Lightroom, Affinity, GIMP, Resolve): saves the view as it looks now (editor UI hidden) to `path` (absolute .png) with a neutral colour strip along its bottom edge. Grade that picture with whole-picture adjustments only (curves, levels, hue / saturation, colour balance, selective colour, a LUT; no painting, cropping or resizing), save it as PNG or TIFF, then look_grade_import reads the grade back from the strip as the world's LUT.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "path": { "type": "string", "description": "absolute path of the .png to write" }
+        }, "required": ["path"] }),
+        run: grade_capture,
+    });
+    app.mcp_tool(McpTool {
+        name: "look_grade_import",
+        description: "Step 2 of grading in another app: reads the colour strip of a picture made by look_grade_capture and graded elsewhere (absolute `path`, .png or .tif; JPEG works but is less exact) and puts that grade on the world as its LUT (on top of the style's own grade, `strength` 0..1, default 1).",
+        input_schema: || json!({ "type": "object", "properties": {
+            "path": { "type": "string" },
+            "strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 }
+        }, "required": ["path"] }),
+        run: |w, a| {
+            let path = std::path::PathBuf::from(opt_str(&a, "path")?.ok_or("`path` is required")?);
+            let img = image::open(&path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+            let lut = crate::grade::files::from_round_trip(&img.into_rgb32f())?;
+            if lut.is_identity(1.5 / 255.0) {
+                return Err("the colour strip is unchanged: grade the picture in the other app first (whole-picture adjustments), then save it and import it".into());
+            }
+            let name = format!("Graded: {}", file_stem(&path));
+            let strength = num(&a, "strength", 1.0)?.clamp(0.0, 1.0);
+            set_user_lut(w, Some(crate::grade::UserLut::new(&name, lut)), strength);
+            text(format!("The world's style now uses the grade from {} as its LUT.", path.display()))
+        },
+    });
+    app.mcp_tool(McpTool {
         name: "weather_set",
         description: "Clouds, weather and wind (Weather tab). A `cloud_preset` picks a sky (clear, fair_weather, scattered, broken, overcast, cirrus_only, towering) or fine-tune cover / type / thickness / cirrus; `weather` previews one weather everywhere (\"follow_zones\" lets zones and biomes decide: rain in jungles, snow on tundra); \
 `rain_and_snow` false keeps everything dry. Wind drives trees, grass, smoke, the sea, cloth and moving parts (windmill sails turn faster in a stronger wind). Settings, saved with the world. \
+`cloud_sea` lays a low deck of cloud in the valleys and canyons (peaks standing out of it; off by default). \
 `preview_motion` true animates wind, cloth and moving parts while editing too (otherwise the world holds still until walk mode). \
 Rain: the ground, roads and placed models get wet as it rains (in about a minute) and dry over minutes after; `wetness` holds them at a wetness (puddles full at 1; -1 follows the weather again). \
 `puddles` is how much standing water rain leaves, `lightning` how often it strikes in thunderstorms (now and then in heavy rain), `thunder` its sound; `lightning_now` strikes once at once, in front of the camera.",
@@ -228,6 +330,7 @@ Rain: the ground, roads and placed models get wet as it rains (in about a minute
                     "cloud_shadows": { "type": "number", "minimum": 0, "maximum": 1 },
                     "cloud_seed": { "type": "integer", "minimum": 0, "description": "a different cloud pattern" },
                     "cloud_quality": enum_schema(ids(&CloudQuality::ALL), "cost of the volumetric clouds"),
+                    "cloud_sea": crate::clouds::sea::CloudSea::mcp_schema(),
                     "weather": enum_schema(w, "weather everywhere"),
                     "rain_and_snow": { "type": "boolean" },
                     "wind_speed": { "type": "number", "minimum": 0, "maximum": 25, "description": "m/s; also how loud the wind is heard (silent when calm)" },
@@ -287,6 +390,48 @@ Optionally moves the camera first (`camera`: the camera_set arguments) and waits
         },
         run: screenshot,
     });
+}
+
+fn file_stem(p: &std::path::Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "LUT".into())
+}
+
+fn set_user_lut(w: &mut World, lut: Option<crate::grade::UserLut>, strength: f32) {
+    let mut l = w.resource_mut::<Lighting>();
+    l.look.lut = lut;
+    l.look.lut_strength = strength;
+    w.resource_mut::<crate::world::WorldMeta>().dirty = true;
+}
+
+/// `look_grade_capture`: a screenshot (as `screenshot` takes it) with the neutral strip added.
+fn grade_capture(world: &mut World, args: Value) -> R {
+    let path = std::path::PathBuf::from(opt_str(&args, "path")?.ok_or("`path` is required")?);
+    if !path.is_absolute() || path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("png")) {
+        return Err("`path` must be an absolute path ending in .png".into());
+    }
+    let tmp = std::env::temp_dir().join(format!("skyfold_grade_capture_{}.png", std::process::id()));
+    let mut shot = screenshot(world, json!({ "save_path": tmp.display().to_string(), "max_size": 64 }))?;
+    let Some(McpContent::Deferred(crate::mcp_tools::McpDeferred(mut poll))) = shot.pop() else {
+        return Err("the screenshot could not start".into());
+    };
+    Ok(vec![McpContent::deferred(move |w| {
+        let done = poll(w)?;
+        Some(done.and_then(|_| {
+            let view = image::open(&tmp)
+                .map_err(|e| format!("could not read the screenshot: {e}"))?
+                .into_rgb8();
+            let _ = std::fs::remove_file(&tmp);
+            crate::grade::files::with_strip(&view)
+                .save(&path)
+                .map_err(|e| format!("could not save {}: {e}", path.display()))?;
+            Ok(vec![McpContent::Text(format!(
+                "Saved {} with its colour strip. Grade it in your photo app with whole-picture adjustments only, save it as PNG or TIFF, then import it (look_grade_import).",
+                path.display()
+            ))])
+        }))
+    })])
 }
 
 /// One property per look parameter (from the parameters themselves, so it can't go stale).
@@ -428,6 +573,9 @@ fn lighting(
     if let Some(b) = opt_bool(&args, "stars")? {
         l.stars = b;
     }
+    if let Some(v) = args.get("cloud_sea") {
+        l.cloud_sea.apply_mcp(v)?;
+    }
     if let Some(b) = opt_bool(&args, "bounce_light")? {
         l.bounce_light = b;
     }
@@ -480,7 +628,9 @@ fn lighting(
             rs.setting.label()
         ) + &camera_fx_line(l, &adapt)
             + " "
-            + &bounce.describe(l.bounce_light),
+            + &bounce.describe(l.bounce_light)
+            + " "
+            + &l.cloud_sea.describe(),
     )
 }
 
@@ -510,6 +660,7 @@ fn look(
 ) -> R {
     if let Some(p) = opt_pick(&args, "preset", &LookPreset::ALL, "look", LookPreset::name)? {
         l.look.select(p);
+        l.scifi_look = None;
         if opt_bool(&args, "apply_scene")?.unwrap_or(true)
             && let Some((hour, clouds, haze)) = p.scene()
         {
@@ -624,6 +775,9 @@ fn weather(
     )? {
         l.cloud_quality = q;
     }
+    if let Some(v) = args.get("cloud_sea") {
+        l.cloud_sea.apply_mcp(v)?;
+    }
     if let Some(w) = opt_str(&args, "weather")? {
         l.weather_override = if w == "follow_zones" {
             None
@@ -702,7 +856,8 @@ fn weather(
             if l.rain.thunder { "on" } else { "off" },
             bolt.strikes,
             if bolt.now { "; striking now" } else { "" }
-        ),
+        ) + " "
+            + &l.cloud_sea.describe(),
     )
 }
 

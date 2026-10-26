@@ -17,7 +17,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 # (audio is the open sound library: every file CC0 or synthesised, see assets/audio/CREDITS.md)
 RUNTIME_DIRS = (
-    "audio", "branding", "dungeon_sheets", "fonts", "market", "onboarding", "shaders",
+    "audio", "branding", "content", "dungeon_sheets", "fonts", "market", "onboarding", "shaders",
     "textures", "models/crops", "models/flora", "models/food",
     "models/photoscan", "models/polyhaven", "models/skyborn",
 )
@@ -34,15 +34,52 @@ THUMB_SIZE = 192
 THUMB_VERSION = 1
 
 
+def content_pack_files(root: Path) -> dict[str, set[str]]:
+    """The free content packs' folders (assets-relative, '/'-ended), each with the file names its
+    pack keeps in the app (`tools/release/content_packs.py`, `src/content.rs`): the rest
+    downloads on first use."""
+    manifest = root / "assets/content/packs.json"
+    if not manifest.is_file():
+        return {}
+    return {f"{f}/": set(p.get("keep", []))
+            for p in json.loads(manifest.read_text())["packs"] for f in p["folders"]}
+
+
+def check_content_packs(root: Path) -> None:
+    """The packs' ZIPs must hold today's files: a texture changed since
+    `content_packs.py build` would leave the app expecting a ZIP nobody uploaded."""
+    manifest = root / "assets/content/packs.json"
+    if not manifest.is_file():
+        return
+    for p in json.loads(manifest.read_text())["packs"]:
+        keep = set(p.get("keep", []))
+        files = [f for folder in p["folders"]
+                 for f in (root / "assets" / folder).rglob("*")
+                 if f.is_file() and f.name not in keep and not f.name.startswith(".")]
+        if (len(files), sum(f.stat().st_size for f in files)) != (p.get("files"),
+                                                                 p.get("unpacked_bytes")):
+            raise RuntimeError(f"The {p['id']} content pack changed since it was built: run "
+                               "tools/release/content_packs.py build, then upload")
+
+
+def downloads_later(rel: str, name: str, pack_folders: dict[str, set[str]]) -> bool:
+    return any(rel.startswith(f) and name not in keep for f, keep in pack_folders.items())
+
+
 def runtime_files(root: Path, include_owner_media: bool) -> list[Path]:
     dirs = RUNTIME_DIRS + (("models/fish",) if include_owner_media else ())
+    pack_folders = content_pack_files(root)
     files = []
     for name in dirs:
         directory = root / "assets" / name
         if not directory.is_dir():
             raise RuntimeError(f"Missing runtime resource directory: assets/{name}")
         for file in sorted(directory.rglob("*")):
-            if file.relative_to(root / "assets").as_posix().startswith(PRIVATE_PREFIXES):
+            rel = file.relative_to(root / "assets").as_posix()
+            if rel.startswith(PRIVATE_PREFIXES):
+                continue
+            # a content pack's files download on first use (all but its kept swatches)
+            if downloads_later(rel, file.name, pack_folders):
                 continue
             if file.is_symlink():
                 raise RuntimeError(f"Resource symlink is not allowed: {file.relative_to(root)}")
@@ -248,6 +285,7 @@ def main() -> None:
                           "preview_bytes": sum(p.stat().st_size for p, _ in previews),
                           "written_to": str(args.previews_only)}))
         return
+    check_content_packs(ROOT)
     files = [(p, p.relative_to(ROOT / "assets").as_posix())
              for p in runtime_files(ROOT, args.include_owner_media)] + previews
     total = sum(p.stat().st_size for p, _ in files)
@@ -272,6 +310,9 @@ def main() -> None:
         raise RuntimeError("That binary is a studio_dev build (developer unlock): ship target/release")
     clone_copy(args.binary, executable)
     executable.chmod(0o755)
+    # the shipped copy without its symbol tables (~200 → ~130 MB); target/release keeps them for
+    # profiling. Before codesigning (release_macos.py signs the staged app).
+    subprocess.run(["/usr/bin/strip", "-S", "-x", str(executable)], check=True)
     manifest = {}
     for source, relative in files:
         destination = resources / "assets" / relative

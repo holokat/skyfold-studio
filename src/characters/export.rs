@@ -20,6 +20,8 @@ use crate::export::core::Ctx;
 pub struct Snapshot {
     pub characters: Vec<Item>,
     pub player: Option<String>,
+    /// the game camera while walking
+    pub camera: super::play_camera::GameCamera,
     /// (npc id, name, role, position, facing, life)
     pub npcs: Vec<(u32, String, String, [f32; 3], f32, super::npc::NpcLife)>,
     /// (creature id, name, character)
@@ -35,6 +37,8 @@ pub struct Item {
     pub anims: Vec<String>,
     /// move id → animation key
     pub moves: Vec<(String, String)>,
+    /// its rig behaviors (moving parts and style are baked into the clips)
+    pub rig: rigkit::RigSpec,
 }
 
 pub fn snapshot(world: &World) -> Snapshot {
@@ -80,12 +84,14 @@ pub fn snapshot(world: &World) -> Snapshot {
                 height: e.meta.height,
                 anims,
                 moves: mv,
+                rig: super::rigging::read_spec(&super::rigging::spec_file(e)),
             })
         })
         .collect();
     Snapshot {
         characters,
         player: wc.player.clone(),
+        camera: wc.camera.clone(),
         npcs: gp
             .npcs
             .iter()
@@ -123,6 +129,16 @@ pub fn write(s: &Snapshot, ctx: &Ctx) -> Result<Option<Value>, String> {
         };
         let mut clips = vec![];
         let mut names = vec![];
+        // (no ground or look target in a clip, and a breath would pop at the loop's seam)
+        let mut baked_rig = c.rig.clone();
+        baked_rig.feet.on = false;
+        baked_rig.look.on = false;
+        baked_rig.style.breathing = 0.0;
+        let pelvis: Vec<usize> = autorig::humanoid::map_bones(&sk)
+            .iter()
+            .position(|m| *m == Some("pelvis"))
+            .into_iter()
+            .collect();
         for key in &c.anims {
             let Some((src, clip)) = key.split_once('/').and_then(|(sid, cname)| {
                 let s = lib.iter().find(|s| s.id == sid)?;
@@ -134,13 +150,26 @@ pub fn write(s: &Snapshot, ctx: &Ctx) -> Result<Option<Value>, String> {
             };
             let r = Retarget::new(&src.skeleton, &sk);
             // (locomotion on the spot: the engine moves the character)
-            let mut baked = r.bake(
-                clip,
-                PlayOpts {
-                    looped: false,
-                    in_place: true,
-                },
-            );
+            let opts = PlayOpts {
+                looped: false,
+                in_place: true,
+            };
+            let mut baked = if baked_rig.parts.iter().any(|p| p.on) || style_changed(&baked_rig) {
+                // the moving parts and style recorded into the clip (engines just play it)
+                let looped = loops(&r, clip);
+                rigkit::bake::bake(
+                    &baked_rig,
+                    &sk,
+                    &clip.name,
+                    clip.fps,
+                    clip.frames,
+                    looped,
+                    &pelvis,
+                    &|t| r.pose(clip, t, opts),
+                )
+            } else {
+                r.bake(clip, opts)
+            };
             baked.name = clip_name(key, &names);
             names.push(baked.name.clone());
             clips.push(baked);
@@ -153,6 +182,7 @@ pub fn write(s: &Snapshot, ctx: &Ctx) -> Result<Option<Value>, String> {
             "file": rel,
             "height_m": c.height,
             "animations": names,
+            "rig": rig_json(&c.rig),
             "moves": c.moves.iter().map(|(m, k)| (m.clone(), k.rsplit('/').next().unwrap_or(k).to_string())).collect::<std::collections::BTreeMap<_, _>>(),
         }));
     }
@@ -196,6 +226,9 @@ pub fn write(s: &Snapshot, ctx: &Ctx) -> Result<Option<Value>, String> {
         "about": "Characters from Skyfold Studio (Labs). Coordinates as the world's GLB models: metres, +Y up, glTF axes. Skeleton: Unreal Engine 5 mannequin bone names (root, pelvis, spine_01..03, neck_01, Head, clavicle/upperarm/lowerarm/hand_l/r, fingers, thigh/calf/foot/ball_l/r). Animation names are the clips in each GLB; `moves` say which clip each state plays. Bundled animations: Quaternius Universal Animation Library (CC0).",
         "characters": out,
         "player": s.player,
+        // style shoulder | first_person | chase | isometric | top_down; distances in metres for a
+        // 1.8 m character; heading_deg a compass bearing the locked views look toward (0 = −z)
+        "player_camera": s.camera,
         "npcs": npcs,
         "creatures": creatures,
     });
@@ -204,6 +237,44 @@ pub fn write(s: &Snapshot, ctx: &Ctx) -> Result<Option<Value>, String> {
         "characters": s.characters.len(),
         "npcs": s.npcs.len(),
     })))
+}
+
+fn style_changed(r: &rigkit::RigSpec) -> bool {
+    r.style.posture.abs() > 1e-3 || (r.style.arm_swing - 1.0).abs() > 1e-3
+}
+
+/// Whether a clip ends where it starts (then the moving parts are pre-rolled through it).
+fn loops(r: &Retarget, clip: &autorig::Clip) -> bool {
+    let opts = PlayOpts {
+        looped: false,
+        in_place: true,
+    };
+    let (a, b) = (r.pose(clip, 0.0, opts), r.pose(clip, clip.duration(), opts));
+    a.iter().zip(&b).all(|(x, y)| x.r.dot(y.r).abs() > 0.995)
+}
+
+/// What an engine importer may rebuild live (the clips already carry the parts' motion).
+fn rig_json(r: &rigkit::RigSpec) -> Value {
+    json!({
+        "feet_on_ground": r.feet.on,
+        "look_at_player": r.look.on,
+        "look_max_yaw_deg": r.look.max_yaw_deg,
+        "breathing": r.style.breathing,
+        "moving_parts": r.parts.iter().filter(|p| p.on).map(|p| json!({
+            "name": p.name,
+            "kind": match p.kind { rigkit::spec::PartKind::Chain => "chain", rigkit::spec::PartKind::Sheet => "cloth", rigkit::spec::PartKind::Jiggle => "jiggle" },
+            "attach": p.attach,
+            "columns": p.columns,
+            "closed": p.closed,
+            "stiffness": p.stiffness,
+            "damping": p.damping,
+            "gravity": p.gravity,
+            "wind": p.wind,
+            "collide": p.collide,
+            "radius_m": p.radius,
+        })).collect::<Vec<_>>(),
+        "colliders": r.colliders.iter().map(|c| json!({"bone": c.bone, "a": c.a, "b": c.b, "radius_m": c.radius})).collect::<Vec<_>>(),
+    })
 }
 
 /// A clip's name in the export: the library clip's own, unique within the file.

@@ -128,6 +128,233 @@ pub struct Group {
     pub carry: f32,
 }
 
+/// A world-wide look for the air (Sci-Fi looks, `AirSettings::theme`): forces what drifts round
+/// the explorer whatever the place, with its own colours, and lets some of it glow on its own
+/// (seen at night and in the shade, not only in sunbeams).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AirTheme {
+    /// Grey ash flakes falling thick, a few embers among them, grey dust.
+    Ashfall,
+    /// Glowing orange sparks and embers rising.
+    Embers,
+    /// Slow glowing teal-green specks floating (bioluminescent: they show best at night).
+    Spores,
+    /// Tiny sparkling gold and violet glints.
+    MagicDust,
+    /// Diamond dust: ice crystals glittering in the light, a faint cold glow.
+    IceGlitter,
+    /// Faint blue-white glints drifting.
+    Stardust,
+    /// Fine rust dust and grit blowing (lit by the sun only).
+    RedDust,
+    /// Acid-green glowing specks hanging in the air.
+    Toxic,
+    /// Pink and violet glowing motes drifting.
+    Nebula,
+}
+
+/// What a theme puts in the air, per kind (dust, pollen, leaves, petals, ash).
+#[derive(Clone, Copy, Debug)]
+pub struct ThemeSpec {
+    /// share of each group shown (before density and detail)
+    pub shares: [f32; 5],
+    /// colour per kind (linear)
+    pub tints: [[f32; 3]; 5],
+    /// the kind's extra (leaves: autumn share, petals: white share, ash: ember share)
+    pub extra: [f32; 5],
+    /// glow of its own (0 none; ~0.3 faint, ~1 bright): shows without light
+    pub glow: [f32; 5],
+    /// fall speed (m/s; negative rises), replacing the group's
+    pub fall: [f32; 5],
+    /// size, times the group's
+    pub size: [f32; 5],
+    /// the box round the eye, times the group's (smaller: the same specks closer together)
+    pub boxes: [f32; 5],
+}
+
+impl AirTheme {
+    pub const ALL: [AirTheme; 9] = [
+        AirTheme::Ashfall,
+        AirTheme::Embers,
+        AirTheme::Spores,
+        AirTheme::MagicDust,
+        AirTheme::IceGlitter,
+        AirTheme::Stardust,
+        AirTheme::RedDust,
+        AirTheme::Toxic,
+        AirTheme::Nebula,
+    ];
+    pub fn id(self) -> &'static str {
+        match self {
+            AirTheme::Ashfall => "ashfall",
+            AirTheme::Embers => "embers",
+            AirTheme::Spores => "spores",
+            AirTheme::MagicDust => "magic_dust",
+            AirTheme::IceGlitter => "ice_glitter",
+            AirTheme::Stardust => "stardust",
+            AirTheme::RedDust => "red_dust",
+            AirTheme::Toxic => "toxic",
+            AirTheme::Nebula => "nebula",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            AirTheme::Ashfall => "Ashfall",
+            AirTheme::Embers => "Embers",
+            AirTheme::Spores => "Spores",
+            AirTheme::MagicDust => "Magic dust",
+            AirTheme::IceGlitter => "Ice glitter",
+            AirTheme::Stardust => "Stardust",
+            AirTheme::RedDust => "Red dust",
+            AirTheme::Toxic => "Toxic",
+            AirTheme::Nebula => "Nebula",
+        }
+    }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.id() == id)
+    }
+    /// Does any of it glow on its own (so it stays at night)?
+    pub fn glows(self) -> bool {
+        self.spec().glow.iter().any(|g| *g > 0.0)
+    }
+    pub fn spec(self) -> ThemeSpec {
+        let g = AirKind::ALL.map(|k| k.group());
+        let mut s = ThemeSpec {
+            shares: [0.0; 5],
+            tints: [[1.0, 0.94, 0.84], [1.0, 0.95, 0.8], [0.3; 3], [0.92, 0.5, 0.62], [0.09, 0.085, 0.08]],
+            extra: [0.0, 0.0, 0.0, 0.35, 0.08],
+            glow: [0.0; 5],
+            fall: g.map(|g| g.fall),
+            size: [1.0; 5],
+            boxes: [1.0; 5],
+        };
+        const D: usize = 0;
+        const P: usize = 1;
+        const PE: usize = 3;
+        const A: usize = 4;
+        match self {
+            AirTheme::Ashfall => {
+                s.shares[D] = 0.5;
+                s.tints[D] = [0.72, 0.72, 0.7];
+                s.shares[A] = 1.0;
+                s.tints[A] = [0.07, 0.068, 0.065];
+                s.extra[A] = 0.04;
+                s.fall[A] = 0.45;
+                s.size[A] = 1.3;
+                s.boxes[A] = 0.6;
+                // (the petals' group as paler flakes: thick ashfall needs both groups)
+                s.shares[PE] = 1.0;
+                s.tints[PE] = [0.17, 0.165, 0.16];
+                s.extra[PE] = 0.0;
+                s.fall[PE] = 0.35;
+                s.size[PE] = 0.9;
+                s.boxes[PE] = 0.65;
+            }
+            AirTheme::Embers => {
+                s.shares[A] = 1.0;
+                s.extra[A] = 1.0;
+                s.fall[A] = -0.8;
+                s.size[A] = 1.1;
+                s.boxes[A] = 0.6;
+                s.shares[P] = 0.8;
+                s.tints[P] = [1.0, 0.4, 0.08];
+                s.glow[P] = 1.6;
+                s.fall[P] = -0.5;
+                s.size[P] = 0.6;
+                s.boxes[P] = 0.7;
+                s.shares[D] = 0.3;
+                s.tints[D] = [1.0, 0.75, 0.5];
+            }
+            AirTheme::Spores => {
+                s.shares[P] = 1.0;
+                s.tints[P] = [0.25, 1.0, 0.72];
+                s.glow[P] = 1.0;
+                s.fall[P] = -0.01;
+                s.size[P] = 1.6;
+                s.boxes[P] = 0.75;
+                s.shares[D] = 0.45;
+                s.tints[D] = [0.4, 1.0, 0.8];
+                s.glow[D] = 0.4;
+            }
+            AirTheme::MagicDust => {
+                s.shares[D] = 1.0;
+                s.tints[D] = [1.0, 0.72, 0.28];
+                s.glow[D] = 0.9;
+                s.boxes[D] = 0.8;
+                s.shares[P] = 0.8;
+                s.tints[P] = [0.68, 0.32, 1.0];
+                s.glow[P] = 1.1;
+                s.size[P] = 0.7;
+                s.boxes[P] = 0.75;
+            }
+            AirTheme::IceGlitter => {
+                s.shares[D] = 1.0;
+                s.tints[D] = [0.8, 0.92, 1.0];
+                s.glow[D] = 0.4;
+                s.size[D] = 1.5;
+                s.fall[D] = 0.05;
+                s.boxes[D] = 0.8;
+                s.shares[P] = 0.5;
+                s.tints[P] = [0.88, 0.95, 1.0];
+                s.glow[P] = 0.15;
+                s.fall[P] = 0.08;
+                s.size[P] = 0.6;
+            }
+            AirTheme::Stardust => {
+                s.shares[D] = 1.0;
+                s.tints[D] = [0.7, 0.82, 1.0];
+                s.glow[D] = 0.6;
+                s.shares[P] = 0.4;
+                s.tints[P] = [0.85, 0.9, 1.0];
+                s.glow[P] = 0.5;
+                s.size[P] = 0.6;
+            }
+            AirTheme::RedDust => {
+                s.shares[D] = 1.0;
+                s.tints[D] = [1.0, 0.48, 0.26];
+                // (a little light of its own: the haze of red dust shows out of the sunbeams too)
+                s.glow[D] = 0.12;
+                s.shares[A] = 1.0;
+                s.tints[A] = [0.3, 0.11, 0.045];
+                s.extra[A] = 0.0;
+                s.fall[A] = 0.06;
+                s.size[A] = 0.8;
+                s.boxes[A] = 0.55;
+            }
+            AirTheme::Toxic => {
+                s.shares[P] = 1.0;
+                s.tints[P] = [0.6, 1.0, 0.1];
+                s.glow[P] = 0.8;
+                s.fall[P] = 0.0;
+                s.size[P] = 1.3;
+                s.boxes[P] = 0.8;
+                s.shares[D] = 0.5;
+                s.tints[D] = [0.7, 1.0, 0.3];
+                s.glow[D] = 0.25;
+            }
+            AirTheme::Nebula => {
+                s.shares[P] = 1.0;
+                s.tints[P] = [1.0, 0.4, 0.85];
+                s.glow[P] = 1.2;
+                s.size[P] = 1.6;
+                s.boxes[P] = 0.75;
+                s.shares[D] = 0.9;
+                s.tints[D] = [0.7, 0.5, 1.0];
+                s.glow[D] = 0.7;
+            }
+        }
+        s
+    }
+}
+
+/// What a theme asks for: its shares, the weather washing it out (glowing themes keep at night,
+/// the rest are only seen in the light anyway).
+pub fn themed(t: AirTheme, w: &crate::world::WeatherParams) -> [f32; 5] {
+    let wash = (1.0 - 0.7 * w.rain) * (1.0 - 0.5 * w.snow);
+    t.spec().shares.map(|v| (v * wash).clamp(0.0, 1.0))
+}
+
 /// The air-life settings, saved with the world (`sky::Lighting::air`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -140,6 +367,9 @@ pub struct AirSettings {
     pub smoke: bool,
     /// How thick that smoke is (0..2).
     pub smoke_strength: f32,
+    /// A world-wide air look (Sci-Fi looks): None lets the place decide (the default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<AirTheme>,
 }
 
 impl Default for AirSettings {
@@ -149,6 +379,7 @@ impl Default for AirSettings {
             density: 1.0,
             smoke: true,
             smoke_strength: 1.0,
+            theme: None,
         }
     }
 }
@@ -159,7 +390,7 @@ pub type AirMaterial = ExtendedMaterial<StandardMaterial, AirExt>;
 pub struct AirParams {
     /// per kind: x share shown (0..1), y half-size (m), z box width (m), w box height (m)
     pub kinds: [Vec4; 5],
-    /// per kind: xyz travelled (wind drift, fall), wrapped to the box
+    /// per kind: xyz travelled (wind drift, fall), wrapped to the box; w: its own glow (themes)
     pub offsets: [Vec4; 5],
     /// per kind: rgb colour (linear), w: the kind's extra (leaves: autumn share, petals: white
     /// share, ash: ember share)
@@ -234,6 +465,8 @@ pub struct AirState {
     /// where the eye was last frame (a jump — a teleport, a new world — snaps the amounts)
     last_eye: Option<Vec3>,
     snap: bool,
+    /// the theme last frame (a new one shows at once rather than easing in over seconds)
+    last_theme: Option<Option<AirTheme>>,
 }
 
 /// Every speck: its position in the unit cube (wrapped round the camera in the shader); uv: the
@@ -594,6 +827,11 @@ pub fn update_air(
     }
     st.last_eye = Some(eye);
     let settings = &lighting.air;
+    if st.last_theme.is_some_and(|t| t != settings.theme) {
+        st.snap = true;
+        st.timer = 0.0;
+    }
+    st.last_theme = Some(settings.theme);
     let inside = indoors
         .as_ref()
         .map(|i| i.amount.max(i.cave))
@@ -629,6 +867,10 @@ pub fn update_air(
             &sky.weather,
             &biome_mix(&terrain, p),
         );
+        // a themed world's air is the theme's, whatever the place
+        if let Some(t) = settings.theme {
+            a = themed(t, &sky.weather);
+        }
         // indoors (or in a cave) only the dust in the light from the windows
         for v in a.iter_mut().skip(1) {
             *v *= 1.0 - inside;
@@ -658,20 +900,29 @@ pub fn update_air(
     let live_dt = if motion.live { dt } else { 0.0 };
     st.clock = (st.clock + live_dt) % 7200.0;
     let wv = wind.velocity(time.elapsed_secs());
-    for (i, kind) in AirKind::ALL.iter().enumerate() {
-        let g = kind.group();
-        let o = &mut st.offsets[i];
-        *o += Vec3::new(wv.x * g.carry, -g.fall, wv.z * g.carry) * live_dt;
-        *o = Vec3::new(
-            o.x.rem_euclid(g.width),
-            o.y.rem_euclid(g.height),
-            o.z.rem_euclid(g.width),
-        );
-    }
+    let spec = settings.theme.map(|t| t.spec());
     let detail = graphics.detail.clamp(0.5, 1.6);
     let density = settings.density.clamp(0.0, 3.0);
+    // (a themed world asking for more than a full group packs its specks closer round the eye)
+    let mut packed = [1.0f32; 5];
     for i in 0..5 {
-        st.shown[i] = (st.amounts[i] * density * BASE * (0.55 + 0.45 * detail)).clamp(0.0, 1.0);
+        let raw = st.amounts[i] * density * BASE * (0.55 + 0.45 * detail);
+        st.shown[i] = raw.clamp(0.0, 1.0);
+        if spec.is_some() {
+            packed[i] = 1.0 / raw.clamp(1.0, 3.0).cbrt();
+        }
+    }
+    for (i, kind) in AirKind::ALL.iter().enumerate() {
+        let g = kind.group();
+        let fall = spec.map_or(g.fall, |s| s.fall[i]);
+        let bx = spec.map_or(1.0, |s| s.boxes[i]) * packed[i];
+        let o = &mut st.offsets[i];
+        *o += Vec3::new(wv.x * g.carry, -fall, wv.z * g.carry) * live_dt;
+        *o = Vec3::new(
+            o.x.rem_euclid(g.width * bx),
+            o.y.rem_euclid(g.height * bx),
+            o.z.rem_euclid(g.width * bx),
+        );
     }
     if st.visible <= 0.0 {
         // (nothing to draw: leave the material alone so it isn't re-sent every frame)
@@ -687,8 +938,9 @@ pub fn update_air(
     let p = &mut m.extension.params;
     for (i, kind) in AirKind::ALL.iter().enumerate() {
         let g = kind.group();
-        p.kinds[i] = Vec4::new(st.shown[i], g.size, g.width, g.height);
-        p.offsets[i] = st.offsets[i].extend(0.0);
+        let (size, bx) = spec.map_or((1.0, 1.0), |s| (s.size[i], s.boxes[i] * packed[i]));
+        p.kinds[i] = Vec4::new(st.shown[i], g.size * size, g.width * bx, g.height * bx);
+        p.offsets[i] = st.offsets[i].extend(spec.map_or(0.0, |s| s.glow[i]));
     }
     let lin = |c: [f32; 3]| Vec3::from_array(c);
     // dust: warm motes, sandier in deserts and sandstorms; pollen: warm white; ash: dark grey
@@ -704,6 +956,12 @@ pub fn update_air(
         0.08
     };
     p.tints[4] = lin([0.09, 0.085, 0.08]).extend(ember);
+    if let Some(s) = spec {
+        for i in 0..5 {
+            // (leaves keep their own colours: the shader picks them)
+            p.tints[i] = lin(s.tints[i]).extend(s.extra[i]);
+        }
+    }
     p.sky = sky_fill(&sky, haze).extend(1.0);
     p.wind = Vec4::new(wind.dir.x, wind.dir.y, wind.speed, st.clock);
     p.gust = Vec4::new(
@@ -755,11 +1013,12 @@ impl Plugin for AirPlugin {
         app.mcp_tool(McpTool {
             name: "air_particles",
             description: "Air life round the explorer: fine dust everywhere by day (it only shows where a sunbeam catches it, sparkling when you look towards the sun), pollen and seed fluff over meadows and grassland, leaves falling and tumbling under broadleaf trees and through woods (autumn colours in autumn woods and under maples), petals off flowers, ash and embers near lava and in Infernal zones. The terrain's biomes, the trees and flowers nearby, the hour (nothing heavy at night) and the weather (none in rain or snow) decide the amounts; the wind carries everything. Seen close to the ground while the world moves (walking, camera paths, Preview motion). \
-`enabled` turns it on or off, `density` multiplies the amounts (0..3, default 1). Saved with the world. Returns the settings, whether it shows now (or why not), and per kind the share shown and how many specks, with what the place round the eye is like (biome, broadleaf trees and maples near, flowers near, lava) and the sun's bearing and elevation (look that way for the sparkle). Chimney smoke is `smoke`.",
+`enabled` turns it on or off, `density` multiplies the amounts (0..3, default 1). `theme` gives the whole world one air look instead of the place's (Sci-Fi looks): ashfall (grey ash flakes falling, a few embers), embers (glowing orange sparks rising), spores (slow glowing teal-green specks, brightest at night), magic_dust (sparkling gold and violet glints), ice_glitter (diamond-dust crystals glittering), stardust (faint blue-white glints), red_dust (rust dust and grit blowing), toxic (acid-green glowing specks), nebula (pink and violet glowing motes); \"none\" gives the air back to the place (the default). Glowing themes show at night and in the shade, not only in sunbeams. Saved with the world. Returns the settings, whether it shows now (or why not), and per kind the share shown and how many specks, with what the place round the eye is like (biome, broadleaf trees and maples near, flowers near, lava) and the sun's bearing and elevation (look that way for the sparkle). Chimney smoke is `smoke`.",
             input_schema: || {
                 json!({ "type": "object", "properties": {
                     "enabled": { "type": "boolean", "description": "drifting dust, pollen, leaves, petals and ash (default on)" },
-                    "density": { "type": "number", "minimum": 0, "maximum": 3, "description": "times what the place brings (default 1)" } } })
+                    "density": { "type": "number", "minimum": 0, "maximum": 3, "description": "times what the place brings (default 1)" },
+                    "theme": { "type": "string", "enum": std::iter::once("none").chain(AirTheme::ALL.map(|t| t.id())).collect::<Vec<_>>(), "description": "one air look for the whole world instead of the place's; none: the place decides (default)" } } })
             },
             run: air_tool,
         });
@@ -769,13 +1028,26 @@ impl Plugin for AirPlugin {
 fn air_tool(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
     let enabled = opt_arg::<bool>(&args, "enabled")?;
     let density = opt_arg::<f32>(&args, "density")?;
-    if enabled.is_some() || density.is_some() {
+    let theme = match opt_arg::<String>(&args, "theme")?.as_deref() {
+        None => None,
+        Some("none") => Some(None),
+        Some(id) => Some(Some(AirTheme::from_id(id).ok_or_else(|| {
+            format!(
+                "`theme` is none or one of {}",
+                AirTheme::ALL.map(|t| t.id()).join(", ")
+            )
+        })?)),
+    };
+    if enabled.is_some() || density.is_some() || theme.is_some() {
         let mut l = world.resource_mut::<crate::sky::Lighting>();
         if let Some(e) = enabled {
             l.air.particles = e;
         }
         if let Some(d) = density {
             l.air.density = d.clamp(0.0, 3.0);
+        }
+        if let Some(t) = theme {
+            l.air.theme = t;
         }
         world.resource_mut::<crate::world::WorldMeta>().dirty = true;
     }
@@ -792,6 +1064,8 @@ fn air_tool(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
     Ok(vec![McpContent::Json(json!({
         "enabled": s.particles,
         "density": s.density,
+        "theme": s.theme.map_or("none", |t| t.id()),
+        "theme_glows": s.theme.is_some_and(|t| t.glows()),
         "showing": r2(st.visible),
         "hidden_because": st.hidden_because,
         "kinds": kinds,
@@ -821,6 +1095,24 @@ pub fn air_controls(ui: &mut bevy_egui::egui::Ui, s: &mut AirSettings) {
                 .suffix("×")
                 .text("Amount"),
         );
+        // one air look for the whole world (the Sci-Fi looks set it)
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = bevy_egui::egui::vec2(4.0, 4.0);
+            if crate::ui::widgets::chip(ui, "By place", None, s.theme.is_none())
+                .on_hover_text("The place decides: dust, pollen, leaves, petals, ash.")
+                .clicked()
+            {
+                s.theme = None;
+            }
+            for t in AirTheme::ALL {
+                if crate::ui::widgets::chip(ui, t.name(), None, s.theme == Some(t))
+                    .on_hover_text("The same air everywhere in this world; glowing kinds show at night too.")
+                    .clicked()
+                {
+                    s.theme = Some(t);
+                }
+            }
+        });
     }
     crate::ui::widgets::toggle(ui, &mut s.smoke, "Chimney smoke").on_hover_text("Smoke rising from chimneys, forges and cauldrons of the placed buildings, bending in the wind.");
     if s.smoke {
@@ -916,6 +1208,27 @@ mod tests {
         let s: AirSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, AirSettings::default());
         let s: AirSettings = serde_json::from_str(r#"{"density": 2.0}"#).unwrap();
-        assert!(s.particles && s.smoke && s.density == 2.0);
+        assert!(s.particles && s.smoke && s.density == 2.0 && s.theme.is_none());
+        // (no theme: nothing new saved)
+        assert!(!serde_json::to_string(&AirSettings::default()).unwrap().contains("theme"));
+        let s: AirSettings = serde_json::from_str(r#"{"theme": "magic_dust"}"#).unwrap();
+        assert_eq!(s.theme, Some(AirTheme::MagicDust));
+    }
+
+    #[test]
+    fn themes_fill_the_air_whatever_the_place() {
+        for t in AirTheme::ALL {
+            assert_eq!(AirTheme::from_id(t.id()), Some(t));
+            let a = themed(t, &clear());
+            assert!(a.iter().any(|v| *v > 0.4), "{t:?} {a:?}");
+            assert_eq!(a[2], 0.0, "{t:?}: no leaves");
+        }
+        assert!(AirTheme::Spores.glows() && !AirTheme::Ashfall.glows());
+        assert!(AirTheme::Embers.spec().fall[4] < 0.0, "embers rise");
+        let rain = WeatherParams {
+            rain: 1.0,
+            ..clear()
+        };
+        assert!(themed(AirTheme::Spores, &rain)[1] < 0.35);
     }
 }

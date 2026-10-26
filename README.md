@@ -145,18 +145,18 @@ Browse the [Skyfold marketplace](https://skyfoldstudio.com/marketplace) for fore
 
 ## Connect your agent
 
-Turn on the MCP server in the app (**File › Connect an agent (MCP)…**), then add it to your client.
+Turn on the MCP server in the app (**File › Connect an agent (MCP)…**), then copy your client's setup from that dialog. Every request needs your editor's private key (made on first launch, kept in `worlds/.mcp_key`); the dialog fills it in.
 
 **Claude Code**
 
 ```sh
-claude mcp add --transport http world-builder http://127.0.0.1:7740/mcp
+claude mcp add --transport http world-builder http://127.0.0.1:7740/mcp --header "Authorization: Bearer <key from the dialog>"
 ```
 
 **Cursor, VS Code and other Streamable HTTP clients**
 
 ```json
-{ "mcpServers": { "world-builder": { "url": "http://127.0.0.1:7740/mcp" } } }
+{ "mcpServers": { "world-builder": { "url": "http://127.0.0.1:7740/mcp", "headers": { "Authorization": "Bearer <key from the dialog>" } } } }
 ```
 
 **Claude Desktop** uses the `--mcp-stdio` command shown in the same dialog, which also starts the editor if it isn't running.

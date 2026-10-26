@@ -6,6 +6,7 @@ use bevy_egui::egui;
 use egui::vec2;
 
 use super::npc::{Activity, Attitude, Behavior, NpcLife, Slot};
+use super::play_camera::{CameraStyle, GameCamera};
 use super::view::{NpcTab, Sel, ViewData};
 use super::view_char::{header, moves_editor};
 use crate::gameplay::{Aggression, NpcRole};
@@ -375,7 +376,13 @@ pub(super) fn player(ui: &mut egui::Ui, d: &mut ViewData, now: f64) {
         cur.as_deref(),
         &mut name,
         false,
-        if cur.is_some() { "Walk mode plays as it" } else { "Walk mode is first person" },
+        if cur.is_some() {
+            "Walk mode plays as it"
+        } else if d.world.camera.style.locked() {
+            "Pick a character to see yourself"
+        } else {
+            "Walk mode is first person"
+        },
     );
     ui.add_space(8.0);
     let mut c = cur.clone();
@@ -385,24 +392,39 @@ pub(super) fn player(ui: &mut egui::Ui, d: &mut ViewData, now: f64) {
     }
     hint_small(ui, "Or click a card on the left.");
     ui.add_space(8.0);
-    section_box(ui, "player_view", "View", |ui| {
-        toggle(ui, &mut d.view3.third_person, "Third person (P switches while walking)");
-        slider_row(ui, "Camera distance", &mut d.view3.distance, 1.5..=8.0, |v| format!("{v:.1} m"));
+    let before = d.world.camera.clone();
+    section_box(ui, "player_camera", "Camera", |ui| {
+        camera_editor(ui, &mut d.world.camera);
     });
+    if d.world.camera != before {
+        d.world.camera.sanitize();
+        d.meta.dirty = true;
+    }
     ui.add_space(8.0);
+    let style = d.world.camera.style;
     section_box(ui, "player_controls", "Controls", |ui| {
-        for (k, what) in [
-            ("W A S D", "Move"),
+        let mut rows: Vec<(&str, &str)> = vec![
+            ("W A S D", if style.free_pointer() { "Move (across the screen)" } else { "Move" }),
             ("Shift", "Sprint"),
             ("Alt / Caps", "Walk"),
             ("Space", "Jump"),
             ("C", "Crouch"),
-            ("Left click", "Light attack"),
+            ("Left click", if style.free_pointer() { "Light attack toward the pointer" } else { "Light attack" }),
             ("Right click", "Heavy attack"),
             ("Q (hold)", "Block"),
             ("X", "Dodge roll"),
-            ("P", "Third / first person"),
-        ] {
+        ];
+        let cam = &d.world.camera;
+        if cam.zoom && style != CameraStyle::FirstPerson {
+            rows.push(("Wheel", if cam.first_person && !style.locked() { "Zoom (in to first person)" } else { "Zoom" }));
+        }
+        if style == CameraStyle::Chase {
+            rows.push(("Middle drag", "Turn the camera"));
+        }
+        if cam.first_person && matches!(style, CameraStyle::Shoulder | CameraStyle::Chase) {
+            rows.push(("P", "Third / first person"));
+        }
+        for (k, what) in rows {
             stat_row(ui, what, k);
         }
         hint_small(ui, "Its moves (which clip for each) are in Models › Moves.");
@@ -413,4 +435,45 @@ pub(super) fn player(ui: &mut egui::Ui, d: &mut ViewData, now: f64) {
         d.v.note("Walking…", false, now);
     }
     let _ = Sel::Player;
+}
+
+/// The world's game camera: a style (choosing one starts from its preset), its distance (fixed,
+/// or zoomed by the player between a closest and a furthest) and the locked views' angle.
+fn camera_editor(ui: &mut egui::Ui, cam: &mut GameCamera) {
+    let mut style = cam.style;
+    let options: Vec<(CameraStyle, &str, Option<usize>)> =
+        CameraStyle::ALL.iter().map(|s| (*s, s.label(), None)).collect();
+    if chips(ui, &mut style, &options) {
+        *cam = GameCamera::preset(style);
+    }
+    hint_small(ui, style.about());
+    if style == CameraStyle::FirstPerson {
+        return;
+    }
+    ui.add_space(6.0);
+    if style.locked() {
+        slider_row(ui, "Heading", &mut cam.heading_deg, 0.0..=359.0, |v| format!("{v:.0}°"));
+        slider_row(ui, "Angle down", &mut cam.tilt_deg, 10.0..=89.0, |v| format!("{v:.0}°"));
+    }
+    if style != CameraStyle::Shoulder {
+        slider_row(ui, "Field of view", &mut cam.fov_deg, 20.0..=90.0, |v| format!("{v:.0}°"));
+    }
+    toggle(ui, &mut cam.zoom, "Players can zoom");
+    if cam.zoom {
+        slider_row(ui, "Closest", &mut cam.zoom_min, 0.8..=80.0, |v| format!("{v:.1} m"));
+        slider_row(ui, "Furthest", &mut cam.zoom_max, 0.8..=80.0, |v| format!("{v:.1} m"));
+        if cam.zoom_max < cam.zoom_min {
+            cam.zoom_max = cam.zoom_min;
+        }
+        slider_row(ui, "Starts at", &mut cam.distance, cam.zoom_min..=cam.zoom_max.max(cam.zoom_min + 0.01), |v| format!("{v:.1} m"));
+    } else {
+        slider_row(ui, "Distance", &mut cam.distance, 0.8..=80.0, |v| format!("{v:.1} m"));
+    }
+    if matches!(style, CameraStyle::Shoulder | CameraStyle::Chase) {
+        toggle(ui, &mut cam.first_person, "First person too (P, or zoom all the way in)");
+    }
+    hint_small(ui, "Distances are for a 1.8 m character; taller ones keep the same framing.");
+    if small_icon_button(ui, "ArrowRotateCounterClockwise", "Reset to the preset").clicked() {
+        *cam = GameCamera::preset(style);
+    }
 }

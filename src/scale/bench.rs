@@ -10,7 +10,8 @@
 //! - `-trees`, `-plants`, `-rocks`, `-debris`, `-structures`, `-objects`: hide those placed objects;
 //! - `-billboards`, `-grass`, `-nature` (procedural nature; `-n0`…`-n5` one of its layers, see
 //!   `NatureEntity`): hide that layer;
-//! - `-ocean`, `-water` (the sea, or every water surface), `-fields` (the crops): hide them;
+//! - `-ocean`, `-water` (the sea, or every water surface), `-fields` (the crops), `-groundcover`
+//!   (ferns, herbs and grass tufts), `-terrain` (the ground itself): hide them;
 //! - `noshadow`: sun shadows off from this phase on (Bevy can't turn them back on mid-run);
 //! - `detail=0.7`: the graphics detail setting from this phase on; `draw=900`: the draw distance
 //!   (walk mode's V presets are `draw=900+detail=0.6`, `draw=3000+detail=1`, `draw=7000+detail=1.6`);
@@ -36,7 +37,9 @@ impl Plugin for BenchPlugin {
         if std::env::var("WB_BENCH").is_err() {
             return;
         }
-        app.init_resource::<Bench>().add_systems(Last, run_phases);
+        app.init_resource::<Bench>()
+            .add_systems(Last, run_phases)
+            .add_systems(PostUpdate, changes.after(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -109,6 +112,94 @@ fn stress_hooks(world: &mut World, mut frame: Local<u32>) {
     }
 }
 
+/// Every 2 s while benchmarking: how many entities changed what a frame (Bevy re-uploads a
+/// mesh instance's data when its transform, mesh, material or bounds change), by name.
+#[allow(clippy::type_complexity)]
+fn changes(
+    time: Res<Time<Real>>,
+    mut next: Local<f32>,
+    mut sum: Local<[usize; 5]>,
+    mut frames: Local<usize>,
+    q: Query<
+        (
+            Ref<GlobalTransform>,
+            Option<Ref<Mesh3d>>,
+            Option<Ref<Visibility>>,
+            Option<Ref<bevy::camera::primitives::Aabb>>,
+            Option<&Name>,
+            Has<NatureEntity>,
+            (
+                Has<crate::groundcover::GroundCoverEntity>,
+                Has<MeshMaterial3d<crate::grass::GrassMaterial>>,
+                Has<MeshMaterial3d<crate::terrain::material::TerrainMaterial>>,
+                Option<&ChildOf>,
+                Has<MeshMaterial3d<crate::objects::FoliageMaterial>>,
+                Has<MeshMaterial3d<StandardMaterial>>,
+            ),
+        ),
+        With<Mesh3d>,
+    >,
+    names: Query<&Name>,
+    mut by: Local<std::collections::HashMap<String, usize>>,
+) {
+    *frames += 1;
+    for (t, m, v, a, n, nature, (cover, grass, terrain, parent, foliage, standard)) in &q {
+        let flags = [
+            t.is_changed() && !t.is_added(),
+            m.is_some_and(|m| m.is_changed() && !m.is_added()),
+            v.is_some_and(|v| v.is_changed() && !v.is_added()),
+            a.is_some_and(|a| a.is_changed() && !a.is_added()),
+        ];
+        for (i, f) in flags.iter().enumerate() {
+            if *f {
+                sum[i] += 1;
+            }
+        }
+        if flags.iter().any(|f| *f) {
+            sum[4] += 1;
+            let key = if nature {
+                "nature".to_string()
+            } else if let Some(n) = n {
+                n.as_str().to_string()
+            } else {
+                let kind = [
+                    (cover, "groundcover"),
+                    (grass, "grass"),
+                    (terrain, "terrain"),
+                    (foliage, "foliage"),
+                    (standard, "standard"),
+                ]
+                .iter()
+                .find(|(h, _)| *h)
+                .map_or("other", |(_, k)| *k);
+                let up = parent
+                    .and_then(|p| names.get(p.parent()).ok())
+                    .map_or(String::new(), |n| format!(" in {n}"));
+                format!("({kind}{up})")
+            };
+            *by.entry(key).or_default() += 1;
+        }
+    }
+    if time.elapsed_secs() >= *next {
+        *next = time.elapsed_secs() + 2.0;
+        let f = (*frames).max(1);
+        let mut top: Vec<_> = by.drain().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.truncate(6);
+        info!(
+            "CHANGES a frame: transform {} mesh {} visibility {} aabb {} any {}; by {:?}",
+            sum[0] / f,
+            sum[1] / f,
+            sum[2] / f,
+            sum[3] / f,
+            sum[4] / f,
+            top.iter().map(|(k, v)| (k.as_str(), v / f)).collect::<Vec<_>>()
+        );
+        *sum = [0; 5];
+        *frames = 0;
+    }
+}
+
 #[derive(Resource, Default)]
 struct Bench {
     phase: usize,
@@ -171,7 +262,7 @@ fn run_phases(
     all: Query<()>,
     mut lights: Query<&mut DirectionalLight>,
     mut exit: MessageWriter<AppExit>,
-    (mut render_scale, mut lighting, mut filtering, mut water, mut crops): (
+    (mut render_scale, mut lighting, mut filtering, mut water, mut crops, mut cover, mut ground): (
         ResMut<crate::render_scale::RenderScale>,
         ResMut<crate::sky::Lighting>,
         Query<&mut bevy::light::ShadowFilteringMethod, With<crate::camera::MainCamera>>,
@@ -193,6 +284,31 @@ fn run_phases(
                 Without<Name>,
                 Without<MeshMaterial3d<crate::grass::GrassMaterial>>,
                 Without<MeshMaterial3d<crate::water::WaterMaterial>>,
+            ),
+        >,
+        Query<
+            &mut Visibility,
+            (
+                With<crate::groundcover::GroundCoverEntity>,
+                Without<PlacedObject>,
+                Without<NatureEntity>,
+                Without<Name>,
+                Without<MeshMaterial3d<crate::grass::GrassMaterial>>,
+                Without<MeshMaterial3d<crate::water::WaterMaterial>>,
+                Without<MeshMaterial3d<crate::fields::render::CropMaterial>>,
+            ),
+        >,
+        Query<
+            &mut Visibility,
+            (
+                With<MeshMaterial3d<crate::terrain::material::TerrainMaterial>>,
+                Without<crate::groundcover::GroundCoverEntity>,
+                Without<PlacedObject>,
+                Without<NatureEntity>,
+                Without<Name>,
+                Without<MeshMaterial3d<crate::grass::GrassMaterial>>,
+                Without<MeshMaterial3d<crate::water::WaterMaterial>>,
+                Without<MeshMaterial3d<crate::fields::render::CropMaterial>>,
             ),
         >,
     ),
@@ -336,6 +452,16 @@ fn run_phases(
             {
                 *v = Visibility::Hidden;
             }
+        }
+    }
+    if hide("-groundcover") {
+        for mut v in &mut cover {
+            *v = Visibility::Hidden;
+        }
+    }
+    if hide("-terrain") {
+        for mut v in &mut ground {
+            *v = Visibility::Hidden;
         }
     }
     if hide("-fields") {

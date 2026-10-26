@@ -644,6 +644,7 @@ mod tests {
             scale: 1.0,
             stretch: None,
             locked: false,
+            glow: None,
         }
     }
 

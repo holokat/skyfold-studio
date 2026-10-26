@@ -6,6 +6,9 @@ extends Node3D
 ## built as internal children when the scene loads, so nothing large is saved into the scene.
 ## Colliders come from each variant's collision proxy (`<variant>_COL`: a convex hull, or a walk-in
 ## model's simplified shape) with a physics material from its footstep surface.
+## Models marked `scene` (weapons) are placed as instances of their GLB scene instead, so each
+## copy keeps its AnimationPlayer (fire, reload, ignite, draw / hold / release) and socket nodes
+## (grip_r, grip_l, muzzle, aim, nock, trail_base / trail_tip); group "wb_weapons".
 
 @export_file("*.json") var index_path := "res://world_builder/instances/instances.json"
 @export var colliders := true
@@ -42,6 +45,9 @@ func _build_model(m: Dictionary) -> void:
 	var scene := load(m["glb"]) as PackedScene
 	if scene == null:
 		push_error("Skyfold Studio: can't load " + str(m["glb"]))
+		return
+	if bool(m.get("scene", false)):
+		_build_scenes(m, scene)
 		return
 	var root := scene.instantiate()
 	# variant -> LOD -> parts
@@ -135,6 +141,34 @@ func _build_model(m: Dictionary) -> void:
 			_colliders(body, collider, m, variant, per_lod, proxies[min(variant, proxies.size() - 1)], data, count, center, convex)
 	file.close()
 	root.free()
+
+
+## Every placed copy as an instance of the model's scene (animated weapons).
+func _build_scenes(m: Dictionary, scene: PackedScene) -> void:
+	var holder := Node3D.new()
+	holder.name = str(m["name"]).validate_node_name()
+	holder.set_meta("wb_built", true)
+	add_child(holder, false, Node.INTERNAL_MODE_BACK)
+	var file := FileAccess.open(m["bin"], FileAccess.READ)
+	if file == null:
+		push_error("Skyfold Studio: can't open " + str(m["bin"]))
+		return
+	for b in m["blocks"]:
+		# (only the coarse blocks: fine LOD blocks repeat their instances)
+		if b.has("parent"):
+			continue
+		var count := int(b["count"])
+		file.seek(int(b["offset"]))
+		var data := file.get_buffer(count * 48).to_float32_array()
+		var center := Vector3(b["center"][0], b["center"][1], b["center"][2])
+		for i in count:
+			var inst := scene.instantiate() as Node3D
+			var t := _instance(data, i)
+			t.origin += center
+			inst.transform = t
+			inst.add_to_group("wb_weapons")
+			holder.add_child(inst)
+	file.close()
 
 
 ## Instance i of a packed buffer (rows of the basis, then the origin per row).

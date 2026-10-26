@@ -39,7 +39,7 @@ struct Prop {
     ranges: [f32; 4],
 }
 
-const PROPS: [Prop; 16] = [
+const PROPS: [Prop; 18] = [
     // rocks keep a far LOD out to the horizon, like the procedural ones
     Prop {
         kind: AssetKind::Boulder,
@@ -109,6 +109,18 @@ const PROPS: [Prop; 16] = [
         file: "desert_shrub",
         ranges: [30.0, 110.0, 400.0, 400.0],
     },
+    // alien flora (sci-fi template, recoloured by `nature::alien`): the ~5 m quiver tree holds
+    // out like a small tree; the knee-high succulent clumps and rosettes like the desert scrub
+    Prop {
+        kind: AssetKind::QuiverTree,
+        file: "quiver_tree",
+        ranges: [40.0, 140.0, 900.0, 900.0],
+    },
+    Prop {
+        kind: AssetKind::Succulent,
+        file: "succulents",
+        ranges: [20.0, 60.0, 220.0, 220.0],
+    },
     // tall formations (tools/process_formations.py): big, so each level holds out longer
     Prop {
         kind: AssetKind::SeaStack,
@@ -131,13 +143,29 @@ const PROPS: [Prop; 16] = [
 /// its normal map) instead of flat vertex colours: the CC0 cliff scans are open-backed facades.
 struct Dressed {
     kind: AssetKind,
+    variants: u32,
     ranges: [f32; 4],
 }
 
-const DRESSED: [Dressed; 1] = [Dressed {
-    kind: AssetKind::CliffRock,
-    ranges: [110.0, 4000.0, 4000.0, 4000.0],
-}];
+const DRESSED: [Dressed; 3] = [
+    Dressed {
+        kind: AssetKind::CliffRock,
+        variants: 3,
+        ranges: [110.0, 4000.0, 4000.0, 4000.0],
+    },
+    // the alien-world rocks (visuals::floating, visuals::monoliths); their tiles keep their size
+    // however far they're scaled (visuals::rock_material)
+    Dressed {
+        kind: AssetKind::FloatingRock,
+        variants: crate::visuals::floating::VARIANTS,
+        ranges: [120.0, 4000.0, 4000.0, 4000.0],
+    },
+    Dressed {
+        kind: AssetKind::Monolith,
+        variants: crate::visuals::monoliths::VARIANTS,
+        ranges: [90.0, 3000.0, 3000.0, 3000.0],
+    },
+];
 /// `<file>_albedo.ktx2` / `_normal.ktx2`: Poly Haven's rock_face_03, a 2.7 m tiling scan.
 const TILE_FILE: &str = "tile_rock";
 const TILE_M: f32 = 2.7;
@@ -372,7 +400,7 @@ fn load(dir: &Path, file: &str, bc: bool) -> Result<Loaded, String> {
 
 /// The procedural variants of a dressed kind, both LODs each, with UVs for the tiling texture.
 fn dressed_variants(d: &Dressed) -> Vec<(Vec<Mesh>, f32, f32, f32)> {
-    (0..3)
+    (0..d.variants)
         .map(|v| {
             let lods: Vec<MeshData> = (0..2).map(|lod| build_asset(d.kind, v, lod)).collect();
             let (mn, mx) = lods[0].bounds();

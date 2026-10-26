@@ -315,6 +315,7 @@ pub fn place(
             stretch: pc.stretch,
             group,
             locked: false,
+            glow: None,
         });
         ids.push(id);
         above.push(pc.at[1]);

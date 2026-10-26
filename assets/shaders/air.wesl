@@ -23,7 +23,7 @@ import super::volumetrics_fog::froxel_fog;
 
 struct AirParams {
     kinds: array<vec4<f32>, 5>,   // per kind: x share shown, y size (m), z box width, w box height
-    offsets: array<vec4<f32>, 5>, // per kind: xyz travelled (wind drift, fall), wrapped to the box
+    offsets: array<vec4<f32>, 5>, // per kind: xyz travelled (wind drift, fall), wrapped to the box; w: its own glow (air themes; 0 none)
     tints: array<vec4<f32>, 5>,   // per kind: rgb colour (linear albedo / glow), w: its extra
     sky: vec4<f32>,               // rgb: sky fill (lux, before exposure), w: brightness
     wind: vec4<f32>,              // xy: direction (xz), z: speed (m/s), w: clock (s)
@@ -261,6 +261,9 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     }
     let amb = (air.sky.rgb + lights.ambient_color.rgb) * view.exposure;
     let bright = air.sky.w;
+    // a themed world's specks may glow on their own (`visuals::air::AirTheme`): seen at night and
+    // in the shade, in display terms (not exposed), like the embers
+    let glow = air.offsets[k].w;
     var rgb = vec3<f32>(0.0);
     var alpha = 0.0;
     if k == DUST {
@@ -268,9 +271,13 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
         // and then a glint as a turning flake catches the sun
         let glint = 0.6 + 2.4 * pow(0.5 + 0.5 * sin(air.wind.w * (1.5 + 4.0 * fract(seed * 3.7)) + seed * 40.0), 12.0);
         rgb = tint.rgb * (fwd * 1.6 + lit * 0.07 + amb * 0.01) * glint * vc.w * bright;
+        rgb += tint.rgb * glow * 1.6 * glint * vc.w;
     } else if k == POLLEN {
         rgb = tint.rgb * (fwd * 0.7 + lit * 0.05 + amb * 0.03) * vc.w * bright;
-        alpha = 0.15 * cover * vc.z;
+        // (glowing specks pulse slowly, each on its own beat)
+        let pulse = 0.55 + 0.45 * sin(air.wind.w * (0.7 + 1.6 * fract(seed * 3.7)) + seed * 40.0);
+        rgb += tint.rgb * glow * 1.4 * pulse * vc.w;
+        alpha = 0.15 * cover * vc.z * (1.0 - min(glow, 1.0));
     } else if k == ASH && fract(seed * 13.7) < tint.w {
         // an ember: glowing on its own, flickering, dimming as it cools
         let fl = 0.55 + 0.45 * sin(air.wind.w * (6.0 + 9.0 * fract(seed * 3.1)) + seed * 40.0);
@@ -294,6 +301,7 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
         // lit side, light through it when backlit (brighter still looking into the sun), sky fill
         rgb = albedo * (front / PI + amb) + albedo * through * (back / PI + fwd * 0.5);
         rgb *= bright;
+        rgb += albedo * glow;
         alpha = a;
     }
     // the haze or fog between the eye and the speck (premultiplied: it dims the speck, and a

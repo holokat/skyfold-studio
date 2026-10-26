@@ -23,14 +23,19 @@ pub mod anims;
 pub mod creatures;
 pub mod export;
 pub(crate) mod mcp;
+mod mcp_motion;
 pub mod moves;
 pub mod npc;
+pub mod play_camera;
 pub mod player;
 pub mod puppet;
+pub mod rigging;
 pub mod stage;
 pub mod view;
 mod view_char;
+pub mod weapons;
 mod view_codex;
+mod view_motion;
 pub mod world;
 
 pub use anims::AnimLibrary;
@@ -161,7 +166,8 @@ impl Entry {
     }
     fn rig_file_name(&self) -> String {
         match self.meta.rig {
-            RigKind::Imported => "prepared.glb".into(),
+            // (its own rig, until moving parts are added: then versioned like an auto rig)
+            RigKind::Imported if self.meta.version == 0 => "prepared.glb".into(),
             _ => format!("rig_v{}.glb", self.meta.version),
         }
     }
@@ -351,6 +357,11 @@ impl Characters {
         self.loaded = true;
     }
 
+    /// Re-reads the library from disk now.
+    pub fn reload_now(&mut self) {
+        self.reload();
+    }
+
     /// Stores a character's meta (built-ins: their export choices) and reloads the list.
     pub fn save_meta(&mut self, meta: &CharacterMeta) {
         if let Some(e) = self.entries.iter().find(|e| e.meta.id == meta.id)
@@ -524,7 +535,7 @@ fn set(status: &Mutex<String>, s: &str) {
 }
 
 /// The model file in a picked path: itself, or the best one inside a .zip.
-fn model_file(path: &Path, work: &Path) -> Result<PathBuf, String> {
+pub(super) fn model_file(path: &Path, work: &Path) -> Result<PathBuf, String> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -728,10 +739,11 @@ fn rig_model(
         "rigged {}: {} voxels solid, {} vertices unreached, {} ms",
         meta.id, report.solid, report.unreached, report.millis
     );
-    meta.notes.retain(|n| !n.starts_with("Uses the rig"));
+    meta.notes
+        .retain(|n| !n.starts_with("Uses the rig") && !n.contains("sit apart from the body"));
     if report.unreached > 0 {
         meta.notes.push(format!(
-            "{} vertices sit apart from the body (weighted by distance)",
+            "{} vertices sit apart from the body (they follow the nearest part that's attached)",
             report.unreached
         ));
     }
@@ -742,6 +754,12 @@ fn rig_model(
     meta.version += 1;
     meta.markers = Some(used);
     meta.rig = RigKind::Auto;
+    // (a new skeleton: the moving parts' bones are gone)
+    if rigging::forget_parts(&meta.id) {
+        meta.notes.retain(|n| !n.starts_with("Re-rigging removed"));
+        meta.notes
+            .push("Re-rigging removed its moving parts: add them again in Motion".into());
+    }
     let bytes = autorig::glb::write(&model, &[]);
     let dir = user_dir().join(&meta.id);
     std::fs::write(dir.join(format!("rig_v{}.glb", meta.version)), bytes)
@@ -775,14 +793,18 @@ impl Plugin for CharactersPlugin {
             .add_systems(Update, poll_jobs)
             .add_plugins((
                 puppet::PuppetPlugin,
+                rigging::RiggingPlugin,
                 stage::StagePlugin,
                 view::ViewPlugin,
                 world::WorldPlugin,
                 npc::NpcPlugin,
                 player::PlayerPlugin,
+                play_camera::PlayCameraPlugin,
                 creatures::CreaturesPlugin,
+                weapons::WeaponsPlugin,
             ));
         mcp::register(app);
+        mcp_motion::register(app);
     }
 }
 

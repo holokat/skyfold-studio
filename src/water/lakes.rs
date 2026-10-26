@@ -1062,6 +1062,7 @@ fn grow_plants(
             scale,
             stretch: None,
             locked: false,
+            glow: None,
         });
         ids.push(id);
     };

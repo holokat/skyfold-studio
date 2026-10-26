@@ -145,7 +145,8 @@ pub(crate) fn post(
     let mut s = TcpStream::connect(("127.0.0.1", port))?;
     s.set_read_timeout(Some(Duration::from_secs(330)))?;
     let mut head = format!(
-        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nAuthorization: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        super::key::bearer(),
         body.len()
     );
     if let Some(sid) = session {

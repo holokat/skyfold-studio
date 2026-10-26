@@ -1,5 +1,5 @@
 //! The codex inspector for a model (a library character): Use as player / Add as NPC, and its
-//! Rig, Animations, Moves and Export.
+//! Rig, Motion, Animations, Moves and Export.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -147,7 +147,8 @@ pub(super) fn inspector(ui: &mut egui::Ui, d: &mut ViewData, id: &str, now: f64)
         &mut tab,
         &[
             (CharTab::Rig, "Rig"),
-            (CharTab::Animations, "Animations"),
+            (CharTab::Motion, "Motion"),
+            (CharTab::Animations, "Anims"),
             (CharTab::Moves, "Moves"),
             (CharTab::Export, "Export"),
         ],
@@ -157,6 +158,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, d: &mut ViewData, id: &str, now: f64)
     ui.add_space(8.0);
     match d.v.char_tab {
         CharTab::Rig => rig_tab(ui, d, &e, now),
+        CharTab::Motion => super::view_motion::motion_tab(ui, d, &e, now),
         CharTab::Animations => animations_tab(ui, d, &e, now),
         CharTab::Moves => {
             let mut own = e.meta.moves.clone();

@@ -337,6 +337,11 @@ pub struct WorldPlan {
     /// MMOs they love (`INSPIRATIONS` ids)
     pub inspirations: Vec<String>,
     pub art: Art,
+    /// fantasy (default) or scifi: a Sci-Fi world gets the alien template's grade, sky, flora
+    /// and props after it is built (`crate::world_kind`)
+    pub kind: crate::world_kind::WorldKind,
+    /// a Sci-Fi world's look (`world_kind::looks` id; Fantasy worlds use `look`)
+    pub scifi_look: String,
     /// the look preset (`look_set` preset id)
     pub look: String,
     pub game: GameKind,
@@ -390,6 +395,8 @@ impl Default for WorldPlan {
             description: String::new(),
             inspirations: Vec::new(),
             art: Art::HandPainted,
+            kind: Default::default(),
+            scifi_look: "alien_dusk".into(),
             look: "natural".into(),
             game: GameKind::Themepark,
             levels: [1, 60],
@@ -500,6 +507,9 @@ impl WorldPlan {
                 self.levels[1]
             ),
         ];
+        if self.kind == crate::world_kind::WorldKind::SciFi {
+            v.insert(0, "A Sci-Fi world: alien sky, ground, plants and rock spires".into());
+        }
         let mut places = vec![];
         if self.capital {
             places.push("a capital city".to_string());

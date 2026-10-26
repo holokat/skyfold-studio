@@ -294,16 +294,14 @@ fn placeholder(srgb: bool) -> Image {
 /// Loads library materials into an albedo and a detail array (full mip chains; 1024², or 512²
 /// when many themes are in use so the arrays stay under ~120 MB).
 fn load_arrays(ids: &[&str], art: crate::art_style::ArtStyle) -> Result<(Image, Image), String> {
-    let dir = crate::terrain::textures::library_dir();
     let lut = crate::terrain::textures::srgb_to_lin_lut();
     let size = if ids.len() <= 10 { 1024u32 } else { 512 };
     let mut albedo = vec![];
     let mut detail = vec![];
     for id in ids {
-        let d = dir.join(id);
+        let f = |name: &str| crate::terrain::textures::library_file(id, name);
         // (the painted library material in a hand-painted world)
-        let [ap, np] =
-            crate::art_style::textures([d.join("albedo.png"), d.join("normal.png")], art);
+        let [ap, np] = crate::art_style::textures([f("albedo.png"), f("normal.png")], art);
         let a = image::open(ap)
             .map_err(|e| format!("{id}/albedo.png: {e}"))?
             .to_rgba8();

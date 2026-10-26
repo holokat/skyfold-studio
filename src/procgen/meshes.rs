@@ -96,6 +96,17 @@ pub enum AssetKind {
     WildStrawberry,
     Blueberry,
     Blackberry,
+    /// A single tulip (`flora`; variants = colours, `fields::plants::TULIP_COLOUR_NAMES`)
+    Tulip,
+    /// A rock hanging in the air: floating island chunks and asteroid boulders
+    /// (`visuals::floating`; placed at a height above the ground)
+    FloatingRock,
+    /// Standing slabs, obelisks, menhirs and basalt columns (`visuals::monoliths`)
+    Monolith,
+    /// The quiver tree (photoscan; alien flora of the sci-fi template)
+    QuiverTree,
+    /// Karoo succulent clumps and ice-plant rosettes (photoscan; alien flora)
+    Succulent,
 }
 
 /// Broad grouping of [`AssetKind`]s (triangle budgets, sway conventions).
@@ -215,6 +226,11 @@ impl AssetKind {
         AssetKind::WildStrawberry,
         AssetKind::Blueberry,
         AssetKind::Blackberry,
+        AssetKind::Tulip,
+        AssetKind::FloatingRock,
+        AssetKind::Monolith,
+        AssetKind::QuiverTree,
+        AssetKind::Succulent,
     ];
 
     /// Human readable label.
@@ -283,6 +299,11 @@ impl AssetKind {
             WildStrawberry => "Wild strawberry",
             Blueberry => "Blueberry",
             Blackberry => "Blackberry",
+            Tulip => "Tulip",
+            FloatingRock => "Floating Rock",
+            Monolith => "Monolith",
+            QuiverTree => "Quiver Tree",
+            Succulent => "Succulents",
         }
     }
 
@@ -290,13 +311,16 @@ impl AssetKind {
         use AssetKind::*;
         match self {
             Pine | Fir | Spruce | SnowyPine | Cedar | Oak | Birch | Maple | GoldenMaple
-            | SakuraPink | SakuraWhite | Ginkgo | Sequoia | Willow | Palm | Bamboo | DeadTree => {
+            | SakuraPink | SakuraWhite | Ginkgo | Sequoia | Willow | Palm | Bamboo | DeadTree
+            | QuiverTree => {
                 AssetCategory::Tree
             }
             Boulder | RockCluster | CliffRock | Pebbles | MossyRock | RockSpire | Hoodoo
-            | SeaStack | Crystals => AssetCategory::Rock,
+            | SeaStack | Crystals | FloatingRock | Monolith => AssetCategory::Rock,
             Bush | FlowerBush | Fern | Flowers | TallGrass | Reeds | Cactus | Mushrooms
-            | Lavender | WildStrawberry | Blueberry | Blackberry => AssetCategory::Plant,
+            | Lavender | WildStrawberry | Blueberry | Blackberry | Tulip | Succulent => {
+                AssetCategory::Plant
+            }
             FallenLog | Stump | Branches | Driftwood | Roots => AssetCategory::Debris,
             _ => AssetCategory::Structure,
         }
@@ -363,6 +387,8 @@ pub fn build_asset(kind: AssetKind, variant: u32, lod: u32) -> MeshData {
         RockSpire | Hoodoo | SeaStack | Crystals => {
             return crate::visuals::formations::formation(kind, variant, lod);
         }
+        FloatingRock => return crate::visuals::floating::floating_rock(variant, lod),
+        Monolith => return crate::visuals::monoliths::monolith(variant, lod),
         Bush => bush(false, &mut rng, lod),
         FlowerBush => bush(true, &mut rng, lod),
         Fern => fern(&mut rng, lod),
@@ -371,7 +397,7 @@ pub fn build_asset(kind: AssetKind, variant: u32, lod: u32) -> MeshData {
         Reeds => reeds(&mut rng, lod),
         Cactus => cactus(&mut rng, lod),
         Mushrooms => mushrooms(&mut rng, lod),
-        Lavender | WildStrawberry | Blueberry | Blackberry => Mesh::new(),
+        Lavender | WildStrawberry | Blueberry | Blackberry | Tulip => Mesh::new(),
         FallenLog => fallen_log(&mut rng, lod),
         Stump => stump(&mut rng, lod),
         Branches => branches(&mut rng, lod),
@@ -394,6 +420,9 @@ pub fn build_asset(kind: AssetKind, variant: u32, lod: u32) -> MeshData {
         DesertShrub | LilyPads => bush(false, &mut rng, lod),
         // photoscanned (photoscan.rs); a rooted stump stands in if its files are missing
         Roots => stump(&mut rng, lod),
+        // photoscanned alien flora; stand-ins if their files are missing
+        QuiverTree => dead_tree(&mut rng, lod),
+        Succulent => cactus(&mut rng, lod),
         Well => well(&mut rng, lod),
         Dock => dock(&mut rng, lod),
     };

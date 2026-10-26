@@ -636,6 +636,7 @@ fn synth_content(world: &mut World) {
                     scale: 1.0,
                     stretch: None,
                     locked: false,
+                    glow: None,
                 }
             })
             .collect()
@@ -694,6 +695,7 @@ mod tests {
             navmesh: vec![],
             dungeons: Ok(vec![]),
             fires: vec![],
+            lights: vec![],
             characters: Default::default(),
         }
     }

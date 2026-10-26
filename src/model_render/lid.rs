@@ -84,7 +84,7 @@ pub struct LidFocus {
 }
 
 #[derive(Resource)]
-struct LidSounds {
+pub(crate) struct LidSounds {
     open: Vec<Handle<AudioSource>>,
     close: Vec<Handle<AudioSource>>,
 }
@@ -143,7 +143,7 @@ pub fn register(app: &mut App) {
     })
     .mcp_tool(McpTool {
         name: "interact",
-        description: "While walking, press the interact key (E) as a player would: opens or shuts the chest the explorer looks at within reach (walk_state's `interactable` says what that is). Returns what happened; fails when nothing is in reach.",
+        description: "While walking, press the interact key (E) as a player would: opens or shuts the chest the explorer looks at within reach, or presses the lift button in reach (calls the car to a landing; in the car, rides it to the other stop) (walk_state's `interactable` says what that is). Returns what happened; fails when nothing is in reach.",
         input_schema: || json!({"type": "object", "properties": {}}),
         run: interact,
     });
@@ -233,7 +233,7 @@ pub fn lid_centre(lid: &Lid, gt: &GlobalTransform) -> (Vec3, f32) {
 
 /// How well the eye at `eye` looking along `fwd` aims at a lid at `c` (radius r): None when out
 /// of reach or looked past, else a score (lower is better).
-fn aim_score(eye: Vec3, fwd: Vec3, c: Vec3, r: f32) -> Option<f32> {
+pub(crate) fn aim_score(eye: Vec3, fwd: Vec3, c: Vec3, r: f32) -> Option<f32> {
     let to = c - eye;
     let dist = to.length();
     let edge = (dist - r).max(0.0);
@@ -316,7 +316,7 @@ fn play(
 }
 
 /// E: open or shut the chest in reach.
-fn press(
+pub(crate) fn press(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     walk: Res<WalkState>,
@@ -391,15 +391,22 @@ fn hint(
     let Some(lid) = focus.entity.and_then(|e| lids.get(e).ok()) else {
         return Ok(());
     };
-    let ctx = contexts.ctx_mut()?.clone();
-    let screen = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::new("lid_hint")));
-    let c = screen.center() + vec2(0.0, 58.0);
     let what = if lid.want {
         "Close chest"
     } else {
         "Open chest"
     };
+    let tip = (!crate::ui::tips::seen(TIP)).then_some("Chests open: look inside, press E again to shut it");
+    key_hint(&contexts.ctx_mut()?.clone(), what, tip);
+    Ok(())
+}
+
+/// Draws the interact hint by the crosshair: the E key, what it does and (optionally) a line of
+/// how it works under it.
+pub fn key_hint(ctx: &egui::Context, what: &str, tip: Option<&str>) {
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::new("lid_hint")));
+    let c = screen.center() + vec2(0.0, 58.0);
     let label = painter.layout_no_wrap(
         what.to_string(),
         FontId::new(14.0, crate::ui::theme::semibold()),
@@ -433,16 +440,15 @@ fn hint(
         label,
         Color32::WHITE,
     );
-    if !crate::ui::tips::seen(TIP) {
+    if let Some(tip) = tip {
         painter.text(
             pos2(c.x, r.max.y + 12.0),
             Align2::CENTER_CENTER,
-            "Chests open: look inside, press E again to shut it",
+            tip,
             FontId::proportional(12.5),
             Color32::from_rgba_unmultiplied(235, 238, 245, 210),
         );
     }
-    Ok(())
 }
 
 // ------------------------------------------------------------------ MCP
@@ -489,10 +495,13 @@ fn describe(world: &World, e: Entity, dist: Option<f32>) -> Option<Value> {
     }))
 }
 
-/// The chest in reach, for `walk_state`.
+/// The chest (or else the lift button) in reach, for `walk_state`.
 pub fn focus_json(world: &mut World) -> Option<Value> {
     let f = world.resource::<LidFocus>();
-    let (e, d) = (f.entity?, f.distance);
+    let Some(e) = f.entity else {
+        return crate::model_render::lift::focus_json(world);
+    };
+    let d = f.distance;
     let mut v = describe(world, e, Some(d))?;
     let open = world.get::<Lid>(e)?.want;
     v["kind"] = json!("chest");
@@ -576,7 +585,10 @@ fn interact(world: &mut World, _args: Value) -> Result<Vec<McpContent>, String> 
         return Err("not walking: walk_start or teleport first".into());
     }
     let Some(e) = world.resource::<LidFocus>().entity else {
-        return Err("nothing to interact with in reach: walk up to a chest (within about 2 m) and look at it".into());
+        if let Some(r) = crate::model_render::lift::press_focused(world) {
+            return r;
+        }
+        return Err("nothing to interact with in reach: walk up to a chest or a lift button (within about 2 m) and look at it".into());
     };
     let (c, opening) = {
         let Some(gt) = world.get::<GlobalTransform>(e).copied() else {

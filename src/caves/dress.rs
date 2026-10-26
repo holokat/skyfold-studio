@@ -248,6 +248,7 @@ pub fn refurnish(d: &mut WorldData, id: u32) {
                 stretch: None,
                 group: 0,
                 locked: false,
+                glow: None,
             };
             p.set_scale3(Vec3::splat(pr.scale * e.default_scale));
             d.store.insert(p);

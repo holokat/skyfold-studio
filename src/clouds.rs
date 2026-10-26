@@ -65,6 +65,8 @@ use crate::look::LookState;
 use crate::noise::{hash_u32, hash2, smoothstep};
 use crate::sky::{Lighting, Moon, SkyState, Sun};
 
+pub mod sea;
+
 /// Period (m) of the whole cloud field: every noise used by the clouds and their shadows tiles
 /// with it, so the wind offset wraps around it without a seam.
 pub const CLOUD_TILE: f32 = 32768.0;
@@ -732,7 +734,7 @@ pub struct CloudCompositeMaterial {
     #[sampler(1)]
     image: Handle<Image>,
     /// x: cloud base altitude, y: nearest distance a cloud can be from the camera (near fade),
-    /// z: earth radius. Per pixel this gives a conservative cloud depth that is depth-tested
+    /// z: earth radius, w: top altitude of the cloud sea (`sea`, 0 without one). Per pixel this gives a conservative cloud depth that is depth-tested
     /// against the scene, so low-resolution clouds never smear over nearer trees or terrain.
     #[uniform(2)]
     params: Vec4,
@@ -919,7 +921,10 @@ fn update_clouds(
         ),
     >,
     ambient: Res<GlobalAmbientLight>,
-    orbit: Res<crate::camera::OrbitCamera>,
+    (orbit, terrain): (
+        Res<crate::camera::OrbitCamera>,
+        Res<crate::terrain::Terrain>,
+    ),
     mut state: Local<(Option<Vec2>, Vec2, u32)>,
     mut look_now: Local<Option<Vec3>>,
 ) {
@@ -1020,8 +1025,16 @@ fn update_clouds(
         450.0
     };
 
-    // the composite's depth test: no cloud is nearer than 0.6 × the near fade (see the trace)
-    let params = Vec4::new(CLOUD_BASE, near_fade * 0.6, EARTH_RADIUS, 0.0);
+    // the cloud sea (off: all zero) rides in the uniforms' spare channels (`sea`)
+    let sea = lighting.cloud_sea.pack(terrain.sea_level);
+    // the composite's depth test: no cloud is nearer than 0.6 × the near fade (see the trace);
+    // the sea fades in a few tens of metres from the camera, and from above lies below its top
+    let near = if sea[4] > 0.0 {
+        (near_fade * 0.6).min(sea::NEAR_FADE.0)
+    } else {
+        near_fade * 0.6
+    };
+    let params = Vec4::new(CLOUD_BASE, near, EARTH_RADIUS, sea[1]);
     if mats
         .get(&dome_mat.0)
         .is_some_and(|m| (m.params - params).abs().max_element() > 1.0)
@@ -1045,18 +1058,18 @@ fn update_clouds(
         offset: Vec4::new(offset.x, offset.y, cirrus_drift.x, cirrus_drift.y),
         motion: Vec4::new(delta.x, delta.y, 1.0, time.elapsed_secs_wrapped()),
         key: key.extend(if sun_key { 0.0 } else { 1.0 }),
-        key_color: key_col.extend(0.0),
-        fill: fill.extend(0.0),
-        fill_color: fill_col.extend(0.0),
+        key_color: key_col.extend(sea[2]),
+        fill: fill.extend(sea[0]),
+        fill_color: fill_col.extend(sea[1]),
         layer: Vec4::new(CLOUD_BASE, top, CIRRUS_ALT, near_fade),
-        shade: Vec4::new(1.0 - 0.55 * w.dim, w.dim, sky.night, 0.0),
+        shade: Vec4::new(1.0 - 0.55 * w.dim, w.dim, sky.night, sea[3]),
         quality: Vec4::new(steps, light_steps, blend, scale as f32),
         fill_ambient: {
             // mostly grey: the fill's blue tint would paint thin cloud flat navy
             let c = ambient.color.to_linear();
             let c = Vec3::new(c.red, c.green, c.blue);
             let grey = Vec3::splat(c.dot(Vec3::new(0.2126, 0.7152, 0.0722)));
-            (grey.lerp(c, 0.35) * ambient.brightness * 0.09).extend(0.0)
+            (grey.lerp(c, 0.35) * ambient.brightness * 0.09).extend(sea[4])
         },
     };
 }
@@ -1073,6 +1086,8 @@ fn update_reflection_clouds(
         With<crate::water_render::WaterReflectionCamera>,
     >,
     orbit: Res<crate::camera::OrbitCamera>,
+    lighting: Res<Lighting>,
+    terrain: Res<crate::terrain::Terrain>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<CloudCompositeMaterial>>,
     mut dome: Query<
@@ -1124,7 +1139,13 @@ fn update_reflection_clouds(
     } else {
         450.0
     };
-    let params = Vec4::new(CLOUD_BASE, near_fade * 0.6, EARTH_RADIUS, 0.0);
+    let sea = lighting.cloud_sea.pack(terrain.sea_level);
+    let near = if sea[4] > 0.0 {
+        (near_fade * 0.6).min(sea::NEAR_FADE.0)
+    } else {
+        near_fade * 0.6
+    };
+    let params = Vec4::new(CLOUD_BASE, near, EARTH_RADIUS, sea[1]);
     if mats
         .get(&dome_mat.0)
         .is_some_and(|mat| (mat.params - params).abs().max_element() > 1.0)

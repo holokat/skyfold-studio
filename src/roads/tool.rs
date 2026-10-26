@@ -123,9 +123,7 @@ impl Default for RoadTool {
         let swatches = RoadKind::ALL
             .iter()
             .map(|k| {
-                let p = crate::terrain::textures::library_dir()
-                    .join(k.style().texture)
-                    .join("swatch.png");
+                let p = crate::terrain::textures::library_file(k.style().texture, "swatch.png");
                 image::open(p).ok().map(|i| {
                     let i = i.to_rgba8();
                     (i.width(), i.height(), i.into_raw())

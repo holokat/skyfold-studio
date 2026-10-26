@@ -424,7 +424,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     // the look's post-tonemap grade as a URP Color Lookup strip (Unity's rows run bottom up)
     ctx.write(
         &format!("{base}/Look/grade_lut.png"),
-        &core::png_rgb(&image::imageops::flip_vertical(&super::godot::look::grade_lut(&s.look))),
+        &core::png_rgb(&image::imageops::flip_vertical(&super::godot::look::grade_lut(&s.look, s.lighting.look.user_lut()))),
     )?;
     ctx.write_json(&format!("{base}/Data/lighting.json"), &light.json(s))?;
     // the shared model textures and what they are (the importer sets normal maps and linear data
@@ -471,7 +471,8 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         "waterSun": ulook.water_sun,
         "waterSky": ulook.water_sky,
     });
-    let doc = json!({
+    let fixture_lights = fixture_lights_unity(&s.lights, core::lighting(s).night);
+    let mut doc = json!({
         "version": 1,
         "name": s.name,
         "safeName": world,
@@ -516,6 +517,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         }).collect::<Vec<_>>(),
         "camera": { "position": pos(eye.to_array()), "target": pos(look.to_array()) },
     });
+    doc["fixtureLights"] = Value::Array(fixture_lights);
     ctx.write_json(&format!("{base}/worldbuilder.json"), &doc)?;
     ctx.write(
         "WorldBuilder/Editor/WorldBuilderImporter.cs",
@@ -711,6 +713,32 @@ fn fires_unity(fires: &[crate::flames::Fire]) -> Vec<Value> {
         .collect()
 }
 
+/// The light fixtures in Unity space (`crate::fixture_lights`): point or spot, colour (sRGB),
+/// an intensity on the fire lights' scale, reach, shadows; street and path lights (`night_only`)
+/// only when the exported hour is dusk or night.
+fn fixture_lights_unity(lights: &[crate::fixture_lights::FixtureLight], night: f32) -> Vec<Value> {
+    lights
+        .iter()
+        .filter_map(|l| {
+            let share = crate::fixture_lights::on_share(l.night_only, night, false);
+            (share > 0.0).then(|| {
+                let lm = l.lumens * crate::fixture_lights::LUMEN_SCALE;
+                let d = l.spot.map(|s| s.0).unwrap_or(Vec3::NEG_Y);
+                json!({
+                    "position": pos(l.pos.to_array()),
+                    "spot": l.spot.is_some(),
+                    "direction": pos(d.to_array()),
+                    "angle": l.spot.map(|s| s.1).unwrap_or(0.0),
+                    "color": l.color,
+                    "intensity": ((lm / 300_000.0).sqrt() * 1.5).clamp(0.05, 6.0) * share,
+                    "range": l.range,
+                    "shadows": l.shadows,
+                })
+            })
+        })
+        .collect()
+}
+
 /// One model for `worldbuilder.json`, its instances flattened in Unity space.
 fn model_entry(s: &Snapshot, m: &ModelOut, list: &[Inst], detail: bool) -> Value {
     let a = &s.assets[m.asset];
@@ -813,7 +841,7 @@ The log line `WBIMPORT OK …` lists what was built (`WBIMPORT FAILED …` and e
   hour with its sun (`WorldBuilder/Sky`, also the ambient light), **fog** matching the world's
   haze; in URP projects a global **Volume** (`Generated/Look.asset`) with the art style's tone
   curve, exposure, bloom, vignette and its colour grade (saturation, contrast, split toning,
-  lift, foliage hue, vibrance) as a Color Lookup LUT (`Look/grade_lut.png`); gameplay **markers** (`WorldBuilderMarker` components: player start, POIs,
+  lift, foliage hue, vibrance, the user's own LUT) as a Color Lookup LUT (`Look/grade_lut.png`); gameplay **markers** (`WorldBuilderMarker` components: player start, POIs,
   NPCs, spawn regions with outlines, resource nodes, fishing spots) and a **camera** with
   `WorldBuilderFlyCamera` (WASD, right mouse to look, Shift fast, F walk / fly).
 

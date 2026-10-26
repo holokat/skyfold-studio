@@ -10,6 +10,7 @@ use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 
+use super::rigging::{Gaze, RigRuntime, RigSpecs, WorldHost};
 use super::{AnimLibrary, Characters, Entry};
 
 #[derive(Component, Debug)]
@@ -36,6 +37,59 @@ pub struct Puppet {
     /// the clip it's fading out of: (key, time), and the fade left (s)
     prev: Option<(String, f32)>,
     fade: f32,
+    /// turns its head to the viewer / player (off for the player's own body)
+    pub gaze: bool,
+    /// its rig behaviors (feet, look-at, style, moving parts), built once its skeleton is in
+    pub rig: Option<RigRuntime>,
+    /// a clip for the upper body (spine, arms, head) over the moves: holding a weapon ready,
+    /// aiming, reloading while walking
+    pub upper: Option<UpperLayer>,
+    /// the pose round a held weapon (`weapons::hold`): spine pitch, arms on the aim line
+    pub hold: Option<super::weapons::hold::Hold>,
+    /// the held weapon's frame this frame (model space), written when `hold` is set
+    pub held: Option<Mat4>,
+    /// which bones the upper layer drives (from `spine_01` up), once resolved
+    upper_mask: Vec<bool>,
+}
+
+/// An upper-body clip over the moves (`Puppet::upper`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpperLayer {
+    pub anim: String,
+    pub time: f32,
+    pub speed: f32,
+    /// no loop: hold the end (`finished` then turns true)
+    pub once: bool,
+    pub finished: bool,
+    /// how much it covers the moves (eases toward `target`)
+    pub weight: f32,
+    pub target: f32,
+}
+
+impl UpperLayer {
+    pub fn new(anim: &str, once: bool) -> Self {
+        Self {
+            anim: anim.to_string(),
+            time: 0.0,
+            speed: 1.0,
+            once,
+            finished: false,
+            weight: 0.0,
+            target: 1.0,
+        }
+    }
+}
+
+/// How fast the upper layer fades in and out (weight per second).
+const UPPER_FADE: f32 = 6.0;
+
+/// The bones from `spine_01` up (the UE / UAL standard skeleton).
+fn upper_mask(sk: &autorig::Skeleton) -> Vec<bool> {
+    let mut m = vec![false; sk.bones.len()];
+    for (i, b) in sk.bones.iter().enumerate() {
+        m[i] = b.name == "spine_01" || b.parent.is_some_and(|p| p < i && m[p]);
+    }
+    m
 }
 
 /// Crossfade between clips (s).
@@ -65,6 +119,12 @@ impl Puppet {
             finished: false,
             prev: None,
             fade: 0.0,
+            gaze: true,
+            rig: None,
+            upper: None,
+            hold: None,
+            held: None,
+            upper_mask: vec![],
         }
     }
     /// Plays `key` (crossfading from what was playing); `once`: no loop, hold the end.
@@ -90,6 +150,32 @@ impl Puppet {
             self.once = once;
         } else {
             self.play(key, once);
+        }
+    }
+    /// Sets the upper-body clip (`None` fades it out); the same clip keeps playing.
+    pub fn set_upper(&mut self, anim: Option<&str>, once: bool) {
+        match (anim, self.upper.as_mut()) {
+            (Some(a), Some(u)) if u.anim == a => {
+                u.target = 1.0;
+                u.once = once;
+            }
+            (Some(a), u) => {
+                // (from another upper clip: cut over at the weight it had)
+                let w = u.map_or(0.0, |u| u.weight * 0.5);
+                let mut l = UpperLayer::new(a, once);
+                l.weight = w;
+                self.upper = Some(l);
+            }
+            (None, Some(u)) => u.target = 0.0,
+            (None, None) => {}
+        }
+    }
+    /// Plays the upper-body clip `anim` again from its start.
+    pub fn restart_upper(&mut self, anim: &str, once: bool) {
+        self.set_upper(Some(anim), once);
+        if let Some(u) = self.upper.as_mut() {
+            u.time = 0.0;
+            u.finished = false;
         }
     }
     /// Spawned, posed and its textures in.
@@ -126,12 +212,21 @@ pub fn spawn(
 #[derive(Resource, Default)]
 pub struct Retargets(HashMap<(String, String), Arc<Retarget>>);
 
+/// Puppets posing (weapons set their holds before it).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PuppetSystems;
+
 pub struct PuppetPlugin;
 
 impl Plugin for PuppetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Retargets>()
-            .add_systems(Update, drive.before(bevy::transform::TransformSystems::Propagate));
+            .add_systems(
+                Update,
+                drive
+                    .in_set(PuppetSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -148,6 +243,13 @@ fn drive(
     time: Res<Time>,
     server: Res<AssetServer>,
     mut commands: Commands,
+    (mut specs, gaze, terrain, wind, globals): (
+        ResMut<RigSpecs>,
+        Res<Gaze>,
+        Option<Res<crate::terrain::Terrain>>,
+        Option<Res<crate::wind::WindState>>,
+        Query<&GlobalTransform>,
+    ),
 ) {
     if puppets.is_empty() {
         return;
@@ -206,6 +308,7 @@ fn drive(
                 bones.len()
             );
             p.bones = bones;
+            p.upper_mask = upper_mask(&sk);
             p.resolved = true;
         }
         if p.playing {
@@ -278,6 +381,65 @@ fn drive(
         } else {
             p.prev = None;
         }
+        // the upper body's own clip over the moves
+        if let Some(mut u) = p.upper.take() {
+            if p.playing {
+                u.time += dt * u.speed;
+            }
+            let step = UPPER_FADE * dt;
+            u.weight = if u.target > u.weight {
+                (u.weight + step).min(u.target)
+            } else {
+                (u.weight - step).max(u.target)
+            };
+            if let Some((up, dur, looped)) = pose_of(&u.anim, u.time, u.once) {
+                if !looped && u.time >= dur {
+                    u.finished = true;
+                    u.time = u.time.min(dur);
+                }
+                let w = u.weight.clamp(0.0, 1.0);
+                for ((x, o), m) in pose.iter_mut().zip(&up).zip(&p.upper_mask) {
+                    if *m {
+                        x.t = x.t.lerp(o.t, w);
+                        x.r = x.r.slerp(if x.r.dot(o.r) < 0.0 { -o.r } else { o.r }, w);
+                    }
+                }
+            }
+            if u.weight > 0.0 || u.target > 0.0 {
+                p.upper = Some(u);
+            }
+        }
+        // the rig on top of the clip: style, feet, look-at, moving parts
+        RigRuntime::refresh(&mut p.rig, &entry, &sk, &mut specs);
+        let root = globals.get(root).map(|g| g.to_matrix()).unwrap_or(Mat4::IDENTITY);
+        let stage = p.layer.is_some();
+        let host = WorldHost {
+            // (the stage floor is flat)
+            terrain: if stage { None } else { terrain.as_deref() },
+            look: if !p.gaze {
+                None
+            } else if stage {
+                gaze.stage
+            } else {
+                gaze.world
+            },
+            wind: if stage {
+                Vec3::ZERO
+            } else {
+                wind.as_deref()
+                    .map(|w| w.velocity(time.elapsed_secs()) * 0.8)
+                    .unwrap_or_default()
+            },
+        };
+        let rig_dt = if p.playing { dt } else { 0.0 };
+        if let Some(r) = p.rig.as_mut() {
+            r.rig.evaluate(&sk, &mut pose, root, rig_dt, &host);
+        }
+        // a held weapon: the spine leans into the aim, the arms reach for the aim line
+        p.held = match p.hold.clone() {
+            Some(h) => super::weapons::hold::apply(&sk, &mut pose, &h),
+            None => None,
+        };
         for (b, x) in p.bones.iter().zip(&pose) {
             if let Some(b) = b
                 && let Ok(mut tf) = tfs.get_mut(*b)

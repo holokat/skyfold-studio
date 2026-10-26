@@ -514,6 +514,7 @@ mod tests {
                 stretch: None,
                 group: 0,
                 locked: false,
+                glow: None,
             });
         }
         let loop_ = [

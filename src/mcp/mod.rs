@@ -22,6 +22,7 @@ mod calls;
 #[cfg(test)]
 mod checks;
 mod http;
+pub mod key;
 mod tools;
 mod ui;
 mod validate;

@@ -8,7 +8,7 @@
 //! the wizard closed, a small pill at the bottom shows its progress.
 //!
 //! Test hooks (screenshots): `WB_SETUP=1` opens it on start, `WB_SETUP_STEP=<page 1–9>` opens it
-//! on that page, `WB_SETUP_DEMO=ai|building|done|failed|pill|unsaved` shows a sample AI answer, a
+//! on that page, `WB_SETUP_DEMO=ai|building|done|failed|pill|unsaved|scifi` shows a sample AI answer, a
 //! sample build (on the last page, or as the pill with the wizard closed) or the unsaved-changes
 //! question (nothing is built).
 
@@ -265,6 +265,8 @@ fn init_hooks(setup: &mut Setup, wiz: &mut Wiz) {
         Some("pill") => setup.open = false,
         // "unsaved changes: save first / discard / cancel"
         Some("unsaved") => wiz.confirm = true,
+        // a Sci-Fi world picked (its World and Look pages)
+        Some("scifi") => setup.plan.kind = crate::world_kind::WorldKind::SciFi,
         _ => {}
     }
     if wiz.demo.as_deref() == Some("ai") {
@@ -1307,7 +1309,66 @@ const REALM_COLOURS: [Color32; 3] = [
 // ---------------------------------------------------------------------------------------------
 // page 4: world
 
+/// Fantasy or Sci-Fi: two picture cards (the Sci-Fi world gets the alien template after it is
+/// built, and its look is picked from the Sci-Fi looks on the Look page).
+fn world_kind_cards(ui: &mut Ui, c: &mut Cx) {
+    use crate::world_kind::WorldKind;
+    section_title(ui, "World type");
+    let w = ui.available_width();
+    let cw = (w - GAP) / 2.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        for k in WorldKind::ALL {
+            let (rect, resp) = ui.allocate_exact_size(vec2(cw, 96.0), Sense::click());
+            let sel = c.setup.plan.kind == k;
+            let p = ui.painter_at(rect.expand(8.0));
+            let (pic, ic) = match k {
+                WorldKind::Fantasy => ("look_natural".to_string(), icon::CASTLE_TURRET),
+                WorldKind::SciFi => (
+                    crate::world_kind::looks::ScifiLook::AlienDusk.picture(),
+                    icon::PLANET,
+                ),
+            };
+            match c.wiz.textures.get(&pic) {
+                Some(t) => paint_cover(ui, t, rect, 14),
+                None => paint_landscape(&p, rect, REAL, 11 + k as u32, false),
+            }
+            scrim(&p, rect, 0.2, 230);
+            p.text(
+                pos2(rect.left() + 14.0, rect.bottom() - 30.0),
+                Align2::LEFT_BOTTOM,
+                format!("{ic}  {}", k.name()),
+                FontId::new(16.0, semibold()),
+                Color32::WHITE,
+            );
+            p.text(
+                pos2(rect.left() + 14.0, rect.bottom() - 12.0),
+                Align2::LEFT_BOTTOM,
+                k.blurb(),
+                FontId::proportional(11.5),
+                Color32::from_rgb(210, 216, 226),
+            );
+            corner_mask(&p, rect, 14);
+            pick_border(&p, rect, 14, sel, resp.hovered());
+            if sel {
+                check_badge(&p, pos2(rect.right() - 20.0, rect.top() + 20.0), icon::CHECK);
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !sel {
+                c.setup.plan.kind = k;
+                // a Sci-Fi world opens at its look's hour
+                if k == WorldKind::SciFi
+                    && let Some(l) = crate::world_kind::looks::ScifiLook::from_id(&c.setup.plan.scifi_look)
+                {
+                    c.setup.plan.hour = l.hour();
+                }
+            }
+        }
+    });
+    ui.add_space(14.0);
+}
+
 fn page_world(ui: &mut Ui, c: &mut Cx) {
+    world_kind_cards(ui, c);
     section_title(ui, "In your own words");
     egui::Frame::new()
         .fill(Color32::from_rgb(12, 14, 18))
@@ -1968,6 +2029,11 @@ fn page_look(ui: &mut Ui, c: &mut Cx) {
         }
     });
     ui.add_space(14.0);
+    if plan.kind == crate::world_kind::WorldKind::SciFi {
+        scifi_look_grid(ui, c);
+        time_of_day(ui, &mut c.setup.plan);
+        return;
+    }
     section_title(ui, "Colour and light");
     let cur = look_of(&plan.look);
     let w = ui.available_width();
@@ -2026,6 +2092,68 @@ fn page_look(ui: &mut Ui, c: &mut Cx) {
         ui.add_space(GAP - ui.spacing().item_spacing.y);
     }
     dim_line(ui, cur.blurb());
+    time_of_day(ui, plan);
+}
+
+/// The Sci-Fi looks (`world_kind::looks`): the same cards as Style › Look › Sci-Fi.
+fn scifi_look_grid(ui: &mut Ui, c: &mut Cx) {
+    use crate::world_kind::looks::ScifiLook;
+    section_title(ui, "Alien sky, light and plants");
+    let plan = &mut c.setup.plan;
+    let cur = ScifiLook::from_id(&plan.scifi_look).unwrap_or(ScifiLook::AlienDusk);
+    let w = ui.available_width();
+    let cols = if w >= 800.0 {
+        5
+    } else if w >= 560.0 {
+        4
+    } else {
+        3
+    };
+    let cw = (w - GAP * (cols - 1) as f32) / cols as f32;
+    for row in ScifiLook::ALL.chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for &l in row {
+                let (rect, resp) = ui.allocate_exact_size(vec2(cw, 82.0), Sense::click());
+                let sel = cur == l;
+                let p = ui.painter_at(rect.expand(8.0));
+                match c.wiz.textures.get(&l.picture()) {
+                    Some(t) => paint_cover(ui, t, rect, 11),
+                    None => paint_landscape(&p, rect, REAL, 53 + l as u32 * 7, false),
+                }
+                scrim(&p, rect, 0.4, 220);
+                p.text(
+                    pos2(rect.left() + 10.0, rect.bottom() - 9.0),
+                    Align2::LEFT_BOTTOM,
+                    l.name(),
+                    FontId::new(12.0, semibold()),
+                    Color32::WHITE,
+                );
+                corner_mask(&p, rect, 11);
+                pick_border(&p, rect, 11, sel, resp.hovered());
+                if resp
+                    .on_hover_text(l.blurb())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    plan.scifi_look = l.id().to_string();
+                    plan.hour = l.hour();
+                }
+            }
+        });
+        ui.add_space(GAP - ui.spacing().item_spacing.y);
+    }
+    dim_line(
+        ui,
+        &format!(
+            "{}: {}. Sets the sky, the air and the plants; the land gets red rock ground, rock spires and floating rocks.",
+            cur.name(),
+            cur.blurb()
+        ),
+    );
+}
+
+fn time_of_day(ui: &mut Ui, plan: &mut WorldPlan) {
     ui.add_space(12.0);
     section_title(ui, "Time of day");
     crate::ui::widgets::slider_row(
@@ -2176,7 +2304,13 @@ fn page_review(ui: &mut Ui, c: &mut Cx) {
             ui.label(
                 RichText::new(format!(
                     "{} look, opens at {:02}:{:02}",
-                    lp.name(),
+                    if plan_view.kind == crate::world_kind::WorldKind::SciFi {
+                        crate::world_kind::looks::ScifiLook::from_id(&plan_view.scifi_look)
+                            .map(|l| l.name())
+                            .unwrap_or("Alien Dusk")
+                    } else {
+                        lp.name()
+                    },
                     plan_view.hour.floor() as u32 % 24,
                     ((plan_view.hour.fract() * 60.0) as u32 / 5) * 5
                 ))
@@ -2977,6 +3111,7 @@ fn picture_keys() -> Vec<String> {
     v.extend(GameKind::ALL.map(|g| format!("game_{}", game_id(g))));
     v.extend(Art::ALL.map(|a| format!("art_{}", a.id())));
     v.extend(LookPreset::ALL.map(|lp| format!("look_{}", look_id(lp))));
+    v.extend(crate::world_kind::looks::ScifiLook::ALL.map(|l| l.picture()));
     v
 }
 

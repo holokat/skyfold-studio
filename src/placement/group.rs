@@ -42,6 +42,7 @@ pub fn frame(store: &ObjectStore, lib: &Library, bounds: &ModelBounds, g: u64) -
         stretch: None,
         group: g,
         locked: false,
+        glow: None,
     };
     f.set_scale3(Vec3::new(
         (hi.x - lo.x).max(0.5),
@@ -172,6 +173,7 @@ mod tests {
             stretch: None,
             group: 7,
             locked: false,
+            glow: None,
         }
     }
 

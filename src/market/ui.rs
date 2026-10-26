@@ -1,7 +1,6 @@
-//! The market in the editor: the Asset packs window (packs by style: owned ✓, free or price,
-//! Refresh; the developer unlock folded away), a pack's card (what's in it, its free samples to
-//! try, "Get pack"), the pack chips under the Objects tab's Style switch and the lock / "free"
-//! badges on asset tiles.
+//! The market in the editor: the Objects tab's Packs list and pack picker, the lock / "free"
+//! badges on asset tiles, the sign-in card, and the website's background answers. The
+//! Marketplace window itself (browse, a pack's or listing's page, My library) is `super::view`.
 
 use bevy::prelude::*;
 use bevy_egui::egui::{
@@ -23,10 +22,27 @@ pub struct MarketUi {
     pub browse: Browse,
     /// Objects tab: free, paid or every asset / pack
     pub price: PriceFilter,
-    /// the Asset packs window
+    /// the Marketplace window (`super::view`)
     pub open: bool,
-    /// the pack whose card is showing
+    /// a pack whose page to open in the Marketplace (taken at once: a locked tile sets it)
     pub card: Option<String>,
+    /// Marketplace: Browse or My library
+    pub view: super::view::View,
+    /// Marketplace: the pack's or listing's page showing (None: the grid)
+    pub detail: Option<super::view::Item>,
+    /// Marketplace: the gallery picture showing on a page
+    pub shot: usize,
+    /// Marketplace: the website category chip ("": all)
+    pub category: String,
+    pub sort: super::view::Sort,
+    /// Marketplace: free, paid or both (apart from the Objects tab's filter)
+    pub vprice: PriceFilter,
+    /// Marketplace: the search box, what's applied (once typing pauses) and when it was typed in
+    pub search: String,
+    pub applied: String,
+    pub search_at: f64,
+    /// the tab showing when the Marketplace opened (another tab clicked closes it)
+    pub opened_on: Option<crate::editor::Tab>,
     /// Objects tab: only this pack's assets (empty: every pack of the chosen style)
     pub filter: String,
     /// Refresh was pressed (handled by `market::refresh`)
@@ -38,7 +54,8 @@ pub struct MarketUi {
 }
 
 impl Default for MarketUi {
-    /// (`WB_MARKET=packs` opens Asset packs, `WB_MARKET=card:<pack id>` a pack's card,
+    /// (`WB_MARKET=packs` opens the Marketplace (`library`: on My library), `WB_MARKET=card:<pack
+    /// id>` a pack's page,
     /// `WB_MARKET=filter:<pack id>` picks a pack, `browse:packs` the Packs tab (`browse:signin`: with
     /// the website sign-in card open) and
     /// `price:free|paid` the price filter, for screenshot tests)
@@ -58,8 +75,22 @@ impl Default for MarketUi {
         Self {
             browse,
             price,
-            open: env == "packs",
+            open: env == "packs" || env == "library",
             card: env.strip_prefix("card:").map(str::to_string),
+            view: if env == "library" {
+                super::view::View::Library
+            } else {
+                super::view::View::Browse
+            },
+            detail: None,
+            shot: 0,
+            category: String::new(),
+            sort: Default::default(),
+            vprice: PriceFilter::All,
+            search: String::new(),
+            applied: String::new(),
+            search_at: 0.0,
+            opened_on: None,
             filter,
             refresh: false,
             busy: false,
@@ -109,11 +140,11 @@ impl PriceFilter {
     }
 }
 
-const GOLD: Color32 = Color32::from_rgb(255, 214, 120);
-const GREEN: Color32 = Color32::from_rgb(74, 196, 120);
+pub(super) const GOLD: Color32 = Color32::from_rgb(255, 214, 120);
+pub(super) const GREEN: Color32 = Color32::from_rgb(74, 196, 120);
 
 /// "✓ Owned", "Free" or "🔒 $14.99", and its colour.
-fn status(m: &Market, p: &Pack) -> (String, Color32) {
+pub(super) fn status(m: &Market, p: &Pack) -> (String, Color32) {
     match m.state(p) {
         PackState::Owned if m.dev() != Dev::Off && !m.owned.contains(&p.id) => {
             (format!("{} Unlocked", icon::LOCK_SIMPLE_OPEN), GREEN)
@@ -125,7 +156,7 @@ fn status(m: &Market, p: &Pack) -> (String, Color32) {
 }
 
 /// "76 assets · 10 free to try" / "76 assets".
-fn contents(m: &Market, p: &Pack) -> String {
+pub(super) fn contents(m: &Market, p: &Pack) -> String {
     let n = p.assets();
     let samples = p.free_assets.len();
     if m.state(p) == PackState::Locked && samples > 0 {
@@ -136,7 +167,7 @@ fn contents(m: &Market, p: &Pack) -> String {
 }
 
 /// The asset that stands for a pack here: its hero, else a sample, else any of its models.
-fn hero(s: &UiState, m: &Market, p: &Pack) -> Option<String> {
+pub(super) fn hero(s: &UiState, m: &Market, p: &Pack) -> Option<String> {
     let lib = s.lib.as_deref()?;
     p.hero_asset
         .iter()
@@ -287,7 +318,11 @@ pub fn packs_browser(ui: &mut egui::Ui, s: &mut UiState) {
         );
     }
     ui.add_space(6.0);
-    community(ui, s);
+    section(ui, "Community · skyfoldstudio.com");
+    hint_small(
+        ui,
+        "Creators' assets and packs, with their pictures, prices and ratings: browse and get them in the Marketplace.",
+    );
 }
 
 /// The pack picker under the Style switch ("Pack: All packs ▾", each with its status): narrows
@@ -398,16 +433,11 @@ pub fn windows(ctx: &egui::Context, s: &mut UiState, out: &mut crate::ui::UiOut)
         s.ed.toast(msg);
     }
     site_inbox(ctx, s, out);
-    if s.market.open {
-        packs_window(ctx, s);
-    }
-    if s.market.card.is_some() {
-        card_window(ctx, s);
-    }
+    super::view::show(ctx, s);
 }
 
 /// The one-time tips card about asset packs (Objects tab and Asset packs).
-fn tips(ui: &mut egui::Ui) {
+pub(super) fn tips(ui: &mut egui::Ui) {
     crate::ui::tips::card(
         ui,
         "asset_packs",
@@ -415,13 +445,13 @@ fn tips(ui: &mut egui::Ui) {
         &[
             "Assets come in packs, grouped by style: photoreal scans, hand-painted fantasy and more to come.",
             "Free packs are everyone's. A paid pack lets you try some of its assets for free (a FREE tag); the rest show a lock until you get it.",
-            "Click a locked tile, or Asset packs, to see what's in a pack. Worlds that use a pack you don't have still open, and what's there can be moved or deleted.",
+            "Click a locked tile, or open the Marketplace (top bar), to see what's in a pack with its pictures. Worlds that use a pack you don't have still open, and what's there can be moved or deleted.",
         ],
     );
 }
 
 /// When the market was last checked, for people ("2 min ago").
-fn ago(at: u64) -> String {
+pub(super) fn ago(at: u64) -> String {
     let d = super::backend::now().saturating_sub(at);
     match d {
         0..=59 => "just now".into(),
@@ -431,93 +461,8 @@ fn ago(at: u64) -> String {
     }
 }
 
-fn packs_window(ctx: &egui::Context, s: &mut UiState) {
-    let m = super::snapshot();
-    // Esc closes it (a pack card over it first)
-    let mut open = !(s.market.card.is_none()
-        && !ctx.egui_wants_keyboard_input()
-        && ctx.input(|i| i.key_pressed(egui::Key::Escape)));
-    let h = (ctx.content_rect().height() - crate::ui::TOP_H - 120.0).clamp(300.0, 760.0);
-    egui::Window::new(
-        RichText::new(format!("{}  Asset packs", icon::PACKAGE))
-            .font(FontId::new(16.0, semibold())),
-    )
-    .id(egui::Id::new("asset_packs"))
-    .collapsible(false)
-    .resizable(false)
-    .fixed_size(vec2(520.0, h))
-    .anchor(Align2::CENTER_CENTER, vec2(0.0, crate::ui::TOP_H * 0.5))
-    .open(&mut open)
-    .show(ctx, |ui| {
-        tips(ui);
-        // where the packs come from, and Refresh
-        ui.horizontal(|ui| {
-            let line = match (&m.source, m.checked_at) {
-                (super::backend::Source::Bundled, _) => {
-                    "Built-in catalog · purchases open soon".to_string()
-                }
-                (_, 0) => "Marketplace · not reached yet".to_string(),
-                (_, at) if m.signed_in => format!("Marketplace · checked {}", ago(at)),
-                (_, at) => format!("Marketplace · not signed in · checked {}", ago(at)),
-            };
-            ui.label(RichText::new(line).small().color(TEXT_DIM));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::ui::tips::help_button(ui, "asset_packs");
-                if s.market.busy {
-                    ui.add(egui::Spinner::new().size(14.0));
-                } else if ui
-                    .button(format!("{} Refresh", icon::ARROWS_CLOCKWISE))
-                    .on_hover_text("Check the marketplace again for prices and the packs you own")
-                    .clicked()
-                {
-                    s.market.refresh = true;
-                }
-                if m.packs().iter().any(|p| p.listing_id.is_some())
-                    && s.market.site.is_signed_in()
-                    && ui
-                        .button("Restore purchases")
-                        .on_hover_text("Find the packs your Skyfold account bought and install any missing here")
-                        .clicked()
-                {
-                    s.market.site.restore(m.packs().to_vec());
-                }
-            });
-        });
-        if let Some(e) = &m.error {
-            ui.label(
-                RichText::new(format!("{}  {e}", icon::WARNING))
-                    .small()
-                    .color(DANGER),
-            );
-        }
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .id_salt("asset_packs_list")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for style in m.styles() {
-                    section(ui, &crate::objects::pack_label(&style));
-                    ui.add_space(2.0);
-                    for p in m.packs().iter().filter(|p| p.style == style) {
-                        if pack_row(ui, s, &m, p) {
-                            s.market.card = Some(p.id.clone());
-                        }
-                        ui.add_space(6.0);
-                    }
-                }
-                if super::developer_unlock_available() {
-                    ui.add_space(6.0);
-                    developer(ui, &m);
-                }
-            });
-    });
-    if !open {
-        s.market.open = false;
-    }
-}
-
 /// One pack in Asset packs: its picture, name, publisher, contents and status. True if clicked.
-fn pack_row(ui: &mut egui::Ui, s: &mut UiState, m: &Market, p: &Pack) -> bool {
+pub(super) fn pack_row(ui: &mut egui::Ui, s: &mut UiState, m: &Market, p: &Pack) -> bool {
     let hero = hero(s, m, p);
     let (st, col) = status(m, p);
     let r = Frame::new()
@@ -599,7 +544,7 @@ fn pack_row(ui: &mut egui::Ui, s: &mut UiState, m: &Market, p: &Pack) -> bool {
 
 /// The developer unlock, folded away: every pack usable on this computer (the studio's own
 /// builds). Not reachable over MCP.
-fn developer(ui: &mut egui::Ui, m: &Market) {
+pub(super) fn developer(ui: &mut egui::Ui, m: &Market) {
     egui::CollapsingHeader::new(RichText::new(format!("{}  Developer", icon::WRENCH)).small().color(TEXT_DIM)).id_salt("market_dev").default_open(false).show(ui, |ui| {
         if m.dev() == Dev::Env {
             dim(ui, "Every pack is unlocked for this run (SKYFOLD_MARKET_DEV=owner).");
@@ -613,182 +558,14 @@ fn developer(ui: &mut egui::Ui, m: &Market) {
     });
 }
 
-/// A pack's card: what it is, its hero turning, its free samples to try, and "Get pack".
-fn card_window(ctx: &egui::Context, s: &mut UiState) {
-    let m = super::snapshot();
-    let Some(p) = s.market.card.as_deref().and_then(|id| m.pack(id)) else {
-        s.market.card = None;
-        return;
-    };
-    let state = m.state(p);
-    let hero = hero(s, &m, p);
-    let mut open = true;
-    let mut close =
-        ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !ctx.egui_wants_keyboard_input();
-    let mut place: Option<String> = None;
-    egui::Window::new(
-        RichText::new(format!("{}  Asset pack", icon::PACKAGE)).font(FontId::new(16.0, semibold())),
-    )
-    .id(egui::Id::new("pack_card"))
-    .order(egui::Order::Foreground)
-    .collapsible(false)
-    .resizable(false)
-    .fixed_size(vec2(420.0, 0.0))
-    .anchor(Align2::CENTER_CENTER, vec2(0.0, crate::ui::TOP_H * 0.5))
-    .open(&mut open)
-    .show(ctx, |ui| {
-        ui.set_width(420.0);
-        let by = if p.publisher.is_empty() {
-            String::new()
-        } else {
-            format!(" · by {}", p.publisher)
-        };
-        let lines = [
-            format!("{}{by}", crate::objects::pack_label(&p.style)),
-            contents(&m, p),
-        ];
-        match &hero {
-            Some(h) => crate::thumbs::ui::card(
-                ui,
-                &mut s.previews,
-                &Subject::Asset(h.clone()),
-                &p.name,
-                &lines,
-            ),
-            None => {
-                title(ui, &p.name);
-                lines.iter().for_each(|l| dim(ui, l));
-            }
-        }
-        if !p.description.is_empty() {
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(RichText::new(&p.description).color(TEXT)).wrap());
-        }
-        // its free samples, to place right away
-        let lib = s.lib.as_deref();
-        let samples: Vec<(String, String)> = p
-            .free_assets
-            .iter()
-            .filter_map(|a| {
-                lib.and_then(|l| l.get(a))
-                    .map(|e| (e.id.clone(), e.name.clone()))
-            })
-            .collect();
-        if state == PackState::Locked && !samples.is_empty() {
-            section(ui, "Free to try");
-            dim(ui, "Click one to place it.");
-            ui.add_space(2.0);
-            let w = ((ui.available_width() - 4.0 * 6.0) / 5.0).floor();
-            for row in samples.chunks(5) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                    for (id, name) in row {
-                        if crate::thumbs::ui::tile(
-                            ui,
-                            &mut s.previews,
-                            &Subject::Asset(id.clone()),
-                            icon::BASKET,
-                            name,
-                            false,
-                            w,
-                        )
-                        .on_hover_text(format!("{name}: free to use"))
-                        .clicked()
-                        {
-                            place = Some(id.clone());
-                        }
-                    }
-                });
-            }
-        }
-        ui.add_space(8.0);
-        let working = s.market.site.working.contains(&p.id);
-        match state {
-            // bought, but its files aren't on this computer (a new computer, a reinstall)
-            PackState::Owned if m.owned.contains(&p.id) && p.installed == 0 => {
-                ui.label(
-                    RichText::new(format!("{}  Owned: download it to use it here.", icon::CHECK_CIRCLE))
-                        .color(GREEN),
-                );
-                ui.add_space(2.0);
-                if working {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(14.0));
-                        dim(ui, "Downloading and installing…");
-                    });
-                } else if p.listing_id.is_some()
-                    && primary_button(ui, &format!("{}  Download pack", icon::DOWNLOAD_SIMPLE)).clicked()
-                {
-                    if s.market.site.is_signed_in() {
-                        s.market.site.reinstall(p);
-                    } else {
-                        s.market.browse = Browse::Packs;
-                        s.market.site.signing_in = true;
-                        close = true;
-                        s.ed.toast("Sign in with the Skyfold account that bought it, then press Download pack");
-                    }
-                }
-            }
-            PackState::Owned => {
-                ui.label(
-                    RichText::new(format!(
-                        "{}  {}",
-                        icon::CHECK_CIRCLE,
-                        if m.owned.contains(&p.id) {
-                            "Owned: every asset in it is yours to place."
-                        } else {
-                            "Unlocked on this computer (developer)."
-                        }
-                    ))
-                    .color(GREEN),
-                );
-            }
-            PackState::Free => {
-                ui.label(
-                    RichText::new(format!("{}  Free for everyone.", icon::CHECK_CIRCLE))
-                        .color(GREEN),
-                );
-            }
-            PackState::Locked if p.unlisted => dim(ui, "This pack isn't for sale yet."),
-            PackState::Locked if working => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
-                    dim(ui, "Finish paying on the checkout page in your browser: it installs here by itself.");
-                });
-            }
-            PackState::Locked => {
-                if primary_button(
-                    ui,
-                    &format!("{}  Get pack — {}", icon::SHOPPING_BAG, p.price_label()),
-                )
-                .clicked()
-                {
-                    get_pack(s, p);
-                }
-                ui.add_space(2.0);
-                dim(ui, "Bought it already? Restore purchases in Asset packs.");
-            }
-        }
-    });
-    if let Some(id) = place {
-        start_placing(s, &id);
-        close = true;
-    }
-    if !open || close {
-        s.market.card = None;
-    }
-}
-
 /// "Get pack": the pack's listing on skyfoldstudio.com (Checkout in the browser, then it
 /// installs here), else its marketplace page in the browser, or (no store yet) a note.
-fn get_pack(s: &mut UiState, p: &Pack) {
+pub(super) fn get_pack(s: &mut UiState, p: &Pack) {
     if p.listing_id.is_some() {
         if !s.market.site.is_signed_in() {
-            // the sign-in card is in Objects › Packs
-            s.market.browse = Browse::Packs;
+            // the sign-in card shows at the top of the Marketplace
+            s.market.open = true;
             s.market.site.signing_in = true;
-            s.market.card = None;
-            s.market.open = false;
             s.ed.toast(format!(
                 "Sign in with your Skyfold account to buy {}, then press Get pack again",
                 p.name
@@ -820,8 +597,9 @@ pub(crate) fn open_url(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
+    // (not `cmd /C start`: cmd would treat `&` or `|` in a URL from the website as commands)
+    let r = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
         .spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(url).spawn();
@@ -829,7 +607,7 @@ pub(crate) fn open_url(url: &str) -> bool {
 }
 
 /// Starts placing a (free sample) asset: Objects › Place, its style shown.
-fn start_placing(s: &mut UiState, id: &str) {
+pub(super) fn start_placing(s: &mut UiState, id: &str) {
     let Some(e) = s.lib.as_deref().and_then(|l| l.get(id)) else {
         return;
     };
@@ -841,6 +619,7 @@ fn start_placing(s: &mut UiState, id: &str) {
     s.place.selected = Some(id.to_string());
     s.sets.selected = None;
     s.market.open = false;
+    s.market.detail = None;
     s.ed.toast("Click the ground to place it");
 }
 
@@ -859,19 +638,41 @@ fn site_inbox(ctx: &egui::Context, s: &mut UiState, out: &mut crate::ui::UiOut) 
     for e in events {
         let site = &mut s.market.site;
         match e {
-            Event::Listings { listings, next, append } => {
-                if !append {
-                    site.listings.clear();
+            Event::Page { query, page, append } => {
+                // (an answer for filters no longer showing is dropped)
+                if query == site.view.query {
+                    site.view.loading = false;
+                    site.view.loaded = Some(query);
+                    match page {
+                        Ok(p) => {
+                            if !append {
+                                site.view.listings.clear();
+                            }
+                            site.view.listings.extend(p.listings);
+                            site.view.next = p.next;
+                            site.view.total = p.total;
+                            if !p.facets.is_empty() {
+                                site.view.facets = p.facets;
+                            }
+                        }
+                        Err(e) => site.view.error = Some(e),
+                    }
                 }
-                site.listings.extend(listings);
-                site.next = next;
-                site.loaded = true;
             }
-            Event::Cover { id, rgba, size } => {
+            Event::Listing(l) => {
+                site.one.insert(l.id.clone(), l);
+            }
+            Event::Image { key, rgba, size } => {
                 let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
-                let tex = ctx.load_texture(format!("listing-{id}"), img, egui::TextureOptions::LINEAR);
-                site.covers.insert(id, tex);
+                let tex = ctx.load_texture(
+                    format!("market-{}-{}", key.0, key.1),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                );
+                site.images.insert(key, tex);
             }
+            // (stays pending: not asked for again this run)
+            Event::ImageFailed => {}
             Event::Failed(msg) => {
                 site.error = Some(msg.clone());
                 s.ed.toast(msg);
@@ -915,98 +716,9 @@ fn site_inbox(ctx: &egui::Context, s: &mut UiState, out: &mut crate::ui::UiOut) 
     }
 }
 
-/// Objects › Asset packs › Community: what creators publish on skyfoldstudio.com. Browsing
-/// needs no account; buying (and, for now, the website's free listings) needs a sign-in.
-fn community(ui: &mut egui::Ui, s: &mut UiState) {
-    section(ui, "Community · skyfoldstudio.com");
-    ui.add_space(2.0);
-    if !s.market.site.loaded && s.market.site.busy == 0 && s.market.site.error.is_none() {
-        s.market.site.load(false);
-    }
-    // search
-    ui.horizontal(|ui| {
-        let w = ui.available_width() - 30.0;
-        let r = ui.add(
-            egui::TextEdit::singleline(&mut s.market.site.query)
-                .hint_text(format!("{}  Search listings", icon::MAGNIFYING_GLASS))
-                .desired_width(w),
-        );
-        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            s.market.site.load(false);
-        }
-        let busy = s.market.site.busy > 0;
-        if ui
-            .add_enabled(
-                !busy,
-                egui::Button::new(icon::ARROWS_CLOCKWISE).min_size(vec2(24.0, 22.0)),
-            )
-            .on_hover_text("Refresh")
-            .clicked()
-        {
-            s.market.site.error = None;
-            s.market.site.load(false);
-        }
-    });
-    ui.add_space(4.0);
-    account_card(ui, s);
-    ui.add_space(4.0);
-    let price = s.market.price;
-    let list: Vec<super::site::Listing> = s
-        .market
-        .site
-        .listings
-        .iter()
-        .filter(|l| match price {
-            PriceFilter::All => true,
-            PriceFilter::Free => l.is_free(),
-            PriceFilter::Paid => !l.is_free(),
-        })
-        .cloned()
-        .collect();
-    if list.is_empty() {
-        let site = &s.market.site;
-        if site.busy > 0 && !site.loaded {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                dim(ui, "Loading listings…");
-            });
-        } else if let Some(e) = site.error.clone() {
-            dim(ui, &format!("Couldn't reach skyfoldstudio.com ({e})."));
-        } else if !site.listings.is_empty() {
-            dim(
-                ui,
-                if price == PriceFilter::Free {
-                    "No free community listings."
-                } else {
-                    "No paid community listings."
-                },
-            );
-        } else if !site.query.trim().is_empty() {
-            dim(ui, "No listings match.");
-        } else {
-            dim(
-                ui,
-                "No community listings yet. Creators publish them in the Creator studio at skyfoldstudio.com/studio.",
-            );
-        }
-        return;
-    }
-    for l in &list {
-        listing_row(ui, s, l);
-        ui.add_space(6.0);
-    }
-    if s.market.site.next.is_some()
-        && ui
-            .add_enabled(s.market.site.busy == 0, egui::Button::new("Show more"))
-            .clicked()
-    {
-        s.market.site.load(true);
-    }
-}
-
 /// Signed out: a line on what needs an account and a Sign in button (the card walks through
 /// getting an API key). Signed in: who, and Sign out.
-fn account_card(ui: &mut egui::Ui, s: &mut UiState) {
+pub(super) fn account_card(ui: &mut egui::Ui, s: &mut UiState) {
     if s.market.site.is_signed_in() {
         ui.horizontal(|ui| {
             ui.label(
@@ -1064,106 +776,4 @@ fn account_card(ui: &mut egui::Ui, s: &mut UiState) {
     if open_keys && !open_url(&super::site::keys_url()) {
         s.ed.toast("Couldn't open skyfoldstudio.com");
     }
-}
-
-/// A listing: cover, title, creator, price, and Get / Buy (and its page on the website).
-fn listing_row(ui: &mut egui::Ui, s: &mut UiState, l: &super::site::Listing) {
-    s.market.site.cover(l);
-    let working = s.market.site.working.contains(&l.id);
-    Frame::new()
-        .fill(CARD_BG)
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if let Some(tex) = s.market.site.covers.get(&l.id) {
-                let w = ui.available_width();
-                let [tw, th] = tex.size();
-                let h = (w * th as f32 / tw.max(1) as f32).min(150.0);
-                ui.add(
-                    egui::Image::new(tex)
-                        .fit_to_exact_size(vec2(w, h))
-                        .corner_radius(CornerRadius::same(6)),
-                );
-                ui.add_space(4.0);
-            }
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&l.title).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(l.price_label()).color(if l.is_free() {
-                        GREEN
-                    } else {
-                        GOLD
-                    }));
-                });
-            });
-            let mut meta = vec![];
-            if !l.by().is_empty() {
-                meta.push(if l.official() {
-                    format!("by {} {} Official", l.by(), icon::SEAL_CHECK)
-                } else {
-                    format!("by {}", l.by())
-                });
-            }
-            meta.push(if l.kind == "pack" {
-                "Pack".into()
-            } else {
-                "Asset".into()
-            });
-            if l.rating_count > 0 {
-                meta.push(format!("★ {:.1} ({})", l.rating_average, l.rating_count));
-            }
-            if !l.license.is_empty() {
-                meta.push(l.license.clone());
-            }
-            ui.label(RichText::new(meta.join(" · ")).small().color(TEXT_DIM));
-            if !l.description.is_empty() {
-                let d: String = l.description.chars().take(140).collect();
-                ui.label(
-                    RichText::new(if l.description.chars().count() > 140 {
-                        format!("{d}…")
-                    } else {
-                        d
-                    })
-                    .small()
-                    .color(TEXT_DIM),
-                );
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if working {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(if l.is_free() {
-                            "Adding…"
-                        } else {
-                            "Waiting for checkout…"
-                        })
-                        .small()
-                        .color(TEXT_DIM),
-                    );
-                } else {
-                    let label = if l.is_free() {
-                        format!("{}  Get — Free", icon::DOWNLOAD_SIMPLE)
-                    } else {
-                        format!("{}  Buy — {}", icon::SHOPPING_CART, l.price_label())
-                    };
-                    if ui.button(label).clicked() {
-                        if !l.is_free() && !s.market.site.is_signed_in() {
-                            s.market.site.signing_in = true;
-                            s.ed.toast("Sign in with your Skyfold account to buy this");
-                        } else {
-                            s.market.site.get(l);
-                        }
-                    }
-                }
-                if ui
-                    .small_button(format!("{}  Page", icon::ARROW_SQUARE_OUT))
-                    .on_hover_text("Open its page on skyfoldstudio.com")
-                    .clicked()
-                {
-                    open_url(&l.page_url(&super::site::base()));
-                }
-            });
-        });
 }

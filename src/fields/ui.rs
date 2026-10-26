@@ -498,6 +498,29 @@ pub fn right(ui: &mut egui::Ui, s: &mut UiState) {
         let _ = super::edit(&mut s.fields, &mut s.history, f.id, Some(crop), None);
         s.meta.dirty = true;
     }
+    if f.crop == Crop::Tulips {
+        let names = super::plants::TULIP_COLOUR_NAMES;
+        let name = |c: Option<u8>| {
+            c.and_then(|c| names.get(c as usize))
+                .map_or("Mixed bands".to_string(), |n| {
+                    let mut s = n.to_string();
+                    s[..1].make_ascii_uppercase();
+                    s
+                })
+        };
+        let mut colour = f.colour;
+        dropdown_row(ui, "Colour", "field_colour", name(colour), |ui| {
+            for c in std::iter::once(None).chain((0..names.len() as u8).map(Some)) {
+                if menu_row(ui, crop_icon(Crop::Tulips), name(c), "", colour == c).clicked() {
+                    colour = c;
+                }
+            }
+        });
+        if colour != f.colour {
+            let _ = super::set_colour(&mut s.fields, &mut s.history, f.id, colour);
+            s.meta.dirty = true;
+        }
+    }
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;

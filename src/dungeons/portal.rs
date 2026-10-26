@@ -474,6 +474,7 @@ pub fn place_exit_frame(d: &mut crate::io::WorldData, record: bool) -> bool {
                     stretch: None,
                     group: 0,
                     locked: false,
+                    glow: None,
                 };
                 p.set_scale3(Vec3::splat(scale));
                 d.store.insert(p);

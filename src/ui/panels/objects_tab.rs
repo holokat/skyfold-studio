@@ -76,9 +76,9 @@ pub(super) fn objects_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut) {
                 "Asset packs by style: what you own, what's free, prices. Skyfold paid packs give 10 assets free to try.",
             );
             crate::market::ui::packs_browser(ui, s);
-            if wide_icon_button(ui, "Package", "Browse all packs")
+            if primary_icon_button(ui, "Store1", "Open the Marketplace")
                 .on_hover_text(
-                    "The asset packs window: every pack, what you own, what's free, prices",
+                    "Every pack and creator listing with pictures, what you own, what's free, prices",
                 )
                 .clicked()
             {
@@ -937,6 +937,17 @@ fn selected_object(ui: &mut Ui, s: &mut UiState, id: u64, p: crate::objects::Pla
         }
         s.history.commit(&s.store);
     }
+    // a crystal's own colour and light
+    if s
+        .lib
+        .as_deref()
+        .and_then(|l| l.get(&p.asset))
+        .is_some_and(crate::objects::glow::glows)
+    {
+        section_fold(ui, "obj_glow", "Glow", "this crystal", |ui| {
+            glow_controls(ui, s, id, &p)
+        });
+    }
     section_fold(
         ui,
         "obj_materials",
@@ -1043,6 +1054,79 @@ fn selected_object(ui: &mut Ui, s: &mut UiState, id: u64, p: crate::objects::Pla
         s.store.remove(id);
         s.history.commit(&s.store);
     }
+}
+
+/// A crystal's colour (swatches, a picker) and light, each change one undo step.
+fn glow_controls(ui: &mut Ui, s: &mut UiState, id: u64, p: &crate::objects::Placed) {
+    use crate::dungeons::ui::kit::{color_dot, color_row};
+    use crate::objects::glow::{COLORS, MAX_LIGHT};
+    let cur = p.glow;
+    let mut g = cur.unwrap_or_default();
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        for (name, c) in COLORS {
+            let on = cur.is_some() && g.color_name() == Some(*name);
+            let dot = Color32::from_rgb(
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+            );
+            let mut tip = name.to_string();
+            tip[..1].make_ascii_uppercase();
+            if color_dot(ui, dot, on, &tip).clicked() && !on {
+                g.color = *c;
+                changed = true;
+            }
+        }
+    });
+    // (the picker works in linear colour)
+    let lin = Color::srgb(g.color[0], g.color[1], g.color[2]).to_linear();
+    let mut rgb = [lin.red, lin.green, lin.blue];
+    if color_row(ui, "Colour", &mut rgb).changed() {
+        let c = Color::linear_rgb(rgb[0], rgb[1], rgb[2]).to_srgba();
+        g.color = [c.red, c.green, c.blue];
+        changed = true;
+    }
+    changed |= slider_row(ui, "Light", &mut g.light, 0.0..=MAX_LIGHT, |v| {
+        if v < 0.01 {
+            "dark".into()
+        } else {
+            format!("{v:.1}×")
+        }
+    })
+    .on_hover_text(
+        "How brightly it glows and lights what's round it: 0 dark, 1 a soft glow, 10 a beacon",
+    )
+    .changed();
+    if cur.is_none() {
+        hint_small(
+            ui,
+            "As made: a violet glow with no light of its own. Pick a colour or move Light to give it its own.",
+        );
+    } else if small_button(ui, "Back to its made look").clicked() {
+        set_glow(s, id, None);
+        return;
+    }
+    if changed {
+        set_glow(s, id, Some(g.sanitized()));
+    }
+}
+
+fn set_glow(s: &mut UiState, id: u64, g: Option<crate::objects::glow::Glow>) {
+    let Some(mut q) = s.store.items.get(&id).cloned() else {
+        return;
+    };
+    if q.glow == g {
+        return;
+    }
+    q.glow = g;
+    s.history.begin("Crystal glow");
+    s.history.touch_object(&s.store, id);
+    s.store.update(q);
+    s.store.selected = Some(id);
+    s.history.commit(&s.store);
+    s.meta.dirty = true;
 }
 
 fn selected_set(ui: &mut Ui, s: &mut UiState, group: u64) {
@@ -1152,9 +1236,14 @@ fn building_materials(ui: &mut Ui, s: &mut UiState) {
         let entry = lib.entries.iter().find(|e| e.id == cur);
         ui.horizontal(|ui| {
             swatch(ui, entry.and_then(|e| e.average_color_srgb));
-            ui.add_sized(
-                vec2(82.0, 18.0),
-                egui::Label::new(RichText::new(slot.name()).color(TEXT_DIM)),
+            // (left-aligned in a fixed column, so the menus line up)
+            ui.allocate_ui_with_layout(
+                vec2(96.0, 18.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(96.0);
+                    ui.add(egui::Label::new(RichText::new(slot.name()).color(TEXT_DIM)).truncate());
+                },
             );
             let label = entry
                 .map(|e| e.name.clone())
@@ -1174,7 +1263,13 @@ fn building_materials(ui: &mut Ui, s: &mut UiState) {
                     {
                         ui.horizontal(|ui| {
                             swatch(ui, e.average_color_srgb);
-                            if menu_check(ui, cur == e.id, &e.name).clicked() {
+                            // (a content pack's material downloads when picked)
+                            let name = if crate::surfaces::available(&e.id) {
+                                e.name.clone()
+                            } else {
+                                format!("{} · download", e.name)
+                            };
+                            if menu_check(ui, cur == e.id, &name).clicked() {
                                 s.surface_choices.set(slot, &e.id);
                             }
                         });
@@ -1182,6 +1277,11 @@ fn building_materials(ui: &mut Ui, s: &mut UiState) {
                 });
         });
     }
+    super::content_pack_note(
+        ui,
+        crate::content::CITY,
+        "City & sci-fi materials download the first time you pick one",
+    );
 }
 
 // ------------------------------------------------------------------ the dock

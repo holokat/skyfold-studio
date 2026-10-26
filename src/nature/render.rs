@@ -460,6 +460,7 @@ fn spawn_instance(
             | AssetKind::Mushrooms
             | AssetKind::Lavender
             | AssetKind::WildStrawberry
+            | AssetKind::Tulip
             | AssetKind::Reeds
             | AssetKind::LilyPads
             | AssetKind::Pebbles

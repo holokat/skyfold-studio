@@ -191,6 +191,7 @@ mod tests {
             scale,
             stretch: None,
             locked: false,
+            glow: None,
         }
     }
 

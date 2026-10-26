@@ -20,6 +20,10 @@ pub fn auto_rig(model: &mut Model, m: Option<Markers>, opts: SkinOpts) -> (Marke
     for mesh in &mut model.meshes {
         mesh.skin = None;
     }
+    let opts = SkinOpts {
+        head_from: opts.head_from.or(Some(m.chin.y)),
+        ..opts
+    };
     let report = skin::skin(model, &sk, opts);
     model.skeleton = Some(sk);
     (m, report)

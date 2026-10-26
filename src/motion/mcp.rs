@@ -51,7 +51,7 @@ pub fn register(app: &mut App) {
     })
     .mcp_tool(McpTool {
         name: "walk_state",
-        description: "The explorer's state while walking: position, mode, speed, breath, footsteps (the surface underfoot as footsteps hear it: the ground's material, or the material of the model you stand on, e.g. Wood on a deck, Carpet / Cloth on a rug, Stone on a stair), `footfalls` heard so far and `steps_per_second` (the footstep cadence: about 2 walking, 2.9 running, 3.5 sprinting, 1.7 crouching; 0 standing still), the autopilot (walk_to: walking, arrived, stuck, timeout or cancelled; waypoint reached) and `interactable`: what the interact key (E) acts on now (a chest in reach and looked at: its name, whether open, the hint shown), else null. Read-only.",
+        description: "The explorer's state while walking: position, mode, speed, breath, footsteps (the surface underfoot as footsteps hear it: the ground's material, or the material of the model you stand on, e.g. Wood on a deck, Carpet / Cloth on a rug, Stone on a stair), footfalls heard so far and steps_per_second (the footstep cadence: about 2 walking, 2.9 running, 3.5 sprinting, 1.7 crouching; 0 standing still), the autopilot (walk_to: walking, arrived, stuck, timeout or cancelled; waypoint reached) and interactable: what the interact key (E) acts on now (a chest in reach and looked at: its name, whether open, the hint shown), else null. Read-only.",
         input_schema: || json!({"type": "object", "properties": {}}),
         run: walk_state,
     })
@@ -66,12 +66,21 @@ pub fn register(app: &mut App) {
     })
     .mcp_tool(McpTool {
         name: "doors",
-        description: "Hinged doors, gates and hatches of placed models near `position` ([x, z]; default: the explorer while walking, else the whole world) within `radius` (m, default 25): name, position, how open (0 shut .. 1 open) and what it holds to (auto, open or closed). While walking, doors swing open (away from you) as you walk up and shut behind you; doors are never solid, the wall opening is the way in. Pass `state` to hold the listed doors `open` or `closed`, or back to `auto`.",
+        description: "Hinged and sliding doors, gates and hatches of placed models near `position` ([x, z]; default: the explorer while walking, else the whole world) within `radius` (m, default 25): name, position, kind (hinged or sliding), one_way (a hinged door that always opens the same way), how open (0 shut .. 1 open) and what it holds to (auto, open or closed). While walking, doors swing open (away from you) as you walk up and shut behind you; doors are never solid, the wall opening is the way in. Pass `state` to hold the listed doors `open` or `closed`, or back to `auto`.",
         input_schema: || json!({"type": "object", "properties": {
             "position": position_schema("centre of the search"),
             "radius": {"type": "number", "description": "metres (default 25)"},
             "state": {"type": "string", "enum": ["open", "closed", "auto"]}}}),
         run: doors,
+    })
+    .mcp_tool(McpTool {
+        name: "lifts",
+        description: "Lift cars (elevators) of placed models near `position` ([x, z]; default: the explorer while walking, else the whole world) within `radius` (m, default 40): name, where the car is (its floor height and the bottom and top stops), state (open, shut, doors moving, going up, going down), how open its doors are and whether the explorer rides it. While walking, step into a car and stand still: after a few seconds its doors shut, it rides to the other stop and opens; waiting at the other landing calls it. A model with call buttons (`buttons: true`) runs on them instead: interact (E) on a landing's button calls the car, in the car it rides to the other stop; floor_display is the floor its displays show. Pass `call` (`bottom` or `top`) to send the listed cars there.",
+        input_schema: || json!({"type": "object", "properties": {
+            "position": position_schema("centre of the search"),
+            "radius": {"type": "number", "description": "metres (default 40)"},
+            "call": {"type": "string", "enum": ["bottom", "top"]}}}),
+        run: lifts,
     })
     .mcp_tool(McpTool {
         name: "teleport",
@@ -216,6 +225,72 @@ fn walk_to(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
     ))])
 }
 
+fn lifts(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    use crate::model_render::lift::Lift;
+    let call = match args.get("call").and_then(|v| v.as_str()) {
+        Some("bottom") => Some(0u8),
+        Some("top") => Some(1u8),
+        Some(_) => return Err("`call` must be bottom or top".into()),
+        None => None,
+    };
+    let radius = opt_arg::<f32>(&args, "radius")?.unwrap_or(40.0).max(0.1);
+    let centre = match position_arg(&args, "position")? {
+        Some((p, _)) => Some(p),
+        None => {
+            let w = world.resource::<WalkState>();
+            w.active.then(|| Vec2::new(w.position.x, w.position.z))
+        }
+    };
+    // each car's buttons and display glyphs
+    let parts: Vec<(Entity, bool)> = {
+        use crate::model_render::lift::{LiftButton, LiftDigit};
+        let mut b = world.query::<&LiftButton>();
+        let mut v: Vec<(Entity, bool)> = b.iter(world).map(|b| (b.lift, true)).collect();
+        let mut d = world.query::<&LiftDigit>();
+        v.extend(d.iter(world).map(|d| (d.lift, false)));
+        v
+    };
+    let mut q = world.query::<(Entity, &mut Lift, &GlobalTransform, Option<&Name>)>();
+    let mut out = Vec::new();
+    for (e, mut l, gt, name) in q.iter_mut(world) {
+        let p = gt.translation();
+        let dist = centre.map(|c| c.distance(Vec2::new(p.x, p.z)));
+        if dist.is_some_and(|r| r > radius) {
+            continue;
+        }
+        if let Some(level) = call {
+            l.call_to(level);
+        }
+        let s = gt.scale().y;
+        let bottom = p.y - l.at * s;
+        out.push((
+            dist.unwrap_or(0.0),
+            json!({
+                "name": name.map(|n| n.as_str().to_string()).unwrap_or_default(),
+                "position": [p.x, p.y, p.z],
+                "distance": dist,
+                "floor": p.y,
+                "stops": [bottom, bottom + l.spec.travel * s],
+                "state": l.state(),
+                "doors_open": l.doors,
+                "rider": l.rider,
+                "floor_display": l.floor_number(),
+                "buttons": l.buttons,
+                "button_nodes": parts.iter().filter(|p| p.0 == e && p.1).count(),
+                "display_glyphs": parts.iter().filter(|p| p.0 == e && !p.1).count(),
+            }),
+        ));
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let n = out.len();
+    let list: Vec<Value> = out.into_iter().take(100).map(|(_, v)| v).collect();
+    Ok(vec![McpContent::Json(json!({
+        "count": n,
+        "lifts": list,
+        "called": call.map(|c| if c == 0 { "bottom" } else { "top" }),
+    }))])
+}
+
 fn doors(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
     use crate::model_render::door::{Door, DoorHold};
     let hold = match args.get("state").and_then(|v| v.as_str()) {
@@ -248,6 +323,8 @@ fn doors(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
                 "position": [p.x, p.y, p.z],
                 "distance": dist,
                 "open": d.openness(),
+                "kind": if d.slide.is_some() { "sliding" } else { "hinged" },
+                "one_way": d.one_way,
                 "hold": d.hold.name(),
             }),
         ));

@@ -295,6 +295,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         "caves": caves_v,
         "dungeons": (!dungeons.is_null()).then_some("dungeons/dungeons.json (each dungeon: dungeons/<folder>/dungeon.glb, dungeon.json, instances.json; the world's portal sheets: dungeons/portals.glb)"),
         "fires": crate::flames::fires_json(&s.fires),
+        "fixture_lights": crate::fixture_lights::lights_json(&s.lights, super::core::lighting(s).night),
         "flames": crate::dungeons::export::flame_sheets_json(),
         "gameplay": o.gameplay.then_some("gameplay.json"),
         "lighting": "lighting.json",

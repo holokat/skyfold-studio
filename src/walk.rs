@@ -381,6 +381,7 @@ pub struct WalkWorld<'w> {
     nature: Res<'w, crate::nature::render::Near>,
     deposits: Res<'w, crate::gameplay::deposits::DepositSet>,
     caves: Res<'w, crate::caves::render::CaveWorld>,
+    lifts: Res<'w, crate::model_render::lift::LiftFloors>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -397,6 +398,7 @@ fn walk_move(
     mut sounds: MessageWriter<SoundEvent>,
     mut graphics: ResMut<crate::streaming::Graphics>,
     road_floors: Res<crate::roads::render::RoadFloors>,
+    view: Res<crate::characters::player::PlayerView>,
 ) {
     if !walk.active {
         return;
@@ -404,7 +406,8 @@ fn walk_move(
     // (typing in a bar over the view: no steering, looking or shortcuts)
     let none = ButtonInput::<KeyCode>::default();
     let keys: &ButtonInput<KeyCode> = if walk.input_paused { &none } else { &keys };
-    let look = if walk.input_paused {
+    // (with a free pointer the game camera turns the view, not the mouse)
+    let look = if walk.input_paused || view.free_pointer {
         Vec2::ZERO
     } else {
         motion.delta
@@ -430,7 +433,8 @@ fn walk_move(
         walk.fast_time = !walk.fast_time;
     }
     // R: mount / dismount, F: fly / land
-    if keys.just_pressed(KeyCode::KeyR) {
+    // (a gun in hand reloads with R: `characters::weapons`)
+    if keys.just_pressed(KeyCode::KeyR) && !crate::characters::weapons::gun_in_hand() {
         let m = if walk.mode == MoveMode::Mount {
             MoveMode::Foot
         } else {
@@ -551,7 +555,19 @@ fn walk_move(
     let surface = |xz: Vec2| {
         crate::motion::waves::surface_at(&terrain, &w.water, &w.ocean, &w.waves, xz, &time)
     };
-    let decks = |p: Vec3| road_floors.floor_at(p);
+    // riding a lift car: its floor carries you up (and down: you settle onto it)
+    let on_foot = matches!(walk.mode, MoveMode::Foot | MoveMode::Mount);
+    if on_foot && let Some(f) = w.lifts.floor_at(walk.position) {
+        if walk.position.y < f {
+            walk.position.y = f;
+            walk.velocity.y = walk.velocity.y.max(0.0);
+        }
+    }
+    let decks = |p: Vec3| {
+        road_floors
+            .floor_at(p)
+            .or_else(|| w.lifts.floor_at(p).map(|f| (f, Surface::Metal)))
+    };
     let world = MoveWorld {
         terrain: &terrain,
         colliders: &w.colliders,
@@ -563,6 +579,10 @@ fn walk_move(
     let was_grounded = walk.grounded;
     let fall_speed = walk.velocity.y;
     let out = movement::step(&mut walk, &inp, &world, dt);
+    if on_foot {
+        // a shut or moving car holds its rider; an empty shaft is closed off
+        walk.position = w.lifts.constrain(walk.position, Body::WALKER.radius);
+    }
     let np = walk.position;
     let v = walk.velocity;
     if out.dismounted {

@@ -24,43 +24,84 @@ use crate::terrain::layers::{LAYER_COUNT, Layer};
 
 type R = Result<Vec<McpContent>, String>;
 
-/// Tools the area prompt's agent may use (everything it needs to shape, paint, plant, add water
-/// and look; nothing world-wide, no zones, saving, undo or settings).
-pub const AGENT_TOOLS: &[&str] = &[
-    "selection_info",
-    "selection_screenshot",
-    "terrain_feature",
-    "area_edit",
-    "terrain_sample",
-    "terrain_sculpt",
-    "terrain_paint",
-    "terrain_set_biome",
-    "nature_scatter",
-    "objects_library",
-    "objects_query",
-    "objects_place",
-    "objects_transform",
-    "objects_remove",
-    "objects_place_town",
-    "water_presets",
-    "water_list",
-    "water_add_lake",
-    "water_add_river",
-    "water_set_style",
-    "water_remove",
-    "fish_add",
-    "materials_list",
-    "world_info",
-    // Trace a Picture (image to world), for a map of the whole world
-    "reference_load",
-    "reference_analyse",
-    "reference_label",
-    "reference_merge",
-    "reference_split",
-    "reference_delete",
-    "reference_build",
-    "reference_overlay",
-];
+/// Whether the area prompt's agent may use tool `name`: every tool that looks at the world or
+/// builds, plants, paints, shapes or places something in it (so a new tool reaches the agent
+/// without being listed here), but nothing that leaves or saves the world, moves the camera or
+/// the player, changes it world-wide (look, lighting, weather, the sea, world-wide dials and
+/// materials), zones (the user's), dungeons, the labs, settings, or undo.
+pub fn area_agent_allows(name: &str) -> bool {
+    const DENY_PREFIX: &[&str] = &[
+        "app_",
+        "camera_",
+        "walk_",
+        "playtest_",
+        "settings_",
+        "doctor_",
+        "characters_",
+        "images_",
+        "market_",
+        "map_",
+        "look_",
+        "zones_",
+        "dungeons_",
+        "world_",
+    ];
+    const DENY: &[&str] = &[
+        "batch",
+        "undo",
+        "redo",
+        "screenshot",
+        "editor_view",
+        "selection_set",
+        "selection_clear",
+        "teleport",
+        "interact",
+        "capture_flythrough",
+        "set_motion_mode",
+        "objects_select",
+        "get_log",
+        "gpu_status",
+        "navmesh_export",
+        "lighting_set",
+        "weather_set",
+        "terrain_global",
+        "nature_auto",
+        "nature_set_amounts",
+        "nature_appearance",
+        "ground_cover",
+        "alien_flora",
+        "water_set_ocean",
+        "materials_set",
+        "terrain_ground_palette",
+        "air_particles",
+        "auras",
+        "smoke",
+        "bounce_light_probe",
+        "objects_check_model",
+        "scenes_save",
+        "scenes_export",
+        "scenes_import",
+        "scenes_rename",
+        "scenes_delete",
+        "objects_import_model",
+        "gameplay_export_server_data",
+        "gameplay_set_level_cap",
+        "gameplay_ore_settings",
+        "gameplay_set_player_start",
+    ];
+    // (world_info and the reference-map tools stay: they read the world, or trace a picture
+    // into it when the selection is the whole world)
+    name == "world_info"
+        || !(DENY.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)))
+}
+
+/// Tools whose changes the edit mask doesn't hold inside the selection (it covers terrain,
+/// paint, biomes, objects, water and nature): their coordinates must lie in the area.
+pub fn unmasked(name: &str) -> bool {
+    ["fields_", "roads_", "caves_", "gameplay_"]
+        .iter()
+        .any(|p| name.starts_with(p))
+}
 
 /// The tools an agent gets in a dungeon (Prompt an area while an underground dungeon is open):
 /// looking at it, and its rooms, lights, pieces, decals and props — not what changes the whole
@@ -96,6 +137,7 @@ pub const DUNGEON_AGENT_TOOLS: &[&str] = &[
     "objects_place",
     "objects_transform",
     "objects_remove",
+    "objects_glow",
 ];
 
 /// The tools an agent gets when it shapes a whole new dungeon from a description (Dungeons ›
@@ -146,6 +188,7 @@ pub const DUNGEON_SHAPE_TOOLS: &[&str] = &[
     "objects_place",
     "objects_transform",
     "objects_remove",
+    "objects_glow",
 ];
 
 /// Feature names for `terrain_feature`.

@@ -404,6 +404,10 @@ fn albedo(code: u8) -> Vec3 {
         Loam | Dirt | Mud => Vec3::new(0.22, 0.18, 0.14),
         Ash | Cinder => Vec3::new(0.12, 0.11, 0.10),
         Water => Vec3::new(0.05, 0.06, 0.07),
+        Concrete | Tile => Vec3::new(0.40, 0.39, 0.37),
+        Asphalt | Rubber => Vec3::new(0.08, 0.08, 0.08),
+        Glass => Vec3::new(0.20, 0.24, 0.26),
+        Grate => Vec3::new(0.20, 0.20, 0.21),
     }
 }
 

@@ -319,6 +319,14 @@ fn world_capsule(ctx: &egui::Context, s: &mut UiState, out: &mut UiOut) {
                 }
             }
         });
+        // the Marketplace window (asset packs and community listings)
+        let open = s.market.open;
+        if text_button(ui, "Store1", "Marketplace", false, false, open)
+            .on_hover_text("Browse asset packs and creators' listings with their pictures, and get them.")
+            .clicked()
+        {
+            s.market.open = !open;
+        }
     });
 }
 
@@ -473,8 +481,10 @@ fn env_pill(ctx: &egui::Context, s: &mut UiState) {
             sep(ui);
             // Look ▾
             let cur = s.lighting.look.preset;
+            let scifi = s.lighting.scifi_look;
             let open = egui::Popup::is_id_open(ui.ctx(), Id::new("halo_look_menu"));
-            let look = text_button(ui, "ColorPalette", cur.name(), true, true, open);
+            let name = scifi.map(|l| l.name()).unwrap_or(cur.name());
+            let look = text_button(ui, "ColorPalette", name, true, true, open);
             let look = tip(
                 look,
                 "Art style",
@@ -491,9 +501,21 @@ fn env_pill(ctx: &egui::Context, s: &mut UiState) {
                     ui.set_min_width(300.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for p in crate::look::LookPreset::ALL {
-                        if look_row(ui, p, cur == p).on_hover_text(p.blurb()).clicked() && cur != p
-                        {
+                        let on = cur == p && scifi.is_none();
+                        if look_row(ui, p, on).on_hover_text(p.blurb()).clicked() && !on {
                             s.lighting.look.select(p);
+                            s.lighting.scifi_look = None;
+                        }
+                    }
+                    // the Sci-Fi looks (Style › Look › Sci-Fi)
+                    ui.add_space(4.0);
+                    for l in crate::world_kind::looks::ScifiLook::ALL {
+                        let on = scifi == Some(l);
+                        if menu_item(ui, l.name(), "Sci-Fi", on).on_hover_text(l.blurb()).clicked()
+                            && !on
+                        {
+                            l.apply(&mut s.lighting, &mut s.appearance.alien);
+                            s.meta.dirty = true;
                         }
                     }
                 });
@@ -809,6 +831,7 @@ pub fn group_icon(g: TabGroup) -> &'static str {
         TabGroup::Atmosphere => "CloudySun",
         TabGroup::Review => "Stethoscope",
         TabGroup::Characters => "User",
+        TabGroup::Images => "Images1",
     }
 }
 

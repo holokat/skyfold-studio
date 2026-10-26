@@ -345,6 +345,7 @@ fn place_lamps(
             rot: Quat::from_rotation_y(yaw).to_array(),
             scale: 1.0,
             locked: false,
+            glow: None,
         });
         ids.push(id);
     }

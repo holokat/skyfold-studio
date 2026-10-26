@@ -139,7 +139,8 @@ impl MaterialExtension for CropExt {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         use bevy::render::render_resource::{ColorWrites, CompareFunction};
         use bevy::shader::ShaderDefVal;
-        let may_discard = |d: &ShaderDefVal| matches!(d, ShaderDefVal::Bool(n, _) if n == "MAY_DISCARD");
+        let may_discard =
+            |d: &ShaderDefVal| matches!(d, ShaderDefVal::Bool(n, _) if n == "MAY_DISCARD");
         match key.bind_group_data.pass {
             CropPass::Single => {
                 // (the module has three: name the one this draw runs)
@@ -181,7 +182,9 @@ impl MaterialExtension for CropExt {
 /// A field as drawn: its material, frame and tiles.
 struct Drawn {
     crop: Crop,
+    colour: Option<u8>,
     outline: Vec<[f32; 2]>,
+    holes: Vec<Vec<[f32; 2]>>,
     rows: f32,
     material: Handle<CropMaterial>,
     /// the depth draw's material (`CropPass::Depth`), when drawn in two passes
@@ -202,7 +205,7 @@ struct Drawn {
 pub struct CropRender {
     /// per crop and level: the tile mesh, the same with its triangles in reverse order (the
     /// shaded draw of two, see below) and the tallest plant
-    meshes: HashMap<(Crop, u8), (Handle<Mesh>, Option<Handle<Mesh>>, f32)>,
+    meshes: HashMap<(Crop, u8, Option<u8>), (Handle<Mesh>, Option<Handle<Mesh>>, f32)>,
     drawn: HashMap<u64, Drawn>,
     revision: Option<u64>,
     /// the crop models' revision the meshes were made from
@@ -280,14 +283,14 @@ fn mask_image(f: &Field, origin: Vec2, rot: Quat, size: Vec2) -> (Image, Vec2) {
         (size.x / texel).ceil() as usize + 2,
         (size.y / texel).ceil() as usize + 2,
     );
-    let poly = f.poly();
+    let (poly, holes) = (f.poly(), f.hole_polys());
     let mut data = vec![0u8; w * h];
     for j in 0..h {
         for i in 0..w {
             let local = Vec2::new((i as f32 + 0.5) * texel, (j as f32 + 0.5) * texel);
             let world = origin + (rot * Vec3::new(local.x, 0.0, local.y)).xz();
             // a soft edge one texel wide: plants keep about half a metre inside the line
-            let d = crate::setpieces::poly_sdf(&poly, world) + 0.35;
+            let d = super::sdf_with_holes(&poly, &holes, world) + 0.35;
             data[j * w + i] = ((0.5 - d / texel).clamp(0.0, 1.0) * 255.0) as u8;
         }
     }
@@ -314,7 +317,6 @@ fn mask_image(f: &Field, origin: Vec2, rot: Quat, size: Vec2) -> (Image, Vec2) {
 
 /// The tiles that touch the outline (field frame origins).
 fn tiles(f: &Field, origin: Vec2, rot: Quat, size: Vec2) -> Vec<Vec2> {
-    let poly = f.poly();
     let (nx, nz) = ((size.x / TILE).ceil() as i32, (size.y / TILE).ceil() as i32);
     let mut out = vec![];
     for j in 0..nz.max(1) {
@@ -322,7 +324,7 @@ fn tiles(f: &Field, origin: Vec2, rot: Quat, size: Vec2) -> Vec<Vec2> {
             let local = Vec2::new(i as f32 * TILE, j as f32 * TILE);
             let mid =
                 origin + (rot * Vec3::new(local.x + TILE * 0.5, 0.0, local.y + TILE * 0.5)).xz();
-            if crate::setpieces::poly_sdf(&poly, mid) < TILE * 0.72 {
+            if f.sdf(mid) < TILE * 0.72 {
                 out.push(local);
             }
         }
@@ -384,9 +386,13 @@ fn sync_fields(
             .list
             .iter()
             .filter(|f| {
-                r.drawn
-                    .get(&f.id)
-                    .is_some_and(|d| d.crop == f.crop && d.outline == f.outline && d.rows == f.rows)
+                r.drawn.get(&f.id).is_some_and(|d| {
+                    d.crop == f.crop
+                        && d.colour == f.colour
+                        && d.outline == f.outline
+                        && d.holes == f.holes
+                        && d.rows == f.rows
+                })
             })
             .map(|f| f.id)
             .collect();
@@ -479,7 +485,9 @@ fn sync_fields(
                 f.id,
                 Drawn {
                     crop: f.crop,
+                    colour: f.colour,
                     outline: f.outline.clone(),
+                    holes: f.holes.clone(),
                     rows: f.rows,
                     material,
                     depth,
@@ -603,12 +611,13 @@ fn place_tiles(
             }
             let (mesh, reversed, height) = r
                 .meshes
-                .entry((d.crop, lod as u8))
+                .entry((d.crop, lod as u8, d.colour))
                 .or_insert_with(|| {
                     let patch = if lod == 3 {
                         super::plants::canopy(
                             d.crop,
                             models.atlas.as_ref().map_or(&no_atlas, |a| &a.means),
+                            d.colour,
                         )
                     } else {
                         super::plants::patch(
@@ -616,6 +625,7 @@ fn place_tiles(
                             lod as u8,
                             models.get(d.crop).map(|m| m.as_ref()),
                             models.atlas.as_ref().map_or(&no_atlas, |a| &a.regions),
+                            d.colour,
                         )
                     };
                     let h = patch.height;
@@ -635,8 +645,11 @@ fn place_tiles(
                     let reversed = two_pass().then(|| {
                         let mut m = mesh.clone();
                         if let Some(bevy::mesh::Indices::U32(idx)) = m.indices_mut() {
-                            let tris: Vec<[u32; 3]> =
-                                idx.chunks_exact(3).rev().map(|t| [t[0], t[1], t[2]]).collect();
+                            let tris: Vec<[u32; 3]> = idx
+                                .chunks_exact(3)
+                                .rev()
+                                .map(|t| [t[0], t[1], t[2]])
+                                .collect();
                             *idx = tris.into_iter().flatten().collect();
                         }
                         meshes.add(m)

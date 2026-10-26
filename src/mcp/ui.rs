@@ -153,7 +153,11 @@ fn panel(ui: &mut egui::Ui, s: &mut McpServer, now: f32) {
     section(ui, "Claude Code");
     code_block(
         ui,
-        &format!("claude mcp add --transport http world-builder {}", s.url()),
+        &format!(
+            "claude mcp add --transport http world-builder {} --header \"Authorization: {}\"",
+            s.url(),
+            super::key::bearer()
+        ),
     );
     section(ui, "Claude Desktop");
     dim(
@@ -178,13 +182,14 @@ fn panel(ui: &mut egui::Ui, s: &mut McpServer, now: f32) {
     section(ui, "Cursor, VS Code and other clients");
     dim(
         ui,
-        "Clients that speak Streamable HTTP connect to the URL; the others use the command above.",
+        "Clients that speak Streamable HTTP connect to the URL with this key; the others use the command above. Keep the key private: it lets a program drive this editor.",
     );
     code_block(
         ui,
         &format!(
-            "{{\n  \"mcpServers\": {{\n    \"world-builder\": {{ \"url\": \"{}\" }}\n  }}\n}}",
-            s.url()
+            "{{\n  \"mcpServers\": {{\n    \"world-builder\": {{\n      \"url\": \"{}\",\n      \"headers\": {{ \"Authorization\": \"{}\" }}\n    }}\n  }}\n}}",
+            s.url(),
+            super::key::bearer()
         ),
     );
     if !s.recent.is_empty() {

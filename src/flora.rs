@@ -131,6 +131,7 @@ pub fn kinds(_art: ArtStyle) -> &'static [AssetKind] {
         WildStrawberry,
         Blueberry,
         Blackberry,
+        Tulip,
     ]
 }
 
@@ -364,6 +365,7 @@ fn flora_kinds() -> &'static [AssetKind] {
         WildStrawberry,
         Blueberry,
         Blackberry,
+        Tulip,
     ]
 }
 
@@ -425,6 +427,7 @@ fn variant_count(kind: AssetKind) -> u32 {
         AssetKind::Flowers => 4,
         AssetKind::Lavender | AssetKind::WildStrawberry => 3,
         AssetKind::Blueberry | AssetKind::Blackberry => 4,
+        AssetKind::Tulip => crate::fields::plants::TULIP_COLOUR_NAMES.len() as u32,
         _ => 1,
     }
 }
@@ -432,7 +435,7 @@ fn variant_count(kind: AssetKind) -> u32 {
 fn ranges(kind: AssetKind) -> [f32; 4] {
     match kind {
         AssetKind::Mushrooms => [18.0, 44.0, 78.0, 78.0],
-        AssetKind::Flowers | AssetKind::Lavender => [20.0, 48.0, 78.0, 78.0],
+        AssetKind::Flowers | AssetKind::Lavender | AssetKind::Tulip => [20.0, 48.0, 78.0, 78.0],
         AssetKind::WildStrawberry | AssetKind::Blueberry | AssetKind::Blackberry => {
             [16.0, 40.0, 68.0, 68.0]
         }
@@ -449,6 +452,7 @@ fn dimensions(kind: AssetKind, variant: u32) -> (f32, f32) {
         AssetKind::WildStrawberry => (0.26, 0.42),
         AssetKind::Blueberry => (0.85, 0.78),
         AssetKind::Blackberry => (1.05, 1.0),
+        AssetKind::Tulip => (0.56, 0.2),
         _ => (0.5, 0.5),
     }
 }
@@ -503,8 +507,63 @@ fn geometry(kind: AssetKind, variant: u32, lod: u8, art: ArtStyle) -> Geometry {
         AssetKind::WildStrawberry => wild_strawberry(variant, lod),
         AssetKind::Blueberry => berry_bush(variant, lod, false),
         AssetKind::Blackberry => berry_bush(variant, lod, true),
+        AssetKind::Tulip => tulip(variant, lod, art),
         _ => Geometry::default(),
     }
+}
+
+/// A part of an atlas cell (`u0, v0` … `u1, v1` across it), as a field region.
+fn sub(cell: Region, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
+    let [a, b] = cell.uv(u0, v0);
+    let [c, d] = cell.uv(u1, v1);
+    [a, b, c, d]
+}
+
+/// A single tulip, `variant` its colour: the field's tulip (the same six-tepal goblet), its
+/// tepals a clean white patch of the blossom cell tinted to the colour, its stem and leaves the
+/// green detail cell.
+fn tulip(variant: u32, lod: u8, art: ArtStyle) -> Geometry {
+    // (the realistic cell is a whole white blossom: a patch of its left petal; the painted one a
+    // single white petal: its middle)
+    let petal = if art.painted() {
+        sub(REGIONS.wildflower_petal, 0.42, 0.3, 0.58, 0.6)
+    } else {
+        sub(REGIONS.wildflower_petal, 0.12, 0.38, 0.3, 0.54)
+    };
+    let green = sub(REGIONS.spare_detail, 0.2, 0.2, 0.8, 0.8);
+    let mut reg = Regions::new();
+    for (name, r) in [
+        ("tulip_petal", petal),
+        ("tulip_leaf", green),
+        ("green_stem", green),
+        ("plain", petal),
+    ] {
+        reg.insert(name.to_string(), r);
+    }
+    let seed = 0x3C6E_F372_FE94_F82Bu64 ^ (variant as u64 * 0x9E37_79B9);
+    let FloraGeometry {
+        pos,
+        nor,
+        uv,
+        sway,
+        idx,
+        color,
+        ..
+    } = flora_geometry(FieldFlora::Tulip(variant as u8), seed, lod, &reg);
+    // (the field's leaf bases dip a little under the root: it stands on it here)
+    let low = pos.iter().map(|p| p[1]).fold(0.0f32, f32::min);
+    let pos = pos.into_iter().map(|[x, y, z]| [x, y - low, z]).collect();
+    let mut geometry = Geometry {
+        color,
+        pos,
+        nor,
+        uv,
+        sway,
+        idx,
+        tint: Vec3::ONE,
+    };
+    geometry.normalize_copied_triangles();
+    geometry
 }
 
 fn field_geometry(kind: FieldFlora, variant: u32, lod: u8) -> Geometry {
@@ -1538,6 +1597,38 @@ fn load_png(path: &Path, srgb: bool) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_tulips_come_in_their_colours_on_clean_atlas_patches() {
+        assert_eq!(variant_count(AssetKind::Tulip), 6);
+        let petal = REGIONS.wildflower_petal.0;
+        for art in [ArtStyle::Realistic, ArtStyle::HandPainted] {
+            let red = geometry(AssetKind::Tulip, 0, 0, art);
+            let white = geometry(AssetKind::Tulip, 3, 0, art);
+            assert!(red.pos.iter().any(|p| p[1] > 0.38), "no flower head");
+            // every vertex samples inside an atlas cell (no stray 0..1 uvs from plain parts)
+            assert!(red.uv.iter().all(|uv| {
+                let on = |c: Region| {
+                    uv[0] >= c.0[0] && uv[0] <= c.0[2] && uv[1] >= c.0[1] && uv[1] <= c.0[3]
+                };
+                on(REGIONS.wildflower_petal) || on(REGIONS.spare_detail)
+            }));
+            // the petals: red on one, white on the other
+            let petals = |g: &Geometry| -> Vec<[f32; 3]> {
+                g.uv.iter()
+                    .zip(&g.color)
+                    .filter(|(uv, _)| uv[0] >= petal[0] && uv[0] <= petal[2])
+                    .map(|(_, c)| *c)
+                    .collect()
+            };
+            assert!(petals(&red).iter().any(|c| c[0] > 0.4 && c[1] < 0.1));
+            assert!(
+                petals(&white)
+                    .iter()
+                    .any(|c| c[0] > 0.8 && c[1] > 0.8 && c[2] > 0.7)
+            );
+        }
+    }
 
     #[test]
     fn flora_geometry_is_finite_rooted_and_reduces_with_lod() {

@@ -35,11 +35,14 @@ pub struct WorldCharacters {
     /// placements from before NPCs (made NPCs on load)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list: Vec<PlacedCharacter>,
+    /// the game camera while walking (`super::play_camera`)
+    #[serde(default)]
+    pub camera: super::play_camera::GameCamera,
 }
 
 impl WorldCharacters {
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty() && self.player.is_none()
+        self.list.is_empty() && self.player.is_none() && self.camera == Default::default()
     }
 }
 

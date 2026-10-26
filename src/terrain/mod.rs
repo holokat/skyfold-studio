@@ -1,8 +1,11 @@
 //! Heightfield terrain: data model, quadtree LOD meshes, GPU textures and the terrain material.
 
 pub mod ab;
+pub mod alien_ground;
 pub mod bake;
 pub mod brush;
+pub mod canyon_ops;
+pub mod canyons;
 pub mod continent;
 pub mod erosion;
 pub mod gpu;
@@ -13,6 +16,7 @@ pub mod mesh;
 pub mod mips;
 pub mod overlay;
 pub mod realm_land;
+pub mod strata;
 pub mod textures;
 pub mod worldgen;
 
@@ -81,6 +85,10 @@ pub struct StyleRules {
     /// stream beds, valley floors; from the terrain's flow map).
     #[serde(default = "default_wet_gullies")]
     pub wet_gullies: f32,
+    /// 0..1, layered rock bands (strata) on cliff faces. Off in ordinary worlds; canyonlands
+    /// turn it on (`terrain::canyons`).
+    #[serde(default)]
+    pub strata_bands: f32,
 }
 
 fn default_wet_gullies() -> f32 {
@@ -97,6 +105,7 @@ impl Default for StyleRules {
             dryness: 0.35,
             wetness: 0.0,
             wet_gullies: default_wet_gullies(),
+            strata_bands: 0.0,
         }
     }
 }

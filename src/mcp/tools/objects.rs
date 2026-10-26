@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::io::WorldData;
 use crate::mcp_tools::{McpAppExt, McpTool, compass, turn_quat};
+use crate::objects::glow::{self, Glow};
 use crate::objects::{Category, Library, Placed};
 
 const CATEGORIES: [Category; 7] = [
@@ -24,6 +25,7 @@ pub fn register(app: &mut App) {
         name: "objects_library",
         description: "The placeable asset library (photoscanned and detailed procedural models): id, name, category (trees, rocks, plants, debris, structures, props, imported), group (furniture, lighting, camp…, when it has one), footprint radius and height (m), number of variants, the biomes it belongs to and whether players can walk on it. \
 Lists the world's art style by default (world_info › art_style: photoreal or handpainted; style all lists every style; imported models and the procedural trees, bushes, palms, cacti, reeds and lily pads fit every style). Filter by `category`, `group`, `style`, `pack` and/or `search` words, and by `kind`: objects (single pieces) or scenes (complete scenes in one model, e.g. a whole monster-encounter site with every piece in place, marked scene: true; placed like any object). Use the ids with objects_place and nature_scatter; objects_preview shows what one looks like. \
+Colours: search words like red or emerald also find assets that take any colour (marked glow: true — Crystals, glowing crystal clusters: objects_place color + light, objects_glow changes placed ones) and Tulip (its variant_names). Nothing in the world's style: other styles' matches are counted in other_styles. \
 Only assets this account can use are listed: assets in asset packs it hasn't got are left out and summed up in locked_packs (pack, price, how many matched); tell the user when one would suit (market_packs has details).",
         input_schema: || {
             json!({
@@ -44,6 +46,8 @@ Only assets this account can use are listed: assets in asset packs it hasn't got
         name: "objects_place",
         description: "Place objects (Objects tab › Place), up to 2000 per call (assets of asset packs this account hasn't got are refused: see objects_library). Each item: `asset` id, `position` [x, z] (set on the ground, sunk 5 cm like the editor does; ships and pier pieces float on the water there) or [x, y, z] (exact height), optional `yaw_deg` (turn about the vertical in compass degrees: clockwise seen from above, 0 = as modelled), \
 `scale` (× the asset's default size: a number, or [x, y, z] to stretch along the model's own axes, y up), `variant`, `align` (tilt to the ground's slope) and `y_offset` (m, e.g. raise a bridge deck over water). \
+Glowing assets (objects_library glow: true, e.g. Crystals) take `color` (red, orange, amber, yellow, green, teal, cyan, blue, violet, purple, pink, white, gem names like ruby or emerald, \"#rrggbb\" or [r, g, b]) and `light` (0 dark … 1 a soft glow with a light round it … 10 a beacon); without them they glow violet as made, with no light of their own. \
+Alien-world rocks place like any asset: FloatingRock (variants 0–2 floating islands ~14 m across at scale 1, 3–4 asteroid boulders ~8 m, 5 a broken shard; scale 0.15 for a 2 m pebble up to 5+ for a 60 m island) hangs in the air — its origin is its lowest point, at [x, z] it hangs a size-dependent gap above the ground (4 m + 9 m × scale^0.7), at [x, y, z] exactly there — and bobs and turns slowly in place (objects_hover sets the gap and the motion); Monolith (0 carved slab, 1 obelisk, 2 standing stone, 3 basalt columns) stands on the ground. Their rock keeps its real grain at any scale, as do RockSpire, Hoodoo and SeaStack from 2.5× up (rock spires 100–400 m tall: scale 7–25). \
 Buildings and other structures fit the ground as they're placed: seated at the median ground under their footprint, the ground levelled under them with banks into the slope, grass and nature kept off (their height is chosen then, so a given y is replaced — except in a cave: at [x, y, z] well under the ground inside a cave's bounds an object stands on the cave's floor and the ground over it is left alone); `fit_ground` false (per item, or for the whole call) leaves the ground alone and keeps the position as given, true fits any object (props, imported models). Returns the new ids and which were fitted. One undo step.",
         input_schema: || {
             json!({
@@ -61,7 +65,9 @@ Buildings and other structures fit the ground as they're placed: seated at the m
                                 "variant": { "type": "integer", "minimum": 0, "default": 0 },
                                 "align": { "type": "boolean", "description": "tilt to the slope (default: the asset's own setting)" },
                                 "y_offset": { "type": "number", "default": 0 },
-                                "fit_ground": fit_schema()
+                                "fit_ground": fit_schema(),
+                                "color": color_schema(),
+                                "light": light_schema()
                             },
                             "required": ["asset", "position"]
                         }
@@ -159,6 +165,46 @@ Buildings and other structures fit the ground as they're placed: seated at the m
         run: |w, a| run(w, lock_tool, a),
     });
     app.mcp_tool(McpTool {
+        name: "objects_glow",
+        description: "Colour and light of placed glowing objects (objects_library glow: true, e.g. Crystals; like Objects › selected crystal › Glow): `ids`, and `color` (red, orange, amber, yellow, green, teal, cyan, blue, violet, purple, pink, white, gem names like ruby, emerald or sapphire, \"#rrggbb\" or [r, g, b] sRGB 0..1) and/or `light` (0 dark: no glow, no light; 1 a soft glow with a light round it; up to 10 a beacon). What isn't given is kept. `reset` true gives them back their made look (violet glow, no light). Other objects among the ids are skipped and listed. Saved with the world; objects_query shows each one's glow. One undo step.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "integer" }, "minItems": 1 },
+                    "color": color_schema(),
+                    "light": light_schema(),
+                    "reset": { "type": "boolean", "description": "back to the made look (violet glow, no light of its own)" }
+                },
+                "required": ["ids"]
+            })
+        },
+        run: |w, a| run(w, glow_tool, a),
+    });
+    app.mcp_tool(McpTool {
+        name: "objects_select",
+        description: "Select a placed object in the editor, like clicking it with Objects › Select & Move: the Objects tab opens on it and its inspector shows (exact values, a crystal's Glow, ground, actions). `id`, or none to clear the selection. Changes nothing in the world.",
+        input_schema: || json!({ "type": "object", "properties": { "id": { "type": "integer", "description": "the object (objects_query); omit to clear" } } }),
+        run: |w, a| {
+            let id = a.get("id").and_then(Value::as_u64);
+            if let Some(id) = id
+                && !w.resource::<crate::objects::ObjectStore>().items.contains_key(&id)
+            {
+                return Err(format!("no object with id {id}"));
+            }
+            w.resource_mut::<crate::objects::ObjectStore>().selected = id;
+            if id.is_some() {
+                let mut ed = w.resource_mut::<crate::editor::Editor>();
+                ed.tab = crate::editor::Tab::Objects;
+                ed.object_tool = crate::editor::ObjectTool::Select;
+            }
+            Ok(vec![crate::mcp_tools::McpContent::Text(match id {
+                Some(id) => format!("Selected object {id}."),
+                None => "Selection cleared.".into(),
+            })])
+        },
+    });
+    app.mcp_tool(McpTool {
         name: "objects_fit_ground",
         description: "Fit placed objects to the terrain (buildings and structures already do this whenever they're placed or moved): the ground under the footprint is levelled to the object's floor (seated at the median ground, so the cut uphill and the fill downhill balance), banks blend into the slope, a packed-earth (gravel for stone) apron is painted and grass and nature keep off. \
 `ids` (default: every building and structure), `fit`: true (level the ground under them, any kind of object), false (give the ground back and leave them standing as they are) or omitted (their kind's default). Returns each object's state: fitted, floor height, footprint size and the deepest cut / highest fill (m). One undo step.",
@@ -175,7 +221,7 @@ Buildings and other structures fit the ground as they're placed: seated at the m
     });
     app.mcp_tool(McpTool {
         name: "objects_query",
-        description: "Find placed objects: in an `area` (default: the whole world), optionally only a `category` or `asset`. Returns the total, counts per asset and up to `limit` objects (id, asset, position [x, y, z], yaw_deg (clockwise turn), scale (a number, or [x, y, z] when stretched)), nearest to the area's centre first.",
+        description: "Find placed objects: in an `area` (default: the whole world), optionally only a `category` or `asset`. Returns the total, counts per asset and up to `limit` objects (id, asset, position [x, y, z], yaw_deg (clockwise turn), scale (a number, or [x, y, z] when stretched), glow (a crystal's own colour and light, when it has one)), nearest to the area's centre first.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -189,6 +235,126 @@ Buildings and other structures fit the ground as they're placed: seated at the m
         },
         run: |w, a| run(w, query, a),
     });
+    app.mcp_tool(McpTool {
+        name: "objects_import_model",
+        description: "Import a 3D model into the placeable library (like Objects › Import 3D Model…): `path` to a glTF model (.glb, or .gltf with its buffers and images beside it). It is copied into the project, joins the Imported category and gets footstep sounds from its name; a very heavy model gets a one-time note in the app (never a block). Returns its library id for objects_place.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "absolute path to a .glb or .gltf file" }
+                },
+                "required": ["path"]
+            })
+        },
+        run: |w, a| run(w, import_model, a),
+    });
+}
+
+/// Does a library entry match every search word? Plurals find the singular ("tulips" finds
+/// Tulip); a colour word finds assets that take any colour (crystals, tulips); crystals answer to
+/// gem words too.
+fn search_hit(e: &crate::objects::LibraryEntry, words: &[String]) -> bool {
+    let colourable = glow::glows(e) || e.kind == Some(crate::procgen::meshes::AssetKind::Tulip);
+    let mut hay = format!("{} {} {}", e.id, e.name, e.group).to_lowercase();
+    if glow::glows(e) {
+        hay.push_str(" crystal gem gemstone quartz mineral glowing glow light");
+    }
+    words.iter().all(|w| {
+        hay.contains(w.as_str())
+            || (w.len() > 3 && hay.contains(w.trim_end_matches('s')))
+            || (colourable && glow::is_color_word(w))
+    })
+}
+
+fn color_schema() -> Value {
+    json!({ "type": ["string", "array"], "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "glowing assets only: a colour name (red, amber, green, blue, violet, pink, white, ruby, emerald…), \"#rrggbb\" or [r, g, b] sRGB 0..1" })
+}
+
+fn light_schema() -> Value {
+    json!({ "type": "number", "minimum": 0, "maximum": glow::MAX_LIGHT, "description": "glowing assets only: 0 dark, 1 a soft glow with a light round it, up to 10 a beacon" })
+}
+
+/// `color` / `light` of an item over `base` (None when neither is given).
+fn glow_arg(it: &Value, base: Option<Glow>) -> Result<Option<Glow>, String> {
+    let color = match it.get("color") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(glow::parse_color(v)?),
+    };
+    let light = opt_num(it, "light")?;
+    if color.is_none() && light.is_none() {
+        return Ok(None);
+    }
+    let mut g = base.unwrap_or_default();
+    if let Some(c) = color {
+        g.color = c;
+    }
+    if let Some(l) = light {
+        g.light = l;
+    }
+    Ok(Some(g.sanitized()))
+}
+
+fn glow_json(g: &Glow) -> Value {
+    let mut v = json!({ "color": g.hex(), "light": (g.light * 100.0).round() / 100.0 });
+    if let Some(n) = g.color_name() {
+        v["color_name"] = json!(n);
+    }
+    v
+}
+
+fn glow_tool(In(args): In<Value>, mut d: WorldData) -> R {
+    let ids: Vec<u64> = crate::mcp_tools::arg(&args, "ids")?;
+    let reset = opt_bool(&args, "reset")?.unwrap_or(false);
+    if !reset && glow_arg(&args, None)?.is_none() {
+        return Err("give `color` and/or `light` (or `reset`: true)".into());
+    }
+    let lib = lib_of(&d)?;
+    let mut todo = vec![];
+    let mut skipped = vec![];
+    for id in &ids {
+        let p = d
+            .store
+            .items
+            .get(id)
+            .ok_or(format!("no object with id {id}"))?;
+        if !lib.get(&p.asset).is_some_and(glow::glows) {
+            skipped.push(json!({ "id": id, "asset": p.asset }));
+            continue;
+        }
+        let mut q = p.clone();
+        q.glow = if reset { None } else { glow_arg(&args, p.glow)? };
+        todo.push(q);
+    }
+    if todo.is_empty() {
+        return Err(format!(
+            "none of these objects glow (glowing assets: objects_library glow: true, e.g. Crystals); skipped {}",
+            Value::Array(skipped)
+        ));
+    }
+    d.history.begin(if todo.len() == 1 {
+        "Crystal glow"
+    } else {
+        "Crystals' glow"
+    });
+    for p in &todo {
+        d.history.touch_object(&d.store, p.id);
+        d.store.update(p.clone());
+    }
+    d.history.commit(&d.store);
+    d.meta.dirty = true;
+    let out: Vec<Value> = todo
+        .iter()
+        .map(|p| match &p.glow {
+            Some(g) => json!({ "id": p.id, "glow": glow_json(g) }),
+            None => json!({ "id": p.id, "glow": "as made" }),
+        })
+        .collect();
+    let mut v = json!({ "updated": out, "note": "one undo step" });
+    if !skipped.is_empty() {
+        v["skipped_not_glowing"] = json!(skipped);
+    }
+    json_out(v)
 }
 
 fn lib_of<'a>(d: &'a WorldData) -> Result<&'a Library, String> {
@@ -352,10 +518,7 @@ fn library_json(
                 .is_none_or(|s| crate::art_style::fits(e, s))
         })
         .filter(|e| pack.is_none_or(|p| market.pack_index_of(&e.id) == Some(p)))
-        .filter(|e| {
-            let hay = format!("{} {} {}", e.id, e.name, e.group).to_lowercase();
-            words.iter().all(|w| hay.contains(w.as_str()))
-        })
+        .filter(|e| search_hit(e, &words))
         .collect();
     let list: Vec<Value> = matching
         .iter()
@@ -371,6 +534,12 @@ fn library_json(
             if e.meshes.len() > 1 {
                 v["variants"] = json!(e.meshes.len());
             }
+            if e.kind == Some(crate::procgen::meshes::AssetKind::Tulip) {
+                v["variant_names"] = json!(crate::fields::plants::TULIP_COLOUR_NAMES);
+            }
+            if glow::glows(e) {
+                v["glow"] = json!(true);
+            }
             // (most structures and props fit every biome: listed only when it narrows things down)
             if e.biomes.len() < crate::world::Biome::ALL.len() {
                 v["biomes"] = json!(e.biomes.iter().map(|b| snake(&format!("{b:?}"))).collect::<Vec<_>>());
@@ -384,7 +553,32 @@ fn library_json(
             v
         })
         .collect();
+    let any_glow = list.iter().any(|v| v.get("glow").is_some());
     let mut out = json!({ "count": list.len(), "assets": list, "note": "biomes: only listed for assets that don't fit every biome; walkable: players can stand on it" });
+    if any_glow {
+        out["glow_note"] = json!(format!(
+            "glow: true assets take any colour and light: objects_place items' `color` (a name: {}; \"#rrggbb\"; or [r, g, b]) and `light` (0 dark, 1 a soft glow with a light round it, up to {}); objects_glow changes placed ones",
+            glow::COLORS.iter().map(|c| c.0).collect::<Vec<_>>().join(", "),
+            glow::MAX_LIGHT
+        ));
+    }
+    // nothing in this style: say what the other styles have
+    if out["count"] == 0 && style.is_some() && !words.is_empty() {
+        let others: Vec<&str> = lib
+            .entries
+            .iter()
+            .filter(|e| cat.is_none_or(|c| e.category == c) && search_hit(e, &words))
+            .filter(|e| market.usable(&e.id))
+            .map(|e| e.id.as_str())
+            .take(12)
+            .collect();
+        if !others.is_empty() {
+            out["other_styles"] = json!(others);
+            out["other_styles_note"] = json!(
+                "none in the world's art style, but these match in other styles (style \"all\" lists them; they can be placed)"
+            );
+        }
+    }
     if let Some(s) = &style {
         out["style"] = json!(s);
         if args.get("style").is_none() {
@@ -392,6 +586,18 @@ fn library_json(
                 "only the world's art style ({s}) is listed; style \"all\" lists every style"
             ));
         }
+    }
+    // a search for a crop: fields grow it in rows (fields_add), whatever the library has
+    let crops: Vec<&str> = words
+        .iter()
+        .filter_map(|w| crate::fields::Crop::from_id(w))
+        .map(|c| c.id())
+        .collect();
+    if !crops.is_empty() {
+        out["crops"] = json!(crops);
+        out["crops_note"] = json!(
+            "also a farm crop: fields_add plants a whole field of it in rows inside an outline (tulips in one colour each, or holes for patterns)"
+        );
     }
     let locked = crate::market::mcp::locked_packs(market, matching.iter().copied());
     if !locked.is_empty() {
@@ -468,16 +674,17 @@ fn place(In(args): In<Value>, mut d: WorldData) -> R {
                 .get("position")
                 .ok_or(format!("item {i}: missing `position`"))?;
             let mut pos = position(at, &d.terrain).map_err(|e| format!("item {i}: {e}"))?;
-            // [x, z]: ships and piers float on the water there
-            if at.as_array().is_some_and(|a| a.len() == 2) {
-                pos = e.seat(pos, &d.water, d.terrain.sea_level);
-            }
-            pos.y += num(it, "y_offset", 0.0)?;
-            let turn = turn_quat(num(it, "yaw_deg", 0.0)?);
             let scale = scale_arg(it)
                 .map_err(|e| format!("item {i}: {e}"))?
                 .unwrap_or(Vec3::ONE)
                 * e.default_scale;
+            // [x, z]: ships and piers float on the water there, floating rocks hang in the air
+            if at.as_array().is_some_and(|a| a.len() == 2) {
+                pos = e.seat(pos, &d.water, d.terrain.sea_level);
+                pos.y += crate::visuals::floating::hover_for(e.kind, scale.max_element());
+            }
+            pos.y += num(it, "y_offset", 0.0)?;
+            let turn = turn_quat(num(it, "yaw_deg", 0.0)?);
             let variant =
                 (num(it, "variant", 0.0)?.max(0.0) as u32).min(e.meshes.len().max(1) as u32 - 1);
             let align = opt_bool(it, "align")?.unwrap_or(e.align);
@@ -487,7 +694,14 @@ fn place(In(args): In<Value>, mut d: WorldData) -> R {
                 turn
             };
             let fit = opt_bool(it, "fit_ground")?.or(opt_bool(&args, "fit_ground")?);
-            todo.push((e.id.clone(), variant, pos, rot, scale, fit));
+            let glow = glow_arg(it, None).map_err(|e| format!("item {i}: {e}"))?;
+            if glow.is_some() && !glow::glows(e) {
+                return Err(format!(
+                    "item {i}: `{}` doesn't glow: `color` and `light` are for glowing assets (objects_library glow: true, e.g. Crystals)",
+                    e.id
+                ));
+            }
+            todo.push((e.id.clone(), variant, pos, rot, scale, fit, glow));
         }
     }
     d.history.begin(if todo.len() == 1 {
@@ -497,7 +711,7 @@ fn place(In(args): In<Value>, mut d: WorldData) -> R {
     });
     let mut ids = vec![];
     let mut choice = vec![];
-    for (asset, variant, pos, rot, scale, fit) in todo {
+    for (asset, variant, pos, rot, scale, fit, glow) in todo {
         let id = d.store.new_id();
         d.history.touch_object(&d.store, id);
         let mut p = Placed {
@@ -510,6 +724,7 @@ fn place(In(args): In<Value>, mut d: WorldData) -> R {
             scale: 1.0,
             stretch: None,
             locked: false,
+            glow,
         };
         p.set_scale3(scale);
         d.store.insert(p);
@@ -927,6 +1142,9 @@ fn query(In(args): In<Value>, d: WorldData) -> R {
             if o.locked {
                 v["locked"] = json!(true);
             }
+            if let Some(g) = &o.glow {
+                v["glow"] = glow_json(g);
+            }
             v
         })
         .collect();
@@ -965,6 +1183,38 @@ fn lock_tool(In(args): In<Value>, mut d: WorldData) -> R {
     d.history.commit(&d.store);
     d.meta.dirty = true;
     json_out(json!({ "objects": all.len(), "locked": locked, "note": "one undo step" }))
+}
+
+fn import_model(In(args): In<Value>, mut d: WorldData) -> R {
+    let path = std::path::PathBuf::from(
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or("missing `path`")?,
+    );
+    if !path.is_absolute() {
+        return Err("`path` must be absolute".into());
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("glb") || e.eq_ignore_ascii_case("gltf"))
+    {
+        return Err("a glTF model ends in .glb or .gltf".into());
+    }
+    if !path.is_file() {
+        return Err(format!("no file at {}", path.display()));
+    }
+    let lib = d
+        .lib
+        .as_mut()
+        .ok_or("the asset library is still loading; try again in a moment")?;
+    let imp = crate::io::import_model(&path).map_err(|e| format!("import failed: {e}"))?;
+    // the asset rules' cheap checks, in the background (as the Import button does)
+    crate::asset_rules::check_import(crate::asset_file(&imp.path), imp.name.clone());
+    let entry = crate::io::imported_entry(&imp);
+    let out = json!({ "id": entry.id, "name": entry.name, "category": "imported", "surface": snake(&format!("{:?}", entry.surface)), "note": "in Objects › Imported; place it with objects_place" });
+    lib.add(entry);
+    d.meta.dirty = true;
+    json_out(out)
 }
 
 #[cfg(test)]

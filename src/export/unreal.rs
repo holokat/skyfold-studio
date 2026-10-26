@@ -413,7 +413,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
     write_atmosphere(s, ctx, &light, 2f32.powf(ev))?;
     ctx.write(
         "Look/grade_lut.png",
-        &core::png_rgb(&super::godot::look::grade_lut_sized(&s.look, 16)),
+        &core::png_rgb(&super::godot::look::grade_lut_sized(&s.look, s.lighting.look.user_lut(), 16)),
     )?;
     ctx.write("Data/axis_probe.glb", &axis_probe())?;
     // dungeons: a level each (built by the script), triggers at their ways in
@@ -454,6 +454,9 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
             "physics": super::collision::physics_json(s.assets[m.asset].surface),
             "instances": list.iter().flat_map(|i| core::inst_row(i, i.pos, i.rot)).collect::<Vec<f64>>(),
             "stretch": core::stretch_rows(list),
+            // weapons: imported as a skeletal mesh (its moving nodes and sockets become bones)
+            // with an AnimSequence per clip, placed as SkeletalMeshActors
+            "weapon": m.weapon,
         })).collect::<Vec<_>>(),
         "water": water,
         "grass": grass,
@@ -462,6 +465,7 @@ pub fn export(s: &Snapshot, ctx: &Ctx) -> Result<Value, String> {
         "dungeons": dungeons_json,
         "ways_in": ways_json,
         "fires": crate::flames::fires_json(&s.fires),
+        "fixture_lights": crate::fixture_lights::lights_json(&s.lights, light.night),
         "flames": crate::dungeons::export::flame_sheets_json(),
         "portal_sheets": sheets,
         // a NavMeshBoundsVolume over the whole world: Unreal builds its navmesh from the collision
@@ -588,7 +592,7 @@ It imports everything into `/Game/WorldBuilder/{world}/` and:
   Godot and Unity exports calibrate it), **VolumetricCloud** when the world has clouds and an
   unbound **PostProcessVolume** with the world's look: manual exposure at the editor's, bloom,
   vignette and its colour grade (saturation, contrast, split toning, lift, foliage hue,
-  vibrance) as a colour grading LUT (`Look/grade_lut.png`); the **SkyfoldAtmosphere** over them,
+  vibrance, the user's own LUT) as a colour grading LUT (`Look/grade_lut.png`); the **SkyfoldAtmosphere** over them,
   the **fires** and the **SkyfoldGameMode** (with the plugin);
 - creates `M_WB_Water` (Single Layer Water with each style's optics from Skyfold Studio: its
   scattering and absorption, so the bed shows through the shallows and deep water takes the depth

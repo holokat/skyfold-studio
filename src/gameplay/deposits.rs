@@ -444,6 +444,7 @@ impl Deposit {
             scale: self.tf.scale.x,
             stretch: None,
             locked: false,
+            glow: None,
         }
     }
 }

@@ -1,25 +1,47 @@
 //! The player character: the world's chosen character (`WorldCharacters::player`) walks for
-//! you in Walk mode, seen from behind over its shoulder (P switches to first person and back).
+//! you in Walk mode, seen the way the world's game camera frames it (`super::play_camera`:
+//! over the shoulder, first person, a classic MMO chase camera, isometric or top-down).
 //! It plays its moves from how you move: idle, walk, run, sprint, crouch, jump, swim; and acts
 //! on the mouse and keys: left click a light attack, right click a heavy one, Q (held) block,
-//! X a dodge roll. Walk mode itself (`crate::walk`) still moves and collides the explorer; this
-//! only puts the character where it stands and the camera behind it.
+//! X a dodge roll (with a free pointer, attacks swing toward it). Walk mode itself
+//! (`crate::walk`) still moves and collides the explorer; this only puts the character where it
+//! stands.
 
 use bevy::prelude::*;
 
 use super::moves::{self, Move};
 use super::puppet::{self, Puppet};
 use super::{Characters, WorldCharacters, labs_enabled};
-use crate::camera::MainCamera;
+use super::play_camera::CameraStyle;
+use crate::camera::{MainCamera, Pointer};
 use crate::motion::movement::{Gait, InWater, MoveMode};
 use crate::walk::WalkState;
 
-/// How the player character is seen (not saved: first person is a key away).
+/// How the player character is seen right now (not saved: the world's settings are
+/// `WorldCharacters::camera`; `super::play_camera` keeps this).
 #[derive(Resource)]
 pub struct PlayerView {
     pub third_person: bool,
-    /// camera distance behind (m)
+    /// camera distance (m, for a 1.8 m character; the wheel changes it when zooming is allowed)
     pub distance: f32,
+    /// the style in effect
+    pub style: CameraStyle,
+    /// the camera is outside the character (it shows)
+    pub seen: bool,
+    /// the mouse pointer shows and aims (no mouse look)
+    pub free_pointer: bool,
+    /// the camera distance shown (eases toward `distance`)
+    pub shown_distance: f32,
+    /// classic MMO: the chase camera's yaw and how far it looks down (radians)
+    pub orbit: Option<(f32, f32)>,
+    /// the steadied height the chase and locked views look at
+    pub pivot_y: Option<f32>,
+    /// how far out the camera has room for (m, shown: walls and ceilings pull it in)
+    pub room: f32,
+    /// locked views under a roof: the cut's height, the roof's plan bounds and its top
+    pub roof_cut: Option<(f32, Vec4, f32)>,
+    /// the world's settings last applied
+    pub applied: Option<super::play_camera::GameCamera>,
 }
 
 impl Default for PlayerView {
@@ -27,9 +49,22 @@ impl Default for PlayerView {
         Self {
             third_person: true,
             distance: 3.4,
+            style: CameraStyle::Shoulder,
+            seen: false,
+            free_pointer: false,
+            shown_distance: 0.0,
+            orbit: None,
+            pivot_y: None,
+            room: 0.0,
+            roof_cut: None,
+            applied: None,
         }
     }
 }
+
+/// The player character's puppet (weapons pose its arms).
+#[derive(Component)]
+pub struct PlayerBody;
 
 #[derive(Default)]
 struct Body {
@@ -66,16 +101,16 @@ fn drive(
     walk: Res<WalkState>,
     world: Res<WorldCharacters>,
     chars: Res<Characters>,
-    mut view: ResMut<PlayerView>,
+    view: Res<PlayerView>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    terrain: Res<crate::terrain::Terrain>,
+    pointer: Res<Pointer>,
     time: Res<Time>,
     server: Res<AssetServer>,
     mut body: Local<Body>,
     mut puppets: Query<(&mut Puppet, &mut Transform, &mut Visibility), Without<MainCamera>>,
-    mut cam: Query<&mut Transform, With<MainCamera>>,
     mut strikes: ResMut<super::creatures::Strikes>,
+    armory: Res<super::weapons::Armory>,
     mut commands: Commands,
 ) {
     let entry = world
@@ -102,7 +137,7 @@ fn drive(
                 None,
             );
             if let Some(b) = body.entity {
-                commands.entity(b).insert(Name::new("Player character"));
+                commands.entity(b).insert((Name::new("Player character"), PlayerBody));
             }
         }
         return;
@@ -110,14 +145,12 @@ fn drive(
     let (Some(e), Some(ent)) = (entry, body.entity) else {
         return;
     };
-    if !walk.input_paused && keys.just_pressed(KeyCode::KeyP) {
-        view.third_person = !view.third_person;
-    }
     let Ok((mut p, mut tf, mut vis)) = puppets.get_mut(ent) else {
         return;
     };
-    // no horse yet: riding is seen from the saddle
-    let shown = view.third_person && walk.mode != MoveMode::Mount;
+    p.gaze = false;
+    // (`play_camera` decides: riding is seen from the saddle, the locked views always see it)
+    let shown = view.seen;
     *vis = if shown {
         Visibility::Inherited
     } else {
@@ -132,17 +165,24 @@ fn drive(
         let want = ground.x.atan2(ground.y);
         body.yaw = turn(body.yaw, want, dt * 10.0);
     }
+    // armed and aiming, drawing, firing or swinging: it turns to where the camera looks
+    if armory.faces_aim() && !view.free_pointer {
+        body.yaw = turn(body.yaw, walk.yaw + std::f32::consts::PI, dt * 14.0);
+    }
     tf.translation = walk.position;
     tf.rotation = Quat::from_rotation_y(body.yaw);
     let anim = |m: Move| moves::anim_for(&e.meta.moves, m);
 
     // actions first (they play out, then it goes back to moving)
     let input = !walk.input_paused;
+    // (a free pointer clicking the walk's HUD doesn't swing)
+    let clicks = !(view.free_pointer && pointer.over_ui);
     let swimming = matches!(walk.water, InWater::Swimming | InWater::Diving);
-    if input && !swimming && walk.mode == MoveMode::Foot {
-        let pressed = if mouse.just_pressed(MouseButton::Left) {
+    // (a weapon in hand takes the mouse: `weapons::drive`)
+    if input && !swimming && walk.mode == MoveMode::Foot && !armory.takes_mouse() {
+        let pressed = if clicks && mouse.just_pressed(MouseButton::Left) {
             Some(Move::LightAttack)
-        } else if mouse.just_pressed(MouseButton::Right) {
+        } else if clicks && mouse.just_pressed(MouseButton::Right) {
             Some(Move::HeavyAttack)
         } else if keys.just_pressed(KeyCode::KeyX) {
             Some(Move::Roll)
@@ -154,8 +194,12 @@ fn drive(
             p.speed = 1.0;
             p.restart(&anim(m), true);
             if m != Move::Roll {
-                // (swings go where the camera looks)
-                body.yaw = walk.yaw + std::f32::consts::PI;
+                // (swings go where the camera looks, or toward a free pointer)
+                body.yaw = view
+                    .free_pointer
+                    .then(|| aim(&pointer, walk.position))
+                    .flatten()
+                    .unwrap_or(walk.yaw + std::f32::consts::PI);
                 tf.rotation = Quat::from_rotation_y(body.yaw);
                 strikes
                     .0
@@ -228,28 +272,18 @@ fn drive(
             _ => 1.0,
         };
     }
+}
 
-    // the camera over its shoulder
-    if !shown {
-        return;
+/// The facing toward where the pointer meets the ground at the character's feet.
+fn aim(pointer: &Pointer, feet: Vec3) -> Option<f32> {
+    let ray = pointer.ray?;
+    let dy = ray.direction.y;
+    if dy > -1e-4 {
+        return None;
     }
-    let Ok(mut c) = cam.single_mut() else {
-        return;
-    };
-    let h = e.meta.height.clamp(0.4, 4.0);
-    let look = Quat::from_euler(EulerRot::YXZ, walk.yaw, walk.pitch, 0.0);
-    let pivot = walk.position + Vec3::Y * (h * 0.85);
-    let right = look * Vec3::X;
-    let back = look * Vec3::Z;
-    let dist = view.distance * (h / 1.8).clamp(0.6, 1.6);
-    let mut eye = pivot + back * dist + right * (0.35 * h / 1.8);
-    // (never under the ground)
-    let floor = terrain.height_at(eye.x, eye.z) + 0.35;
-    if eye.y < floor {
-        eye.y = floor;
-    }
-    c.translation = eye;
-    c.rotation = look;
+    let at = ray.origin + *ray.direction * ((feet.y - ray.origin.y) / dy);
+    let d = (at - feet).xz();
+    (d.length() > 0.05).then(|| d.x.atan2(d.y))
 }
 
 /// `from` turned towards `to` by at most `max` radians.

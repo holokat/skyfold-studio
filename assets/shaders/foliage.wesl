@@ -21,11 +21,12 @@ import bevy_pbr::render::{
 import bevy_pbr::render::pbr_functions::visibility_range_dither;
 import super::foliage_sway::foliage_sway;
 import super::canopy_shade::canopy_sky;
+import super::alien_flora::{alien_tint, alien_surface};
 
 struct FoliageParams {
     // xy: wind direction (world xz), z: wind speed (m/s), w: gustiness 0..1
     wind: vec4<f32>,
-    // xy: gust field offset (m)
+    // xy: gust field offset (m), zw: alien flora colour (`alien_flora.wesl`, 0 = off)
     gust: vec4<f32>,
 }
 
@@ -69,6 +70,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.alpha_cutoff,
         pbr_input.material.base_color,
     );
+    let own = pbr_input.material.base_color.rgb;
+    pbr_input.material.base_color = vec4<f32>(alien_tint(own, foliage.gust.zw), pbr_input.material.base_color.a);
+    // the flora mode's surface: a soft glow, a glassy frost, dull char or stone
+    let alien = alien_surface(own, foliage.gust.zw);
+    if alien.w >= 0.0 {
+        pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, alien.w, 0.8);
+    }
+    if alien.r + alien.g + alien.b > 0.0 {
+        pbr_input.material.emissive = vec4<f32>(pbr_input.material.emissive.rgb + alien.rgb, 0.0);
+    }
     let sky = canopy_sky(in.world_position.xyz);
     pbr_input.diffuse_occlusion *= sky;
     pbr_input.specular_occlusion *= sky;

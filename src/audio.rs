@@ -133,6 +133,12 @@ pub fn surface_gain_db(s: Surface) -> f32 {
         Surface::Sand => -8.0,
         Surface::Ash => -8.0,
         Surface::Carpet => -11.0,
+        Surface::Concrete => 0.0,
+        Surface::Asphalt => -1.0,
+        Surface::Tile => 0.0,
+        Surface::Glass => 0.0,
+        Surface::Grate => 1.0,
+        Surface::Rubber => -6.0,
     }
 }
 

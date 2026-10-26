@@ -76,11 +76,14 @@ pub fn kind_category(k: AssetKind) -> Category {
     use AssetKind::*;
     match k {
         Pine | Fir | Spruce | SnowyPine | Cedar | Oak | Birch | Maple | Willow | Palm | Bamboo
-        | DeadTree | GoldenMaple | SakuraPink | SakuraWhite | Ginkgo | Sequoia => Category::Trees,
+        | DeadTree | GoldenMaple | SakuraPink | SakuraWhite | Ginkgo | Sequoia | QuiverTree => {
+            Category::Trees
+        }
         Boulder | RockCluster | CliffRock | Pebbles | MossyRock | RockSpire | Hoodoo | SeaStack
-        | Crystals => Category::Rocks,
+        | Crystals | FloatingRock | Monolith => Category::Rocks,
         Bush | FlowerBush | Fern | Flowers | TallGrass | Reeds | Cactus | Mushrooms
-        | DesertShrub | LilyPads | Lavender | WildStrawberry | Blueberry | Blackberry => {
+        | DesertShrub | LilyPads | Lavender | WildStrawberry | Blueberry | Blackberry | Tulip
+        | Succulent => {
             Category::Plants
         }
         FallenLog | Stump | Branches | Driftwood | Roots => Category::Debris,
@@ -136,7 +139,7 @@ fn kind_biomes(k: AssetKind) -> Vec<Biome> {
         FlowerBush => vec![Temperate, Tropical],
         Fern => vec![Temperate, Boreal, Tropical, Swamp],
         Flowers => vec![Temperate, Boreal, Alpine, Autumn],
-        Lavender => vec![Temperate, Autumn],
+        Lavender | Tulip => vec![Temperate, Autumn],
         WildStrawberry | Blackberry => vec![Temperate, Boreal, Autumn],
         Blueberry => vec![Temperate, Boreal, Alpine, Autumn],
         TallGrass => vec![Temperate, Autumn, Swamp, Tundra, Boreal],
@@ -147,6 +150,11 @@ fn kind_biomes(k: AssetKind) -> Vec<Biome> {
         Driftwood => vec![Tropical, Temperate, Desert, Boreal],
         DesertShrub => vec![Desert, Volcanic, Alpine],
         LilyPads => vec![Swamp, Temperate, Tropical, Autumn],
+        // alien-world rocks belong to no biome: they're only placed on purpose (or by the sci-fi
+        // presets and `visuals::scifi_props`), never grown into a fantasy world's nature
+        FloatingRock | Monolith => vec![],
+        // alien flora (sci-fi template): only placed on purpose or by the sci-fi scatter
+        QuiverTree | Succulent => vec![],
         _ => Biome::ALL.to_vec(),
     }
 }
@@ -156,10 +164,12 @@ fn kind_surface(k: AssetKind) -> Surface {
     use AssetKind::*;
     match k {
         StoneBridge | RuinPillar | RuinWall | Well | Boulder | RockCluster | CliffRock
-        | MossyRock | RockSpire | Hoodoo | SeaStack | Crystals => Surface::Stone,
+        | MossyRock | RockSpire | Hoodoo | SeaStack | Crystals | FloatingRock | Monolith => {
+            Surface::Stone
+        }
         Pebbles => Surface::Gravel,
         Bush | FlowerBush | Fern | Flowers | TallGrass | Reeds | Cactus | DesertShrub
-        | Lavender | WildStrawberry | Blueberry | Blackberry => Surface::Grass,
+        | Lavender | WildStrawberry | Blueberry | Blackberry | Tulip | Succulent => Surface::Grass,
         LilyPads => Surface::Water,
         Mushrooms | Branches => Surface::Leaves,
         Tent => Surface::Carpet,
@@ -188,6 +198,7 @@ fn kind_radius(k: AssetKind) -> f32 {
         Pebbles => 1.2,
         Bush | FlowerBush => 1.2,
         Fern | Flowers | TallGrass | Mushrooms | Lavender | WildStrawberry => 0.6,
+        Tulip => 0.15,
         Blueberry | Blackberry => 0.9,
         Reeds => 0.8,
         Cactus => 1.2,
@@ -212,6 +223,10 @@ fn kind_radius(k: AssetKind) -> f32 {
         DesertShrub => 1.0,
         LilyPads => 1.4,
         Roots => 2.2,
+        FloatingRock => 6.0,
+        Monolith => 2.2,
+        QuiverTree => 2.4,
+        Succulent => 0.7,
     }
 }
 
@@ -227,8 +242,10 @@ fn kind_group(k: AssetKind) -> &'static str {
 }
 
 fn kind_align(k: AssetKind) -> bool {
-    matches!(kind_category(k), Category::Rocks | Category::Debris)
-        || matches!(k, AssetKind::Fern | AssetKind::Mushrooms)
+    // (floating rocks hang level in the air, monoliths stand upright)
+    (matches!(kind_category(k), Category::Rocks | Category::Debris)
+        || matches!(k, AssetKind::Fern | AssetKind::Mushrooms))
+        && !matches!(k, AssetKind::FloatingRock | AssetKind::Monolith)
 }
 
 fn kind_walkable(k: AssetKind) -> bool {
@@ -250,6 +267,8 @@ fn kind_lod(k: AssetKind) -> (f32, f32) {
         CliffRock | RockSpire | Hoodoo => (160.0, 2500.0),
         SeaStack => (220.0, 4000.0),
         Crystals => (60.0, 600.0),
+        FloatingRock => (120.0, 4000.0),
+        Monolith => (90.0, 3000.0),
         _ => match kind_category(k) {
             // procedural trees (ez-tree trees use their own ranges and billboards)
             Category::Trees => (170.0, 1500.0),
@@ -263,15 +282,16 @@ fn kind_lod(k: AssetKind) -> (f32, f32) {
 
 /// How far (m, 3D) from the viewer an object is drawn at all: it exists as a render entity only
 /// inside this distance. Trees stop at their last mesh LOD (billboard chunks carry on beyond).
-pub fn stream_dist(e: &LibraryEntry, g: &crate::streaming::Graphics) -> f32 {
+/// `size`: the object's `size_band`.
+pub fn stream_dist(e: &LibraryEntry, g: &crate::streaming::Graphics, size: f32) -> f32 {
     if let Some(t) = &e.tree {
-        return t.ranges[2] * g.detail;
+        return sized(t.ranges[2] * g.detail, size);
     }
     match e.kind {
         Some(k) => {
             let (lod_d, cull) = kind_lod(k);
             if cull > lod_d {
-                (cull * g.detail.max(1.0)).min(g.draw_distance)
+                sized((cull * g.detail.max(1.0)).min(g.draw_distance), size)
             } else {
                 lod_d * 1.15 * g.detail
             }
@@ -283,6 +303,26 @@ pub fn stream_dist(e: &LibraryEntry, g: &crate::streaming::Graphics) -> f32 {
         }
         None => g.draw_distance,
     }
+}
+
+/// Giant rocks (a 300 m rock spire, a 60 m floating island) hold each level of detail and stay
+/// drawn proportionally further: their distance bands × this. 1 at the sizes fantasy worlds use
+/// (under 2×); powers of two above, so Bevy's table of distinct ranges stays small.
+pub fn size_band(e: &LibraryEntry, scale: f32) -> f32 {
+    use AssetKind::*;
+    let grows = matches!(
+        e.kind,
+        Some(RockSpire | Hoodoo | SeaStack | Crystals | CliffRock | FloatingRock | Monolith)
+    );
+    if !grows || scale < 2.0 {
+        return 1.0;
+    }
+    2f32.powi((scale.log2().floor() as i32).min(5))
+}
+
+/// A distance band `d` (m) of an object in size band `size`: further for giants, up to 12 km.
+fn sized(d: f32, size: f32) -> f32 {
+    (d * size).min(d.max(12_000.0))
 }
 
 /// The bundled CC0 food & tableware models (`assets/models/food/food.json`) and model libraries.
@@ -840,6 +880,8 @@ fn kind_variants(k: AssetKind) -> u32 {
     }
 }
 
+pub mod glow;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Placed {
     pub id: u64,
@@ -861,6 +903,9 @@ pub struct Placed {
     /// unlocked; it still selects, copies and rides terrain edits (`placement::lock`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// A glowing object's own colour and light (crystals: `glow`); `None`: as made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<glow::Glow>,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -930,7 +975,8 @@ impl ObjectStore {
         self.next_id
     }
     pub fn insert(&mut self, p: Placed) {
-        self.next_id = self.next_id.max(p.id);
+        // group ids come from the same counter (`placement::group`)
+        self.next_id = self.next_id.max(p.id).max(p.group);
         let id = p.id;
         self.grid
             .entry(cell_of(p.translation()))
@@ -1103,6 +1149,9 @@ pub struct Preset {
     pub name: &'static str,
     pub biome: Biome,
     pub layers: Vec<PresetLayer>,
+    /// An alien-world preset (Alien Spires, Floating Isles): only offered in sci-fi worlds, never
+    /// grown by a biome. Appended after the fantasy presets, so their indices never move.
+    pub scifi: bool,
 }
 
 fn pl(
@@ -1129,6 +1178,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Mixed Forest",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(Blackberry, 5.0, (0.8, 1.2), 28.0, any),
                 pl(Blueberry, 8.0, (0.7, 1.2), 28.0, any),
@@ -1151,6 +1201,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Pine Forest",
             biome: Biome::Boreal,
+            scifi: false,
             layers: vec![
                 pl(Blueberry, 14.0, (0.7, 1.2), 28.0, any),
                 // A conifer understorey is blueberry-led, with scattered strawberries and
@@ -1174,6 +1225,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Autumn Woods",
             biome: Biome::Autumn,
+            scifi: false,
             layers: vec![
                 pl(Blackberry, 8.0, (0.8, 1.2), 28.0, any),
                 pl(WildStrawberry, 10.0, (0.8, 1.2), 28.0, any),
@@ -1193,6 +1245,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Sparse Woodland",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(Blackberry, 6.0, (0.7, 1.2), 28.0, any),
                 pl(WildStrawberry, 14.0, (0.8, 1.3), 28.0, any),
@@ -1211,6 +1264,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Flower Meadow",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(Mushrooms, 4.0, (0.7, 1.2), 25.0, any),
                 pl(WildStrawberry, 16.0, (0.8, 1.3), 28.0, any),
@@ -1226,6 +1280,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Alpine",
             biome: Biome::Alpine,
+            scifi: false,
             layers: vec![
                 pl(Blueberry, 7.0, (0.6, 1.0), 25.0, (1.5, 300.0)),
                 pl(SnowyPine, 2.0, (0.7, 1.2), 40.0, (120.0, 2000.0)),
@@ -1240,6 +1295,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Jungle",
             biome: Biome::Tropical,
+            scifi: false,
             layers: vec![
                 pl(Palm, 2.5, (0.8, 1.3), 32.0, any),
                 pl(Bamboo, 2.0, (0.8, 1.3), 30.0, any),
@@ -1256,6 +1312,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Palm Beach",
             biome: Biome::Tropical,
+            scifi: false,
             layers: vec![
                 pl(Palm, 1.4, (0.8, 1.25), 25.0, (0.5, 40.0)),
                 pl(Driftwood, 0.4, (0.8, 1.2), 20.0, (0.2, 6.0)),
@@ -1267,6 +1324,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Desert",
             biome: Biome::Desert,
+            scifi: false,
             layers: vec![
                 // (no procedural saguaros until a photoscanned cactus exists: the scanned
                 // scrub carries the desert)
@@ -1283,6 +1341,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Swamp",
             biome: Biome::Swamp,
+            scifi: false,
             layers: vec![
                 pl(Willow, 1.6, (0.8, 1.3), 25.0, (0.0, 80.0)),
                 pl(DeadTree, 0.8, (0.8, 1.2), 25.0, any),
@@ -1298,6 +1357,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Rocky Hills",
             biome: Biome::Alpine,
+            scifi: false,
             layers: vec![
                 pl(Boulder, 2.0, (0.5, 1.8), 55.0, any),
                 pl(RockCluster, 1.2, (0.6, 1.4), 55.0, any),
@@ -1309,6 +1369,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Tundra",
             biome: Biome::Tundra,
+            scifi: false,
             layers: vec![
                 pl(SnowyPine, 0.7, (0.6, 1.1), 35.0, any),
                 pl(Boulder, 0.8, (0.5, 1.5), 50.0, any),
@@ -1321,6 +1382,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Haunted Woods",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(DeadTree, 2.2, (0.8, 1.4), 32.0, any),
                 pl(Pine, 1.2, (0.9, 1.4), 34.0, any),
@@ -1337,6 +1399,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Crystal Grove",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(Crystals, 1.4, (0.5, 1.8), 45.0, any),
                 pl(MossyRock, 1.0, (0.6, 1.4), 45.0, any),
@@ -1349,6 +1412,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Volcanic",
             biome: Biome::Volcanic,
+            scifi: false,
             layers: vec![
                 // a strewn, rocky waste: the densest rock field of the ecosystems
                 pl(CliffRock, 0.7, (0.6, 1.4), 65.0, any),
@@ -1362,6 +1426,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Sakura Grove",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(SakuraPink, 2.5, (0.8, 1.2), 28.0, any),
                 pl(SakuraWhite, 1.7, (0.8, 1.2), 28.0, any),
@@ -1373,6 +1438,7 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Bamboo Forest",
             biome: Biome::Tropical,
+            scifi: false,
             layers: vec![
                 pl(Bamboo, 4.0, (0.8, 1.25), 28.0, any),
                 pl(Palm, 0.5, (0.8, 1.15), 28.0, any),
@@ -1383,12 +1449,50 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "Sequoia Grove",
             biome: Biome::Temperate,
+            scifi: false,
             layers: vec![
                 pl(Sequoia, 0.55, (0.75, 1.05), 28.0, any),
                 pl(Cedar, 1.8, (0.8, 1.2), 30.0, any),
                 pl(Fern, 10.0, (0.8, 1.35), 32.0, any),
                 pl(FallenLog, 0.5, (0.8, 1.2), 28.0, any),
                 pl(MossyRock, 0.8, (0.7, 1.3), 40.0, any),
+            ],
+        },
+        // alien worlds (`scifi`): towering spires, monoliths and glowing crystals on the ground,
+        // rocks hanging in the air over it (`visuals::floating`)
+        Preset {
+            name: "Alien Spires",
+            biome: Biome::Desert,
+            scifi: true,
+            layers: vec![
+                pl(RockSpire, 0.08, (1.5, 4.0), 55.0, any),
+                pl(Monolith, 0.12, (0.6, 1.6), 30.0, any),
+                pl(Crystals, 0.5, (0.8, 2.2), 45.0, any),
+                pl(Boulder, 1.2, (0.6, 1.8), 50.0, any),
+                pl(Pebbles, 2.0, (0.7, 1.3), 45.0, any),
+            ],
+        },
+        Preset {
+            name: "Floating Isles",
+            biome: Biome::Desert,
+            scifi: true,
+            layers: vec![
+                pl(FloatingRock, 0.2, (0.15, 1.6), 90.0, any),
+                pl(Monolith, 0.05, (0.6, 1.4), 30.0, any),
+                pl(Boulder, 0.8, (0.6, 1.5), 50.0, any),
+            ],
+        },
+        // alien flora (photoscans, crimson with alien flora on): quiver trees standing apart over
+        // knobbly succulent clumps and dry scrub on the red ground
+        Preset {
+            name: "Alien Scrub",
+            biome: Biome::Desert,
+            scifi: true,
+            layers: vec![
+                pl(QuiverTree, 0.35, (0.7, 1.35), 28.0, any),
+                pl(Succulent, 6.0, (0.7, 1.4), 32.0, any),
+                pl(DesertShrub, 1.5, (0.6, 1.2), 30.0, any),
+                pl(Pebbles, 1.0, (0.7, 1.3), 40.0, any),
             ],
         },
     ]
@@ -1539,7 +1643,9 @@ fn build_library(
         crate::art_style::current(),
     );
     commands.insert_resource(flora_styles);
-    crate::visuals::formations::build_crystals(&mut meshes, &mut foliage, &mut images, &mut trees);
+    let glow_mats =
+        crate::visuals::formations::build_crystals(&mut meshes, &mut foliage, &mut images, &mut trees);
+    commands.insert_resource(glow_mats);
     let foliage = foliage.add(FoliageMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -1694,11 +1800,14 @@ fn init_wind_buffer(mut buffers: ResMut<Assets<ShaderBuffer>>) {
 fn update_wind(
     wind: Res<crate::wind::WindState>,
     motion: Res<crate::wind::Motion>,
+    appearance: Res<crate::nature::NatureAppearance>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut last: Local<Option<[f32; 8]>>,
 ) {
     // still while editing (speed 0: no sway at all)
     let speed = if motion.live { wind.speed } else { 0.0 };
+    // (the last two: the alien flora's colour, `nature::alien`; 0 = off)
+    let alien = appearance.alien.pack();
     let data = [
         wind.dir.x,
         wind.dir.y,
@@ -1706,8 +1815,8 @@ fn update_wind(
         wind.gustiness,
         wind.gust_offset.x,
         wind.gust_offset.y,
-        0.0,
-        0.0,
+        alien.x,
+        alien.y,
     ];
     if *last == Some(data) {
         return;
@@ -1735,6 +1844,9 @@ fn sync_entities(
     asset_server: Res<AssetServer>,
     graphics: Res<crate::streaming::Graphics>,
     cam: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
+    rocks: Option<Res<crate::visuals::rock_material::RockMaterials>>,
+    mut foliage: ResMut<Assets<FoliageMaterial>>,
+    mut glow_mats: Option<ResMut<glow::GlowMaterials>>,
 ) {
     let Some(lib) = lib else { return };
     for e in std::mem::take(&mut store.to_despawn) {
@@ -1764,11 +1876,26 @@ fn sync_entities(
             continue;
         };
         if p.translation().distance(cam)
-            > stream_dist(entry, &graphics) + crate::streaming::SPAWN_MARGIN
+            > stream_dist(entry, &graphics, size_band(entry, p.scale))
+                + crate::streaming::SPAWN_MARGIN
         {
             continue;
         }
-        if let Some(e) = spawn_object(&mut commands, &lib, entry, p, &asset_server, &graphics) {
+        // a crystal given its own colour and light: its material
+        let glow = match (&p.glow, glow_mats.as_deref_mut()) {
+            (Some(g), Some(m)) if glow::glows(entry) => Some(m.material(g, &mut foliage)),
+            _ => None,
+        };
+        if let Some(e) = spawn_object(
+            &mut commands,
+            &lib,
+            entry,
+            p,
+            &asset_server,
+            &graphics,
+            rocks.as_deref(),
+            glow,
+        ) {
             store.entities.insert(id, e);
             budget -= 1;
         }
@@ -1783,9 +1910,10 @@ fn sync_entities(
 pub fn lod_ranges(
     entry: &LibraryEntry,
     g: &crate::streaming::Graphics,
+    size: f32,
 ) -> Option<Vec<VisibilityRange>> {
     if let Some(tree) = &entry.tree {
-        let r = tree.ranges.map(|d| d * g.detail);
+        let r = tree.ranges.map(|d| sized(d * g.detail, size));
         // hard LOD switches: the camera's depth prepass can't dither opaque meshes between levels
         let band = |a: f32, b: f32| VisibilityRange {
             start_margin: a..a,
@@ -1800,8 +1928,8 @@ pub fn lod_ranges(
         return Some(vec![first, band(r[0], r[1]), band(r[1], r[2])]);
     }
     let (lod_d, cull) = kind_lod(entry.kind?);
-    let lod_d = lod_d * g.detail;
-    let cull = (cull * g.detail.max(1.0)).min(g.draw_distance);
+    let lod_d = sized(lod_d * g.detail, size);
+    let cull = sized((cull * g.detail.max(1.0)).min(g.draw_distance), size);
     let near = VisibilityRange {
         start_margin: 0.0..0.0,
         end_margin: lod_d..lod_d,
@@ -1827,6 +1955,8 @@ fn spawn_object(
     p: &Placed,
     asset_server: &AssetServer,
     g: &crate::streaming::Graphics,
+    rocks: Option<&crate::visuals::rock_material::RockMaterials>,
+    glow: Option<Handle<FoliageMaterial>>,
 ) -> Option<Entity> {
     let id = p.id;
     let tf = Transform {
@@ -1836,7 +1966,9 @@ fn spawn_object(
     };
     if let Some(tree) = &entry.tree {
         let v = &tree.variants[(p.variant as usize).min(tree.variants.len() - 1)];
-        let ranges = lod_ranges(entry, g).unwrap_or_default();
+        let ranges = lod_ranges(entry, g, size_band(entry, p.scale)).unwrap_or_default();
+        // (rocks that keep their grain at any size: `visuals::rock_material`)
+        let rock = rocks.and_then(|r| r.for_object(entry.kind, p.scale));
         let mut ec = commands.spawn((
             Name::new(entry.name.clone()),
             PlacedObject { id },
@@ -1857,13 +1989,21 @@ fn spawn_object(
                                 | AssetKind::Mushrooms
                                 | AssetKind::Lavender
                                 | AssetKind::WildStrawberry
+                                | AssetKind::Tulip
                         )
                     );
-                let mut b = c.spawn((
-                    Mesh3d(bark.clone()),
-                    MeshMaterial3d(tree.bark.clone()),
-                    range.clone(),
-                ));
+                let mut b = match &rock {
+                    Some(m) => c.spawn((
+                        Mesh3d(bark.clone()),
+                        MeshMaterial3d(m.clone()),
+                        range.clone(),
+                    )),
+                    None => c.spawn((
+                        Mesh3d(bark.clone()),
+                        MeshMaterial3d(glow.clone().unwrap_or_else(|| tree.bark.clone())),
+                        range.clone(),
+                    )),
+                };
                 if entry.category == Category::Trees {
                     b.insert(MeshTag::new(crate::forest_contours::FOREST_TAG));
                 }
@@ -1879,7 +2019,7 @@ fn spawn_object(
                 if let Some(l) = leaves {
                     let mut e = c.spawn((
                         Mesh3d(l.clone()),
-                        MeshMaterial3d(tree.leaves.clone()),
+                        MeshMaterial3d(glow.clone().unwrap_or_else(|| tree.leaves.clone())),
                         range,
                     ));
                     if entry.category == Category::Trees {
@@ -1894,13 +2034,18 @@ fn spawn_object(
                 }
             }
             // beyond the last LOD the tree is part of a billboard chunk (streaming.rs)
+            if glow.is_some()
+                && let Some(g) = &p.glow
+            {
+                glow::spawn_light(c, p, g, v.height);
+            }
         });
         Some(ec.id())
     } else if entry.kind.is_some() {
         // ranges are per asset type (not per instance): Bevy keeps a GPU table of distinct ranges
         let v = (p.variant as usize).min(entry.meshes.len().saturating_sub(1));
         let (m0, m1) = entry.meshes[v].clone();
-        let bands = lod_ranges(entry, g).unwrap_or_default();
+        let bands = lod_ranges(entry, g, size_band(entry, p.scale)).unwrap_or_default();
         let (near, far) = (bands[0].clone(), bands.get(1).cloned().unwrap_or_default());
         let has_far = bands.len() > 1;
         let mut ec = commands.spawn((
@@ -2151,8 +2296,7 @@ fn place_tool(
             asset: e.id.clone(),
             variant: 0,
             // (sunk a little into what it stands on; stuck to a cave wall or roof: into the rock)
-            pos: e
-                .seat(
+            pos: (e.seat(
                     at - (if align && pointer.cave_normal.is_some() {
                         n
                     } else {
@@ -2161,11 +2305,15 @@ fn place_tool(
                     &water,
                     terrain.sea_level,
                 )
-                .to_array(),
+                // (floating rocks hang in the air above the spot)
+                + Vec3::Y
+                    * crate::visuals::floating::hover_for(e.kind, settings.scale * e.default_scale))
+            .to_array(),
             rot: rot.to_array(),
             scale: settings.scale * e.default_scale,
             stretch: None,
             locked: false,
+            glow: None,
         });
         store.selected = Some(id);
         *placing = Some((id, n));
@@ -2379,6 +2527,7 @@ pub fn duplicate(
         id: store.new_id(),
         pos: pos.to_array(),
         locked: false,
+        glow: None,
         ..p
     })
 }

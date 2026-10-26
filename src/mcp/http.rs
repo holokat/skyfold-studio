@@ -1,7 +1,8 @@
 //! MCP Streamable HTTP transport (spec 2025-06-18): JSON-RPC 2.0 over `POST /mcp`, answered
 //! with `application/json` (this server never needs to stream, so `GET` is 405). Sessions are
 //! issued on `initialize` (`Mcp-Session-Id`); requests from other origins or hosts are refused
-//! (DNS rebinding), and the socket only listens on 127.0.0.1.
+//! (DNS rebinding), the socket only listens on 127.0.0.1, and every request needs the
+//! `Authorization: Bearer` key (`key.rs`) since other local accounts share that address.
 
 use std::io::Read;
 use std::sync::{Arc, mpsc};
@@ -189,6 +190,21 @@ fn handle(mut req: Request, shared: &Shared) {
             400,
             Some(rpc_error(Value::Null, -32600, &msg)),
             vec![],
+            origin,
+        );
+    }
+    // Every request but a CORS preflight (browsers send those without credentials) needs the key:
+    // other accounts and sandboxed apps on this Mac can reach 127.0.0.1 too.
+    if *req.method() != Method::Options && !super::key::authorized(header(&req, "Authorization")) {
+        return respond(
+            req,
+            401,
+            Some(rpc_error(
+                Value::Null,
+                -32001,
+                "Unauthorized: Skyfold Studio needs its MCP key. Copy the connect command again from the MCP dialog (top bar).",
+            )),
+            vec![hdr("WWW-Authenticate", "Bearer")],
             origin,
         );
     }
@@ -419,4 +435,33 @@ pub(crate) fn base64(b: &[u8]) -> String {
         });
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn raw(port: u16, method: &str, auth: Option<&str>) -> u16 {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let auth = auth.map(|a| format!("Authorization: {a}\r\n")).unwrap_or_default();
+        write!(s, "{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)
+    }
+
+    #[test]
+    fn requests_without_the_key_are_refused() {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let handle = super::start(port, Default::default()).unwrap();
+        assert_eq!(raw(port, "POST", None), 401, "no key (another local account)");
+        assert_eq!(raw(port, "POST", Some("Bearer wrong")), 401);
+        assert_eq!(raw(port, "OPTIONS", None), 204, "CORS preflights carry no credentials");
+        assert_eq!(raw(port, "POST", Some(&super::super::key::bearer())), 200);
+        let (status, _, body) = super::super::bridge::post(port, r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#, None).unwrap();
+        assert_eq!(status, 200, "the stdio bridge sends the key: {body}");
+        handle.stop();
+    }
 }

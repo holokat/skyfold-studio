@@ -17,6 +17,7 @@ import bevy_pbr::render::{
 import super::noise::{fbm2, hashf};
 import super::wind::gust_field;
 import super::canopy_shade::{canopy_sky, canopy_grass};
+import super::alien_flora::{alien_tint, alien_surface};
 
 struct GrassParams {
     // x: terrain half size, y: cell size, z: vertices per side, w: sea level
@@ -30,7 +31,8 @@ struct GrassParams {
     base: vec4<f32>,
     tip: vec4<f32>,
     dry: vec4<f32>,
-    // tip colours for cold (boreal, alpine) and warm (tropical) grass
+    // tip colours for cold (boreal, alpine) and warm (tropical) grass; w: 1 + the alien flora
+    // colour (`alien_flora.wesl`: cold.w its y, warm.w its x; 1 = off)
     cold: vec4<f32>,
     warm: vec4<f32>,
     // x: grass amount (density multiplier), y: realistic art treatment, z: lushness (0..1),
@@ -344,6 +346,8 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     let gust_sheen = select(0.45, 0.18, realistic);
     col = mix(col, col * vec3<f32>(1.3, 1.28, 1.1) + vec3<f32>(0.02), gust * smoothstep(0.15, 0.9, hf) * gust_sheen);
 
+    col = alien_tint(col, vec2<f32>(grass.warm.w, grass.cold.w) - 1.0);
+
 @if(VERTEX_COLORS)
     out.color = vec4<f32>(col, 1.0);
 @if(VERTEX_UVS_A)
@@ -397,6 +401,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             mix(realistic_transmission, rich_realistic_transmission, lushness),
             realistic,
         );
+    }
+    // the alien flora mode's surface (`alien_flora.wesl`): the blades' tips glow, frost or dull
+    let alien_p = vec2<f32>(grass.warm.w, grass.cold.w) - 1.0;
+    let alien = alien_surface(vec3<f32>(0.1, 0.3, 0.05), alien_p);
+    if alien.w >= 0.0 {
+        pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, alien.w, 0.7);
+    }
+    if alien.r + alien.g + alien.b > 0.0 {
+        let tip = smoothstep(0.25, 1.0, clamp(in.uv.x, 0.0, 1.0));
+        pbr_input.material.emissive = vec4<f32>(pbr_input.material.emissive.rgb + alien.rgb * tip, 0.0);
     }
     // the sky light the tree crowns above hold back
     let sky = canopy_sky(in.world_position.xyz);

@@ -24,8 +24,10 @@ pub struct SkinOpts {
     pub resolution: usize,
     /// how sharply a bone's pull drops with distance (higher = stiffer limbs, crisper joints)
     pub falloff: f32,
-    /// surface smoothing passes
+    /// surface smoothing passes (on a game-density mesh; denser meshes get more)
     pub smooth: usize,
+    /// model-space height of the chin: everything above it (bar the arms) moves with the head
+    pub head_from: Option<f32>,
 }
 
 impl Default for SkinOpts {
@@ -34,6 +36,7 @@ impl Default for SkinOpts {
             resolution: 192,
             falloff: 4.0,
             smooth: 2,
+            head_from: None,
         }
     }
 }
@@ -315,17 +318,54 @@ pub fn skin(model: &mut Model, sk: &Skeleton, opts: SkinOpts) -> SkinReport {
         }
         best
     };
-    let vert_vox: Vec<Vec<Option<(u32, f32)>>> = model
+    // the solid voxels round each vertex, trilinearly weighted (a vertex reads a blend of its
+    // neighbouring voxels, not just the nearest one: weights then vary smoothly inside a voxel
+    // instead of in voxel-sized steps, which a dense mesh's few smoothing passes can't hide)
+    let corners = |p: Vec3| -> Vec<(u32, f32)> {
+        let f = (p - g.lo) / vox - Vec3::splat(0.5);
+        let base = f.floor().as_ivec3();
+        let t = f - base.as_vec3();
+        let mut out = Vec::with_capacity(8);
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let c = base + IVec3::new(dx, dy, dz);
+                    let w = (if dx == 1 { t.x } else { 1.0 - t.x })
+                        * (if dy == 1 { t.y } else { 1.0 - t.y })
+                        * (if dz == 1 { t.z } else { 1.0 - t.z });
+                    if w > 1e-4
+                        && let Some(k) = g.idx(c)
+                        && solid_of[k] != u32::MAX
+                    {
+                        out.push((solid_of[k], w));
+                    }
+                }
+            }
+        }
+        out
+    };
+    // per vertex: its corners (when any is solid), else the nearest solid voxel and how far off
+    let vert_vox: Vec<Vec<(Vec<(u32, f32)>, Option<(u32, f32)>)>> = model
         .meshes
         .par_iter()
-        .map(|m| m.positions.iter().map(|p| near_solid(*p)).collect())
+        .map(|m| {
+            m.positions
+                .iter()
+                .map(|p| {
+                    let c = corners(*p);
+                    if c.is_empty() { (c, near_solid(*p)) } else { (c, None) }
+                })
+                .collect()
+        })
         .collect();
     // the solid voxels any vertex uses, and their slot in the per-bone tables
     let mut slot: HashMap<u32, u32> = HashMap::new();
     for vv in &vert_vox {
-        for (s, _) in vv.iter().flatten() {
-            let next = slot.len() as u32;
-            slot.entry(*s).or_insert(next);
+        for (c, n) in vv {
+            for (s, _) in c.iter().chain(n.iter()) {
+                let next = slot.len() as u32;
+                slot.entry(*s).or_insert(next);
+            }
         }
     }
     let slots: Vec<u32> = {
@@ -359,44 +399,215 @@ pub fn skin(model: &mut Model, sk: &Skeleton, opts: SkinOpts) -> SkinReport {
 
     // 5: weights per vertex
     let mut unreached = 0;
+    let mut reached: Vec<Vec<bool>> = vec![];
     for (mi, m) in model.meshes.iter_mut().enumerate() {
         let mut out = Vec::with_capacity(m.positions.len());
-        for (vi, p) in m.positions.iter().enumerate() {
-            let mut d: Vec<(usize, f32)> = match vert_vox[mi][vi] {
-                Some((k, off)) => {
-                    let si = slot[&k] as usize;
-                    segs.iter()
-                        .enumerate()
-                        .filter_map(|(bi, _)| {
-                            let x = dists[bi][si];
-                            x.is_finite().then_some((bi, x + off))
-                        })
-                        .collect()
+        let mut ok = Vec::with_capacity(m.positions.len());
+        for vi in 0..m.positions.len() {
+            let (cs, near) = &vert_vox[mi][vi];
+            let mut d: Vec<(usize, f32)> = vec![];
+            if !cs.is_empty() {
+                // a bone counts where every solid corner reaches it (else that corner's ∞ wins)
+                for bi in 0..segs.len() {
+                    let (mut acc, mut wsum, mut all) = (0.0, 0.0, true);
+                    for &(k, w) in cs {
+                        let x = dists[bi][slot[&k] as usize];
+                        if !x.is_finite() {
+                            all = false;
+                            break;
+                        }
+                        acc += x * w;
+                        wsum += w;
+                    }
+                    if all && wsum > 0.0 {
+                        d.push((bi, acc / wsum));
+                    }
                 }
-                None => vec![],
-            };
+            } else if let Some((k, off)) = near {
+                let si = slot[k] as usize;
+                d = (0..segs.len())
+                    .filter_map(|bi| {
+                        let x = dists[bi][si];
+                        x.is_finite().then_some((bi, x + off))
+                    })
+                    .collect();
+            }
+            ok.push(!d.is_empty());
             if d.is_empty() {
                 unreached += 1;
+                // (filled in from the nearest reached vertex below; this is a placeholder)
                 d = segs
                     .iter()
                     .enumerate()
-                    .map(|(bi, s)| (bi, seg_dist(*p, s.a, s.b)))
+                    .map(|(bi, s)| (bi, seg_dist(m.positions[vi], s.a, s.b)))
                     .collect();
             }
             out.push(weigh(&mut d, &segs, vox, opts.falloff));
         }
         m.skin = Some(out);
+        reached.push(ok);
+    }
+    // parts outside the solid (fur tips, loose strands, a floating piece): the weights of the
+    // nearest vertex that was reached, so they move with the body under them instead of being
+    // pulled toward whichever bone happens to be closest in a straight line
+    if unreached > 0 {
+        borrow_nearest(model, &reached, vox * 2.0);
     }
 
     // 6: smoothing along the (welded) surface
+    // (passes in proportion to how many edges span a voxel: a dense scan needs more of them to
+    // blur the same distance as a game mesh)
     if opts.smooth > 0 {
-        smooth(model, vox * 0.25, opts.smooth);
+        let edge = median_edge(model).max(1e-5);
+        let span = (vox / edge).max(1.0);
+        let passes = ((opts.smooth as f32 * span * span * 0.5).round() as usize).clamp(opts.smooth, 48);
+        smooth(model, vox * 0.25, passes);
+    }
+    // 7: a rigid skull: above the chin the head bone takes over (faded in over a short band, so
+    // the neck still bends smoothly). Geodesic distances alone share a big head with the neck
+    // and shoulders, and lifting an arm then squashes it (chibi heads sit right beside them).
+    if let Some(chin) = opts.head_from
+        && let Some(head) = sk.find("Head")
+    {
+        rigid_head(model, sk, head, chin, ext.y);
     }
     SkinReport {
         voxels: g.n,
         solid: solid.len(),
         unreached,
         millis: t0.elapsed().as_millis(),
+    }
+}
+
+fn rigid_head(model: &mut Model, sk: &Skeleton, head: usize, chin: f32, height: f32) {
+    let (lo, hi) = (chin - 0.015 * height, chin + 0.035 * height);
+    // (an arm that happens to sit above the chin keeps its own weights)
+    let arm: Vec<bool> = sk
+        .bones
+        .iter()
+        .map(|b| {
+            let n = b.name.to_ascii_lowercase();
+            ["upperarm", "lowerarm", "hand", "thumb", "index", "middle", "ring", "pinky"]
+                .iter()
+                .any(|k| n.contains(k))
+        })
+        .collect();
+    for m in &mut model.meshes {
+        let positions = &m.positions;
+        let Some(skin) = &mut m.skin else {
+            continue;
+        };
+        for (p, s) in positions.iter().zip(skin.iter_mut()) {
+            let t = ((p.y - lo) / (hi - lo)).clamp(0.0, 1.0);
+            let f = t * t * (3.0 - 2.0 * t);
+            if f <= 0.0 {
+                continue;
+            }
+            let arm_w: f32 = s
+                .joints
+                .iter()
+                .zip(s.weights)
+                .filter(|(j, _)| arm.get(**j as usize).copied().unwrap_or(false))
+                .map(|(_, w)| w)
+                .sum();
+            if arm_w > 0.5 {
+                continue;
+            }
+            let mut v: Vec<(u16, f32)> = vec![];
+            for k in 0..4 {
+                if s.weights[k] > 0.0 {
+                    add(&mut v, s.joints[k], s.weights[k] * (1.0 - f));
+                }
+            }
+            add(&mut v, head as u16, f);
+            v.sort_by(|a, b| b.1.total_cmp(&a.1));
+            v.truncate(4);
+            let sum: f32 = v.iter().map(|x| x.1).sum();
+            *s = VertexSkin::default();
+            for (k, (b, x)) in v.iter().enumerate() {
+                s.joints[k] = *b;
+                s.weights[k] = x / sum.max(1e-12);
+            }
+            tidy(s);
+        }
+    }
+}
+
+/// The median triangle edge length (sampled).
+fn median_edge(model: &Model) -> f32 {
+    let mut e: Vec<f32> = vec![];
+    for m in &model.meshes {
+        let step = (m.indices.len() / 3 / 20_000).max(1);
+        for t in m.indices.chunks_exact(3).step_by(step) {
+            e.push(m.positions[t[0] as usize].distance(m.positions[t[1] as usize]));
+        }
+    }
+    if e.is_empty() {
+        return 0.0;
+    }
+    e.sort_by(f32::total_cmp);
+    e[e.len() / 2]
+}
+
+/// Gives every vertex not `reached` the weights of the nearest reached vertex (bucketed on a
+/// grid of `cell`, searching outward).
+fn borrow_nearest(model: &mut Model, reached: &[Vec<bool>], cell: f32) {
+    let cell = cell.max(1e-4);
+    let mut grid: HashMap<IVec3, Vec<(Vec3, VertexSkin)>> = HashMap::new();
+    for (mi, m) in model.meshes.iter().enumerate() {
+        let Some(skin) = &m.skin else {
+            continue;
+        };
+        for (vi, p) in m.positions.iter().enumerate() {
+            if reached[mi][vi] {
+                grid.entry((*p / cell).floor().as_ivec3()).or_default().push((*p, skin[vi]));
+            }
+        }
+    }
+    if grid.is_empty() {
+        return;
+    }
+    for (mi, m) in model.meshes.iter_mut().enumerate() {
+        let positions = &m.positions;
+        let Some(skin) = &mut m.skin else {
+            continue;
+        };
+        let fixed: Vec<(usize, VertexSkin)> = (0..positions.len())
+            .into_par_iter()
+            .filter(|&vi| !reached[mi][vi])
+            .filter_map(|vi| {
+                let p = positions[vi];
+                let c = (p / cell).floor().as_ivec3();
+                for r in 0..=24i32 {
+                    let mut best: Option<(f32, VertexSkin)> = None;
+                    for dz in -r..=r {
+                        for dy in -r..=r {
+                            for dx in -r..=r {
+                                if dx.abs().max(dy.abs()).max(dz.abs()) != r {
+                                    continue;
+                                }
+                                if let Some(list) = grid.get(&(c + IVec3::new(dx, dy, dz))) {
+                                    for (q, s) in list {
+                                        let d = q.distance_squared(p);
+                                        if best.is_none_or(|b| d < b.0) {
+                                            best = Some((d, *s));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // (one ring further can still hold a closer point than a corner hit)
+                    if let Some((_, s)) = best {
+                        return Some((vi, s));
+                    }
+                }
+                None
+            })
+            .collect();
+        for (vi, s) in fixed {
+            skin[vi] = s;
+        }
     }
 }
 

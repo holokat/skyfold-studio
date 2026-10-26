@@ -16,6 +16,7 @@
 //!
 //! Stored objects remain only for what someone placed explicitly, plus pinned instances.
 
+pub mod alien;
 pub mod appearance;
 pub mod brush;
 pub mod canopy;
@@ -138,6 +139,7 @@ impl Plugin for NaturePlugin {
                 Update,
                 (init_rules, apply_undo, migrate::run_pending).chain(),
             )
+            .add_systems(Update, alien::follow)
             .add_systems(
                 Update,
                 brush::paint_tool.in_set(crate::tools::ToolSystems::Apply),

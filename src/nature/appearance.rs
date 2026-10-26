@@ -104,6 +104,9 @@ pub struct NatureAppearance {
     pub canopy_shade: f32,
     #[serde(default)]
     pub ground: GroundCover,
+    /// Plants recoloured to an alien hue (`alien`), off by default.
+    #[serde(default)]
+    pub alien: super::alien::AlienFlora,
 }
 
 fn full() -> f32 {
@@ -117,6 +120,7 @@ impl Default for NatureAppearance {
             grass_lushness: 0.0,
             canopy_shade: 1.0,
             ground: GroundCover::default(),
+            alien: Default::default(),
         }
     }
 }
@@ -136,6 +140,7 @@ impl NatureAppearance {
                 1.0
             },
             ground: self.ground.sanitized(),
+            alien: self.alien.sanitized(),
             ..self
         }
     }
@@ -166,6 +171,7 @@ mod tests {
                 undergrowth: 9.0,
                 ..GroundCover::default()
             },
+            alien: Default::default(),
         };
         assert_eq!(appearance.sanitized().ground.undergrowth, 2.0);
         assert_eq!(appearance.sanitized().canopy_shade, 1.0);

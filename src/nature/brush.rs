@@ -134,6 +134,7 @@ pub fn paint_tool(
                 store.insert(crate::objects::Placed {
                     group: 0,
                     locked: false,
+                    glow: None,
                     id,
                     asset: e.id.clone(),
                     variant: fastrand::u32(..e.meshes.len().max(1) as u32),

@@ -10,6 +10,31 @@
  ],
  "kinds": [
   {
+   "id": "weapon",
+   "name": "Weapon (held)",
+   "why": "Held weapons are seen in first person filling a third of the screen and in third person in a hand: they get hero triangle density on a small surface, a few more materials than a prop, and their pivot is the main-hand grip (the engine attaches it to a hand socket), so the bottom-centre origin, float and sink checks don't apply. Their moving parts are separate nodes driven by named glTF clips (fire, reload, draw...).",
+   "when": [
+    {
+     "group": [
+      "weapons"
+     ],
+     "category": "props"
+    }
+   ]
+  },
+  {
+   "id": "landmark",
+   "name": "Landmark / superstructure",
+   "why": "A city-scale hero structure (a kilometre-high tower): one per world, seen from everywhere. It gets its own budgets on purpose instead of breaking the building ones; it must ship a lean `collision` node so its walk-in collider stays small, and it relies on the engine's distance LODs (model_render::lod) far away. Its rooms are furnished with instanced copies of a few dozen pieces (each piece is also its own model): repeated mesh+material pairs draw as GPU instances, so its primitive and material budgets are sized for a furnished hotel rather than one building, while its unique triangles stay capped.",
+   "when": [
+    {
+     "max_dim": {
+      "ge": 300.0
+     }
+    }
+   ]
+  },
+  {
    "id": "scene",
    "name": "Scene (composite)",
    "when": [
@@ -161,6 +186,14 @@
     "creature": {
      "warn": 12000,
      "fail": 25000
+    },
+    "landmark": {
+     "warn": 450000,
+     "fail": 800000
+    },
+    "weapon": {
+     "warn": 40000,
+     "fail": 60000
     }
    }
   },
@@ -174,6 +207,10 @@
     "scene": {
      "warn": 90000,
      "fail": 150000
+    },
+    "landmark": {
+     "warn": 300000,
+     "fail": 450000
     }
    }
   },
@@ -211,6 +248,14 @@
     "creature": {
      "warn": 30000,
      "fail": 80000
+    },
+    "landmark": {
+     "warn": 60,
+     "fail": 120
+    },
+    "weapon": {
+     "warn": 400000,
+     "fail": 1000000
     }
    }
   },
@@ -248,6 +293,14 @@
     "creature": {
      "warn": 4,
      "fail": 6
+    },
+    "landmark": {
+     "warn": 22,
+     "fail": 28
+    },
+    "weapon": {
+     "warn": 7,
+     "fail": 9
     }
    }
   },
@@ -285,6 +338,14 @@
     "creature": {
      "warn": 4,
      "fail": 8
+    },
+    "landmark": {
+     "warn": 600,
+     "fail": 1500
+    },
+    "weapon": {
+     "warn": 16,
+     "fail": 24
     }
    }
   },
@@ -322,6 +383,14 @@
     "creature": {
      "warn": 2048,
      "fail": 4096
+    },
+    "landmark": {
+     "warn": 2048,
+     "fail": 4096
+    },
+    "weapon": {
+     "warn": 2048,
+     "fail": 2048
     }
    }
   },
@@ -359,6 +428,14 @@
     "creature": {
      "warn": 4.2,
      "fail": 8.4
+    },
+    "landmark": {
+     "warn": 16.8,
+     "fail": 33.6
+    },
+    "weapon": {
+     "warn": 12.6,
+     "fail": 25.2
     }
    }
   },
@@ -396,6 +473,14 @@
     "creature": {
      "warn": 4,
      "fail": null
+    },
+    "landmark": {
+     "warn": 18,
+     "fail": null
+    },
+    "weapon": {
+     "warn": 16,
+     "fail": null
     }
    }
   },
@@ -422,7 +507,8 @@
     "default": {
      "warn": 0.5,
      "fail": 2.5
-    }
+    },
+    "weapon": null
    }
   },
   {
@@ -435,7 +521,8 @@
     "default": {
      "warn": 0.15,
      "fail": 1.5
-    }
+    },
+    "weapon": null
    }
   },
   {
@@ -455,7 +542,8 @@
     "default": {
      "warn": 0.35,
      "fail": 0.75
-    }
+    },
+    "weapon": null
    }
   },
   {
@@ -468,6 +556,10 @@
     "default": {
      "warn": 120,
      "fail": 300
+    },
+    "landmark": {
+     "warn": 2000,
+     "fail": 3000
     }
    }
   },
@@ -629,6 +721,10 @@
     "default": {
      "warn": 30000,
      "fail": 100000
+    },
+    "landmark": {
+     "warn": 60000,
+     "fail": 150000
     }
    }
   },

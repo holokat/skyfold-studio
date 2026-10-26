@@ -64,6 +64,7 @@ pub enum Sel {
 pub enum CharTab {
     #[default]
     Rig,
+    Motion,
     Animations,
     Moves,
     Export,
@@ -146,9 +147,9 @@ pub struct ViewData<'w> {
     pub history: ResMut<'w, crate::history::History>,
     pub store: Res<'w, crate::objects::ObjectStore>,
     pub orbit: ResMut<'w, crate::camera::OrbitCamera>,
-    pub view3: ResMut<'w, super::player::PlayerView>,
     pub lighting: Res<'w, crate::sky::Lighting>,
     pub walk: ResMut<'w, crate::walk::WalkState>,
+    pub specs: ResMut<'w, super::rigging::RigSpecs>,
 }
 
 impl ViewData<'_> {

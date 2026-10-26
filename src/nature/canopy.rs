@@ -37,6 +37,8 @@ pub struct Canopy {
     /// where the last full pass looked from, and whether chunks were left to build
     last_pass: Option<Vec3>,
     pending: bool,
+    /// the alien flora the chunks were coloured with (`super::alien`)
+    alien: Vec2,
 }
 
 /// Typical crown colour (linear) of a tree species seen from afar.
@@ -115,7 +117,7 @@ fn cover_at(ctx: &Ctx, p: Vec2) -> (f32, f32, [f32; 3]) {
             * scale;
         area += d * width * width * 0.6;
         h += d * e.height * scale;
-        let c = crown_color(kind);
+        let c = ctx.appearance.alien.recolor(crown_color(kind));
         for i in 0..3 {
             col[i] += c[i] * d;
         }
@@ -248,6 +250,12 @@ pub fn update_canopy(
             })
         })
         .clone();
+    let alien = ctx.appearance.alien.pack();
+    if canopy.alien != alien {
+        canopy.alien = alien;
+        let all: Vec<IVec2> = canopy.map.keys().copied().collect();
+        canopy.stale.extend(all);
+    }
     if canopy.last_end != start {
         // the hand-over distance moved: every chunk's visibility range changes
         canopy.last_end = start;

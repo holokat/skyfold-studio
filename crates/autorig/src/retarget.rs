@@ -74,6 +74,11 @@ pub fn world_of(sk: &Skeleton, local: &[Xform]) -> Vec<Mat4> {
     out
 }
 
+/// Bones that keep their own rest posture under any clip.
+fn keeps_posture(canon: &str) -> bool {
+    matches!(canon, "neck_01" | "Head")
+}
+
 fn rot_of(m: &Mat4) -> Quat {
     m.to_scale_rotation_translation().1.normalize()
 }
@@ -112,6 +117,12 @@ impl Retarget {
         // where a bone has no mapped child)
         let mut align: Vec<Quat> = vec![Quat::IDENTITY; target.bones.len()];
         for (b, bone) in target.bones.iter().enumerate() {
+            // the neck and head copy the source's turn from its rest as it is (not turned onto
+            // its rest direction first), so a stylised head on a forward-leaning neck keeps its
+            // own posture instead of being straightened out and tipped onto its chest
+            if tm[b].is_some_and(keeps_posture) {
+                continue;
+            }
             let inherited = bone.parent.map(|p| align[p]).unwrap_or(Quat::IDENTITY);
             let own = (|| {
                 let s = map[b]?;
@@ -314,5 +325,33 @@ mod tests {
         let s = target.find("upperarm_l").unwrap();
         let d = (w[h].w_axis - w[s].w_axis).truncate().normalize();
         assert!(d.dot(Vec3::X) > 0.999, "{d}");
+    }
+
+    #[test]
+    fn a_forward_leaning_neck_keeps_its_posture() {
+        // target: the template with its neck and head leaning 40° forward at rest (a big head)
+        let t = template();
+        let neck = t.find("neck_01").unwrap();
+        let pivot = t.pos("neck_01");
+        let lean = Quat::from_rotation_x(40f32.to_radians());
+        let rows: Vec<(String, Option<usize>, Vec3, Quat)> = t
+            .bones
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let under = i == neck || b.name == "Head";
+                let (p, r) = if under { (pivot + lean * (b.pos - pivot), lean * b.rot) } else { (b.pos, b.rot) };
+                (b.name.to_string(), b.parent, p, r)
+            })
+            .collect();
+        let target = humanoid::skeleton_from_world(&rows);
+        let r = Retarget::new(&t.skeleton(), &target);
+        let rest = Clip { name: "rest".into(), fps: 30.0, frames: 1, tracks: vec![] };
+        let w = world_of(&target, &r.pose(&rest, 0.0, PlayOpts::default()));
+        let h = target.find("Head").unwrap();
+        let rest_w = target.rest_world();
+        // the source standing at rest leaves the target's head where it was modelled
+        let (a, b) = (rot_of(&w[h]), rot_of(&rest_w[h]));
+        assert!(a.dot(b).abs() > 0.999, "head turned by {}°", a.angle_between(b).to_degrees());
     }
 }

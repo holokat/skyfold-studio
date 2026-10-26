@@ -206,8 +206,9 @@ fn request(
     } else {
         "application/json"
     };
+    // (max-filesize: no answer may fill memory; the biggest pack download is well under 4 GB)
     let mut config = format!(
-        "url = \"{url}\"\nheader = \"Accept: {accept}\"\nheader = \"User-Agent: SkyfoldStudio/{}\"\nlocation\n",
+        "url = \"{url}\"\nheader = \"Accept: {accept}\"\nheader = \"User-Agent: SkyfoldStudio/{}\"\nlocation\nmax-filesize = 4294967296\n",
         env!("CARGO_PKG_VERSION")
     );
     if let Some(t) = token {

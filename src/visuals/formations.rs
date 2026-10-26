@@ -22,13 +22,13 @@ use crate::objects::{FoliageExt, FoliageMaterial};
 use crate::procgen::meshes::{AssetKind, MeshData};
 use crate::trees::{TreeParts, TreeVariant};
 
-fn hash3(x: i32, y: i32, z: i32, seed: u32) -> f32 {
+pub(crate) fn hash3(x: i32, y: i32, z: i32, seed: u32) -> f32 {
     let h = crate::noise::hash2(x, y, seed) ^ (z as u32).wrapping_mul(0x9e37_79b9);
     (crate::noise::hash_u32(h) & 0xffff) as f32 / 65535.0
 }
 
 /// Smooth 3D value noise in 0..1.
-fn noise3(p: Vec3, seed: u32) -> f32 {
+pub(crate) fn noise3(p: Vec3, seed: u32) -> f32 {
     let i = p.floor();
     let f = p - i;
     let u = f * f * (Vec3::splat(3.0) - 2.0 * f);
@@ -51,7 +51,7 @@ fn noise3(p: Vec3, seed: u32) -> f32 {
 }
 
 /// Fractal noise in about -0.5..0.5.
-fn fbm3(p: Vec3, octaves: u32, seed: u32) -> f32 {
+pub(crate) fn fbm3(p: Vec3, octaves: u32, seed: u32) -> f32 {
     let (mut sum, mut amp, mut norm, mut q) = (0.0, 0.5, 0.0, p);
     for o in 0..octaves {
         sum += amp * (noise3(q, seed.wrapping_add(o * 131)) - 0.5);
@@ -330,7 +330,7 @@ fn lathe(s: &Shape, lod: u32) -> MeshData {
 }
 
 /// Smooth normals and flat colour into a `MeshData`.
-fn finish(pos: Vec<Vec3>, idx: Vec<u32>, color: [f32; 3]) -> MeshData {
+pub(crate) fn finish(pos: Vec<Vec3>, idx: Vec<u32>, color: [f32; 3]) -> MeshData {
     let mut nrm = vec![Vec3::ZERO; pos.len()];
     for t in idx.chunks_exact(3) {
         let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
@@ -555,7 +555,19 @@ pub fn build_crystals(
     foliage: &mut Assets<FoliageMaterial>,
     images: &mut Assets<Image>,
     parts: &mut std::collections::HashMap<AssetKind, TreeParts>,
-) {
+) -> crate::objects::glow::GlowMaterials {
+    // the same gradients without their violet (the body flatter, so a colour reads all the way
+    // up), for crystals given a colour of their own (`objects::glow` tints them)
+    let tint = crate::objects::glow::GlowMaterials::new(
+        images.add(gradient(
+            &[(0.0, [0.3; 3]), (0.3, [0.42; 3]), (1.0, [0.68; 3])],
+            true,
+        )),
+        images.add(gradient(
+            &[(0.0, [0.0; 3]), (0.45, [0.12; 3]), (1.0, [1.0; 3])],
+            true,
+        )),
+    );
     let albedo = gradient(
         &[
             (0.0, [0.04, 0.03, 0.07]),
@@ -609,6 +621,7 @@ pub fn build_crystals(
             ranges: [60.0, 600.0, 600.0, 600.0],
         },
     );
+    tint
 }
 
 #[cfg(test)]

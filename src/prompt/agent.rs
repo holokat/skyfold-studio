@@ -791,6 +791,19 @@ fn run_stub(
 // ------------------------------------------------------------------ Codex
 
 /// The `codex exec` arguments (the prompt comes on stdin).
+/// The variable Codex reads the MCP key from (`bearer_token_env_var`).
+const MCP_KEY_ENV: &str = "SKYFOLD_MCP_KEY";
+
+/// Writes a file only this user can read (it holds the MCP key).
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    std::io::Write::write_all(&mut opts.open(path)?, text.as_bytes())
+}
+
 pub fn codex_args(spec: &RunSpec) -> Vec<String> {
     let mut a: Vec<String> = [
         "exec",
@@ -823,6 +836,8 @@ pub fn codex_args(spec: &RunSpec) -> Vec<String> {
         "mcp_servers.world_builder.url=\"http://127.0.0.1:{}/mcp\"",
         spec.port
     ));
+    // the key comes from the environment (run_codex), never the command line
+    c(format!("mcp_servers.world_builder.bearer_token_env_var=\"{MCP_KEY_ENV}\""));
     c("mcp_servers.world_builder.default_tools_approval_mode=\"approve\"".into());
     c("mcp_servers.world_builder.tool_timeout_sec=300".into());
     c("mcp_servers.world_builder.startup_timeout_sec=30".into());
@@ -917,7 +932,10 @@ fn run_codex(
         spec.model
     )));
     let mut cmd = Command::new(&exe);
-    cmd.args(codex_args(spec)).current_dir(&spec.workdir);
+    cmd.args(codex_args(spec))
+        .current_dir(&spec.workdir)
+        .env(MCP_KEY_ENV, crate::mcp::key::get())
+        .env_remove("SKYFOLD_MARKET_TOKEN");
     let stdin = format!("{}\n\n{}", spec.instructions, spec.prompt);
     let out = spawn(cmd, &stdin, child)?;
     let mut last = String::new();
@@ -975,7 +993,11 @@ pub fn claude_args(spec: &RunSpec, mcp_config: &Path) -> Vec<String> {
         if spec.images.is_empty() {
             "mcp__world_builder".into()
         } else {
-            "mcp__world_builder,Read".into()
+            // Read only inside the run folder (the images), not the user's files or keys
+            format!(
+                "mcp__world_builder,Read(/{}/**)",
+                spec.workdir.to_string_lossy().trim_end_matches('/')
+            )
         },
         "--permission-mode".into(),
         "dontAsk".into(),
@@ -1045,14 +1067,16 @@ fn run_claude(
         .or_else(find_claude)
         .ok_or("Claude Code is not installed")?;
     let cfg = spec.workdir.join("mcp.json");
-    let conf = json!({ "mcpServers": { "world_builder": { "type": "http", "url": format!("http://127.0.0.1:{}/mcp", spec.port) } } });
-    std::fs::write(&cfg, conf.to_string()).map_err(|e| e.to_string())?;
+    let conf = json!({ "mcpServers": { "world_builder": { "type": "http", "url": format!("http://127.0.0.1:{}/mcp", spec.port), "headers": { "Authorization": crate::mcp::key::bearer() } } } });
+    write_private(&cfg, &conf.to_string()).map_err(|e| e.to_string())?;
     let _ = tx.send(AgentEvent::Status(format!(
         "Starting Claude Code ({})…",
         spec.model
     )));
     let mut cmd = Command::new(&exe);
-    cmd.args(claude_args(spec, &cfg)).current_dir(&spec.workdir);
+    cmd.args(claude_args(spec, &cfg))
+        .current_dir(&spec.workdir)
+        .env_remove("SKYFOLD_MARKET_TOKEN");
     let out = spawn(cmd, &spec.prompt, child)?;
     let mut session = spec.resume.clone();
     let mut done = false;
@@ -1558,6 +1582,8 @@ mod tests {
                 && s.contains("--ephemeral")
         );
         assert!(s.contains("mcp_servers.world_builder.url=\"http://127.0.0.1:7811/mcp\""));
+        assert!(s.contains("mcp_servers.world_builder.bearer_token_env_var=\"SKYFOLD_MCP_KEY\""));
+        assert!(!s.contains(crate::mcp::key::get()), "the key never goes on the command line");
         assert!(s.contains("default_tools_approval_mode=\"approve\""));
         assert!(s.contains("--disable shell_tool") && s.contains("--disable apps"));
         assert!(s.contains("-m gpt-6.1-sol") && s.contains("model_reasoning_effort=\"xhigh\""));
@@ -1615,6 +1641,7 @@ mod tests {
         );
         let i = a.iter().position(|x| x == "--tools").unwrap();
         assert_eq!(a[i + 1], "Read");
+        assert!(s.contains("--allowedTools mcp__world_builder,Read(//tmp/x/**)"), "{s}");
         let mut session = None;
         let ev = parse_claude_line(
             r#"{"type":"system","subtype":"init","session_id":"s1"}"#,

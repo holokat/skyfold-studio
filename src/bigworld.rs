@@ -239,6 +239,7 @@ impl Plugin for BigWorldPlugin {
                         "size_km": {"type": "integer", "enum": [2, 4, 8, 16]},
                         "cell": {"type": "number", "enum": [2, 4, 8]},
                         "biomes": {"type": "boolean", "description": "grow biomes, ground and nature (default true)"},
+                        "fields": {"type": "boolean", "description": "plant patchworks of farm fields on the flat lowland once the land has settled, like New world › Farm fields (default false; or call fields_auto later)"},
                         "climate": {"type": "string", "enum": Climate::ALL.map(|c| c.name().to_lowercase())}
                     },
                     "required": ["preset"]
@@ -1152,6 +1153,7 @@ pub fn decode_objects(b: &[u8]) -> Result<Vec<crate::objects::Placed>, String> {
             scale: f(7),
             stretch,
             locked: false,
+            glow: None,
         });
     }
     Ok(out)
@@ -1413,6 +1415,10 @@ fn mcp_generate(world: &mut World, args: Value) -> Result<Vec<McpContent>, Strin
         .unwrap_or(true)
         .then_some(climate);
     world.resource_mut::<BigWorld>().continent = p.clone();
+    if opt_arg::<bool>(&args, "fields")?.unwrap_or(false) {
+        let g = world.resource::<Terrain>().generation;
+        world.resource_mut::<crate::fields::Fields>().auto_pending = Some(g);
+    }
     let out = world
         .run_system_cached_with(
             generate_now,

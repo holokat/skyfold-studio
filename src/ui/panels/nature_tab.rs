@@ -70,12 +70,19 @@ pub(super) fn nature_left(ui: &mut Ui, s: &mut UiState, out: &mut UiOut) {
             "Paint a complete ecosystem: trees, undergrowth, rocks and fallen wood.",
         );
         let ps = presets();
-        let items: Vec<(&str, &str, &str)> = ps
+        // (the alien-world presets are offered in sci-fi worlds only)
+        let scifi = s.meta.kind == crate::world_kind::WorldKind::SciFi;
+        let shown: Vec<usize> = (0..ps.len()).filter(|&i| scifi || !ps[i].scifi).collect();
+        let items: Vec<(&str, &str, &str)> = shown
             .iter()
-            .map(|p| (brush_icon(p.name, p.biome), p.name, ""))
+            .map(|&i| (brush_icon(ps[i].name, ps[i].biome), ps[i].name, ""))
             .collect();
-        if let Some(i) = tool_grid(ui, 2, &items, s.scatter.preset) {
-            s.scatter.preset = Some(i);
+        let at = s
+            .scatter
+            .preset
+            .and_then(|p| shown.iter().position(|&i| i == p));
+        if let Some(k) = tool_grid(ui, 2, &items, at) {
+            s.scatter.preset = Some(shown[k]);
         }
     });
 }

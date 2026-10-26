@@ -24,8 +24,10 @@
 //! forest is painted trees and bushes over painted forest floor and grass, rock shows as the
 //! ground's own painted rock layer.
 //!
-//! The painted surfaces are part of the free, open-source studio (they ship with the app): any
-//! world can be hand-painted. Only the hand-painted models are sold (`crate::market`).
+//! The painted surfaces are part of the free, open-source studio: any world can be hand-painted.
+//! They download the first time a world turns hand-painted (`crate::content`, the
+//! `handpainted_surfaces` pack: `fetch_painted`); until they land the world shows its realistic
+//! textures, then repaints. Only the hand-painted models are sold (`crate::market`).
 //!
 //! MCP: `world_set_art_style` (one undo step); `world_info` reports `art_style`.
 
@@ -132,11 +134,26 @@ fn textures_root() -> PathBuf {
     PathBuf::from(crate::assets_path()).join("textures")
 }
 
-/// The painted twin of a texture under `assets/textures/` (whether or not it exists).
+/// The painted twin of a texture under `assets/textures/` (whether or not it exists). Either
+/// may come from a downloaded content pack (`crate::content`) instead of the app: the twin is the
+/// app's copy when it has one, else the downloaded one, else the app's path (missing).
 pub fn painted_twin(path: &Path) -> Option<PathBuf> {
     let root = textures_root();
-    let rest = path.strip_prefix(&root).ok()?;
-    (!rest.starts_with("handpainted")).then(|| root.join("handpainted").join(rest))
+    let packs = crate::paths::packs_dir().join("textures");
+    let rest = path
+        .strip_prefix(&root)
+        .or_else(|_| path.strip_prefix(&packs))
+        .ok()?;
+    if rest.starts_with("handpainted") {
+        return None;
+    }
+    let bundled = root.join("handpainted").join(rest);
+    let downloaded = packs.join("handpainted").join(rest);
+    Some(if !bundled.exists() && downloaded.exists() {
+        downloaded
+    } else {
+        bundled
+    })
 }
 
 /// The file to load for the texture `path` (under `assets/textures/`) in style `art`: its painted
@@ -173,7 +190,7 @@ pub fn texture_rel(rel: &str, art: ArtStyle) -> String {
         && !rel.starts_with("textures/handpainted/")
     {
         let painted = format!("textures/handpainted/{}", &rel["textures/".len()..]);
-        if Path::new(&crate::assets_path()).join(&painted).is_file() {
+        if crate::paths::asset_file(&painted).is_file() {
             return painted;
         }
     }
@@ -183,7 +200,7 @@ pub fn texture_rel(rel: &str, art: ArtStyle) -> String {
 // ------------------------------------------------------------------ what the builder offers
 
 /// Procedural plants whose textures follow the world's style (painted bark and leaf cards in a
-/// hand-painted world): they belong to every style.
+/// hand-painted world) and the glowing crystals: they belong to every style.
 pub fn follows_style(kind: AssetKind) -> bool {
     use AssetKind::*;
     matches!(
@@ -214,6 +231,8 @@ pub fn follows_style(kind: AssetKind) -> bool {
             | WildStrawberry
             | Blueberry
             | Blackberry
+            | Tulip
+            | Crystals
     )
 }
 
@@ -336,7 +355,7 @@ pub struct ArtStylePlugin;
 impl Plugin for ArtStylePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(First, sync_current)
-            .add_systems(Update, (apply_undo, sync_place_style));
+            .add_systems(Update, (apply_undo, sync_place_style, fetch_painted));
         app.mcp_tool(McpTool {
             name: "world_set_art_style",
             description: "Set the world's art style: `photoreal` (Realistic: CC0 photoscanned ground, rock, bark and materials) or `handpainted` (Hand-painted: the studio's free painted ground, rock, bark, leaves, materials and ore surfaces). \
@@ -346,6 +365,15 @@ An untouched Natural look also gets a painted baseline with the switch (soft ton
             input_schema: || json!({ "type": "object", "properties": { "style": { "type": "string", "enum": ["photoreal", "handpainted"], "description": "photoreal (Realistic) or handpainted (Hand-painted)" } }, "required": ["style"] }),
             run: mcp_set,
         });
+    }
+}
+
+/// A hand-painted world (picked, loaded, made or undone to) fetches the painted surfaces if this
+/// computer doesn't have them yet; a failed download waits for the user to try again.
+fn fetch_painted(meta: Res<WorldMeta>) {
+    use crate::content::{HANDPAINTED, download, installed, job};
+    if meta.art_style.painted() && job(HANDPAINTED).is_none() && !installed(HANDPAINTED) {
+        let _ = download(HANDPAINTED);
     }
 }
 

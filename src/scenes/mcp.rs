@@ -1,4 +1,4 @@
-//! Scenes over MCP: list, save (from a loop, ids or a set), place, export.
+//! Scenes over MCP: list, save (from a loop, ids or a set), place, export, import, rename, delete.
 
 use bevy::prelude::*;
 use serde_json::{Value, json};
@@ -64,6 +64,131 @@ pub fn register(app: &mut App) {
         },
         run: export,
     });
+    app.mcp_tool(McpTool {
+        name: "scenes_import",
+        description: "Open a scene file (like Objects › Scenes › Open a scene file…): `path` to a scene .zip exported from Skyfold Studio (scenes_export). It joins the user's scenes, its own models copied into the project. Returns the scene id; place it with scenes_place.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "absolute path to the scene .zip" }
+                },
+                "required": ["path"]
+            })
+        },
+        run: import,
+    });
+    app.mcp_tool(McpTool {
+        name: "scenes_rename",
+        description: "Rename one of the user's saved scenes (an id from scenes_list) to `name`. Its id stays the same.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "scene": { "type": "string", "description": "scene id" },
+                    "name": { "type": "string" }
+                },
+                "required": ["scene", "name"]
+            })
+        },
+        run: rename,
+    });
+    app.mcp_tool(McpTool {
+        name: "scenes_delete",
+        description: "Delete one of the user's saved scenes (an id from scenes_list) from their library. Copies already placed in the world stay. Ready-made scenes from asset packs can't be deleted. Can't be undone.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "scene": { "type": "string", "description": "scene id" }
+                },
+                "required": ["scene"]
+            })
+        },
+        run: delete,
+    });
+}
+
+fn scene_arg(args: &Value) -> Result<&str, String> {
+    args.get("scene")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing `scene`".to_string())
+}
+
+/// The Scenes tab reads the library again.
+fn reload(world: &mut World) {
+    if let Some(mut s) = world.get_resource_mut::<super::Scenes>() {
+        s.reload();
+    }
+}
+
+fn import(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    let path = std::path::PathBuf::from(
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or("missing `path`")?,
+    );
+    if !path.is_absolute() {
+        return Err("`path` must be absolute".into());
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+    {
+        return Err("a scene file ends in .zip".into());
+    }
+    if !path.is_file() {
+        return Err(format!("no file at {}", path.display()));
+    }
+    let id = file::import_zip(&path).map_err(|e| format!("couldn't open that scene: {e}"))?;
+    reload(world);
+    let scene = file::read(&id).ok_or("the scene was opened but can't be read back")?;
+    let sz = scene.size();
+    Ok(vec![McpContent::Json(
+        json!({ "scene": id, "name": scene.name, "pieces": scene.pieces.len(), "size_m": [sz.x.round(), sz.y.round()], "models": scene.models.len(), "note": "in the user's Objects › Scenes; place it with scenes_place" }),
+    )])
+}
+
+fn rename(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    let id = scene_arg(&args)?;
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err("give the scene a `name`".into());
+    }
+    let mut sc = file::read(id).ok_or_else(|| format!("no scene `{id}` (scenes_list)"))?;
+    let old = std::mem::replace(&mut sc.name, name.clone());
+    file::write(&sc).map_err(|e| format!("couldn't rename it: {e}"))?;
+    reload(world);
+    Ok(vec![McpContent::Text(format!(
+        "Renamed scene `{id}` from \"{old}\" to \"{name}\"."
+    ))])
+}
+
+fn delete(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    let id = scene_arg(&args)?;
+    let sc = file::read(id).ok_or_else(|| {
+        format!("no saved scene `{id}` (scenes_list; ready-made scenes can't be deleted)")
+    })?;
+    file::delete(id)?;
+    if let Some(mut s) = world.get_resource_mut::<super::Scenes>() {
+        // (as the tab does: a scene being placed, or armed for delete, is let go)
+        if s.mode == super::Mode::Place(id.to_string()) {
+            s.mode = super::Mode::Off;
+        }
+        if s.confirm_delete.as_deref() == Some(id) {
+            s.confirm_delete = None;
+        }
+        s.reload();
+    }
+    Ok(vec![McpContent::Text(format!(
+        "Deleted scene `{id}` \"{}\" from the user's scenes (placed copies stay).",
+        sc.name
+    ))])
 }
 
 fn list(world: &mut World, _args: Value) -> Result<Vec<McpContent>, String> {

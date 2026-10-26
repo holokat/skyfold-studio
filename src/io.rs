@@ -72,6 +72,9 @@ struct WorldDoc {
     /// before it: realistic; a dungeon's map: its dungeon's art)
     #[serde(default)]
     art_style: Option<crate::art_style::ArtStyle>,
+    /// fantasy or scifi (worlds saved before it: fantasy)
+    #[serde(default)]
+    world_kind: Option<crate::world_kind::WorldKind>,
     zones: Vec<Zone>,
     rivers: Vec<River>,
     lakes: Vec<Lake>,
@@ -125,6 +128,16 @@ struct WorldDoc {
     /// keep them in `objects`).
     #[serde(default)]
     objects_file: Option<String>,
+    /// placed crystals' own colour and light, by object id (`objects::glow`)
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    object_glow: std::collections::BTreeMap<u64, crate::objects::glow::Glow>,
+    /// set-piece / town group of each grouped object, by object id (`placement::group`;
+    /// objects.bin has no column for it)
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    object_groups: std::collections::BTreeMap<u64, u64>,
+    /// ids of locked objects (`placement::lock`; objects.bin has no column for it)
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    object_locked: std::collections::BTreeSet<u64>,
     /// procedural nature: density maps and hand removals (`nature.bin`); version 0 = an old world
     /// whose nature objects are converted on load
     #[serde(default)]
@@ -908,6 +921,13 @@ pub fn new_world_from(data: &mut WorldData, heights: Vec<f32>, res: usize, cell:
     data.store.clear();
     *data.nature = default();
     *data.appearance = default();
+    // the ground palette and nature amounts belong to the world: a Sci-Fi world's red ground and
+    // sparse grass must not carry over into the next (Fantasy) world
+    *data.amounts = default();
+    *data.layer_choices = default();
+    data.ed.layer_surface = std::array::from_fn(|i| {
+        crate::terrain::layers::Layer::from_index(i).default_surface()
+    });
     data.nature_pending.0 = None;
     *data.water = WaterBodies {
         dirty: true,
@@ -960,6 +980,7 @@ pub fn new_world_from(data: &mut WorldData, heights: Vec<f32>, res: usize, cell:
     data.meta.path = None;
     data.meta.seed = seed;
     data.meta.art_style = Default::default();
+    data.meta.kind = Default::default();
     data.meta.dirty = true;
     let size = res as f32 * cell;
     data.orbit
@@ -1098,7 +1119,16 @@ pub fn load_world(dir: &Path, data: &mut WorldData) -> Result<(), String> {
         objects
     };
     let count = objects.len();
-    for o in objects {
+    for mut o in objects {
+        if let Some(g) = doc.object_glow.get(&o.id) {
+            o.glow = Some(g.sanitized());
+        }
+        if let Some(&g) = doc.object_groups.get(&o.id) {
+            o.group = g;
+        }
+        if doc.object_locked.contains(&o.id) {
+            o.locked = true;
+        }
         data.store.insert(o);
     }
     info!(
@@ -1186,6 +1216,7 @@ pub fn load_world(dir: &Path, data: &mut WorldData) -> Result<(), String> {
         }
         _ => crate::art_style::ArtStyle::Realistic,
     });
+    data.meta.kind = doc.world_kind.unwrap_or_default();
     data.meta.path = Some(dir.to_path_buf());
     data.meta.dirty = bridges_reconciled;
     let c = doc.camera;
@@ -1222,7 +1253,7 @@ pub fn imported_entry(imp: &ImportedAsset) -> LibraryEntry {
 }
 
 /// Copies a glTF/GLB (and any files a .gltf references) into `assets/imported/`.
-fn import_model(src: &Path) -> Result<ImportedAsset, String> {
+pub(crate) fn import_model(src: &Path) -> Result<ImportedAsset, String> {
     let name = src
         .file_name()
         .ok_or("no file name")?
@@ -1457,6 +1488,7 @@ pub fn export_world(dir: &Path, data: &WorldData) -> Result<(), String> {
         })).collect::<Vec<_>>(),
         "lighting": &*data.lighting,
         "art_style": data.meta.art_style.id(),
+        "world_kind": data.meta.kind.id(),
         "nature_appearance": data.appearance.sanitized(),
         "wind": {"direction_xz": [data.wind.dir.x, data.wind.dir.y], "speed_mps": data.wind.speed, "gustiness": data.wind.gustiness},
         "graphics": {
@@ -1504,6 +1536,7 @@ mod tests {
             building_materials: default(),
             terrain_layers: default(),
             art_style: None,
+            world_kind: None,
             zones: vec![],
             rivers: vec![],
             lakes: vec![],
@@ -1525,6 +1558,9 @@ mod tests {
             effects_studio: None,
             objects: vec![],
             objects_file: None,
+            object_glow: default(),
+            object_groups: default(),
+            object_locked: default(),
             procedural: default(),
             imports: vec![],
             layer_surface: vec![],

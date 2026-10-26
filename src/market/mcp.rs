@@ -13,20 +13,68 @@ pub fn register(app: &mut App) {
     app.mcp_tool(McpTool {
         name: "market_packs",
         description: "The asset packs: each pack's id, name, style, publisher, description, price (null when free), status for this account (free, owned or locked), how many assets it has and its free sample asset ids (usable even while the pack is locked). \
-Assets of a locked pack can't be placed or previewed (objects_library lists only usable ones). Read-only: the user gets packs in the editor (Objects › Asset packs), and no tool can buy or unlock one, so when a locked pack would suit, tell the user what it offers and what it costs. Filter by `style`.",
+Assets of a locked pack can't be placed or previewed (objects_library lists only usable ones). Read-only: the user gets packs in the editor's Marketplace window (market_view opens it on one), and no tool can buy or unlock one, so when a locked pack would suit, tell the user what it offers and what it costs. Filter by `style`.",
         input_schema: || json!({ "type": "object", "properties": { "style": { "type": "string", "description": "only packs of this style, e.g. photoreal or handpainted" } } }),
         run: packs,
     });
     app.mcp_tool(McpTool {
         name: "market_listings",
-        description: "Community listings published on skyfoldstudio.com (the Skyfold marketplace website): each listing's id, title, kind (asset: one model, pack: several), category, price (null when free), creator, rating and its web page. \
-Read-only: the user gets listings in the editor (Objects › Asset packs › Community); no tool can acquire one, so when a listing would suit, tell the user its title, price and page. `q` searches titles and descriptions; `cursor` (from next_cursor) continues.",
+        description: "Community listings published on skyfoldstudio.com (the Skyfold marketplace website): each listing's id, title, kind (asset: one model, pack: several), category, price (null when free), creator, rating, asset count, tags, its pictures (images, cover first) and its web page. \
+Read-only: the user gets listings in the editor's Marketplace window (market_view opens it on one); no tool can acquire one, so when a listing would suit, tell the user its title, price and page. `q` searches titles and descriptions; `cursor` (from next_cursor) continues.",
         input_schema: || json!({ "type": "object", "properties": {
             "q": { "type": "string", "description": "search words" },
             "cursor": { "type": "string", "description": "next_cursor of the previous page" },
         } }),
         run: listings,
     });
+    app.mcp_tool(McpTool {
+        name: "market_view",
+        description: "Shows the user the editor's Marketplace window, where they browse and get asset packs and community listings with their pictures: `page` browse (default) or library (their packs), optionally opened on one `pack` (a market_packs id) or `listing` (a market_listings id), or with a `search`. `close`: true closes it. Only changes what's on screen; nothing can be bought or unlocked from here.",
+        input_schema: || json!({ "type": "object", "properties": {
+            "page": { "type": "string", "enum": ["browse", "library"] },
+            "pack": { "type": "string", "description": "a pack id to open its page" },
+            "listing": { "type": "string", "description": "a listing id to open its page" },
+            "search": { "type": "string" },
+            "close": { "type": "boolean" },
+        } }),
+        run: view,
+    });
+}
+
+/// `market_view`: opens (or closes) the Marketplace window on a page.
+fn view(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    use super::view::{Item, View};
+    let page = crate::mcp_tools::opt_arg::<String>(&args, "page")?;
+    let pack = crate::mcp_tools::opt_arg::<String>(&args, "pack")?;
+    let listing = crate::mcp_tools::opt_arg::<String>(&args, "listing")?;
+    let search = crate::mcp_tools::opt_arg::<String>(&args, "search")?;
+    let close = crate::mcp_tools::opt_arg::<bool>(&args, "close")?.unwrap_or(false);
+    if let Some(id) = &pack
+        && super::snapshot().pack(id).is_none()
+    {
+        return Err(format!("no pack `{id}` (market_packs lists them)"));
+    }
+    let mut ui = world
+        .get_resource_mut::<super::ui::MarketUi>()
+        .ok_or("the editor's interface isn't running")?;
+    if close {
+        ui.open = false;
+        ui.detail = None;
+        return Ok(vec![McpContent::Text("The Marketplace is closed.".into())]);
+    }
+    ui.open = true;
+    ui.view = if page.as_deref() == Some("library") {
+        View::Library
+    } else {
+        View::Browse
+    };
+    ui.detail = pack.map(Item::Pack).or(listing.map(Item::Listing));
+    ui.shot = 0;
+    if let Some(q) = search {
+        ui.search = q.clone();
+        ui.applied = q;
+    }
+    Ok(vec![McpContent::Text("The Marketplace is open for the user.".into())])
 }
 
 /// `market_listings`: fetched off the main thread, answered when it arrives.
@@ -46,11 +94,13 @@ fn listings(_world: &mut World, args: Value) -> Result<Vec<McpContent>, String> 
                         "id": l.id, "title": l.title, "kind": if l.kind.is_empty() { "asset" } else { l.kind.as_str() }, "category": l.category,
                         "description": l.description, "price": if l.is_free() { Value::Null } else { json!({ "label": l.price_label(), "amount_minor": l.price_cents, "currency": l.currency }) },
                         "creator": l.by(), "official": l.official(), "rating": if l.rating_count > 0 { json!({ "average": l.rating_average, "count": l.rating_count }) } else { Value::Null },
+                        "category_label": l.category_label, "featured": l.featured, "tags": l.tags, "asset_count": l.piece_count,
+                        "images": l.pictures().iter().map(|u| if u.starts_with('/') { format!("{base}{u}") } else { u.clone() }).collect::<Vec<_>>(),
                         "page": l.page_url(&base),
                     })
                 })
                 .collect();
-            let note = if list.is_empty() { "No listings match (or none are published yet)." } else { "Listings are added in the editor by the user (Objects › Asset packs › Community); paid ones need their Skyfold sign-in." };
+            let note = if list.is_empty() { "No listings match (or none are published yet)." } else { "Listings are added in the editor by the user (the Marketplace window); paid ones need their Skyfold sign-in." };
             vec![McpContent::Json(json!({ "listings": list, "next_cursor": next, "note": note }))]
         });
         *fill.lock().unwrap_or_else(|p| p.into_inner()) = Some(r);

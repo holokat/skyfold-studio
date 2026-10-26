@@ -85,6 +85,7 @@ enum Act {
     Help,
     Mcp,
     Gallery,
+    Market,
     Mute,
     Panels,
     /// `super::search::SETTINGS[i]`
@@ -244,7 +245,7 @@ fn items(s: &UiState) -> Vec<Item> {
             });
         }
     }
-    let acts: [(&str, &'static str, &'static str, Act); 16] = [
+    let acts: [(&str, &'static str, &'static str, Act); 17] = [
         ("New world…", "PageAdd", "⌘N", Act::NewWorld),
         ("Open…", "FolderOpen", "⌘O", Act::Ui(UiAction::Open)),
         ("Save", "FloppyDisk1", "⌘S", Act::Ui(UiAction::Save)),
@@ -273,6 +274,7 @@ fn items(s: &UiState) -> Vec<Item> {
         ("Help & shortcuts", "QuestionmarkCircle", "H", Act::Help),
         ("Connect an agent (MCP)", "Agent", "", Act::Mcp),
         ("Asset gallery", "LayoutGrid1", "", Act::Gallery),
+        ("Marketplace: asset packs & listings", "Store1", "", Act::Market),
         ("Undo", "ArrowUndoUp", "⌘Z", Act::Edit(EditorAction::Undo)),
         (
             "Redo",
@@ -468,6 +470,7 @@ fn run(act: Act, s: &mut UiState, out: &mut UiOut, ctx: &egui::Context) {
         Act::Help => s.ed.show_help = true,
         Act::Mcp => s.mcp.show_panel = true,
         Act::Gallery => s.gallery.open = true,
+        Act::Market => s.market.open = true,
         Act::Mute => s.audio.muted = !s.audio.muted,
         Act::Setting(i) => super::search::go(ctx, s, &super::search::SETTINGS[i]),
         Act::LabsCharacters => {

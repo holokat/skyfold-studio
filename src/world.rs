@@ -777,6 +777,8 @@ pub struct WorldMeta {
     /// Realistic or hand-painted: which surfaces the engine paints with and which assets the
     /// builder offers (`crate::art_style`; saved in world.json, Realistic by default).
     pub art_style: crate::art_style::ArtStyle,
+    /// Fantasy or Sci-Fi (`crate::world_kind`; saved in world.json, Fantasy by default).
+    pub kind: crate::world_kind::WorldKind,
 }
 
 impl Default for WorldMeta {
@@ -788,6 +790,7 @@ impl Default for WorldMeta {
             dirty: false,
             revision: 0,
             art_style: Default::default(),
+            kind: Default::default(),
         }
     }
 }

@@ -286,9 +286,8 @@ fn init_materials(
 /// Loads one kind's surface (albedo + height, normal + roughness + AO) with full mip chains, in
 /// the world's art style (the painted library material in a hand-painted world).
 fn load_surface(id: &str, art: crate::art_style::ArtStyle) -> Result<(Image, Image), String> {
-    let dir = crate::terrain::textures::library_dir().join(id);
-    let [albedo, normal] =
-        crate::art_style::textures([dir.join("albedo.png"), dir.join("normal.png")], art);
+    let f = |name: &str| crate::terrain::textures::library_file(id, name);
+    let [albedo, normal] = crate::art_style::textures([f("albedo.png"), f("normal.png")], art);
     let a = image::open(albedo)
         .map_err(|e| format!("{id}/albedo.png: {e}"))?
         .to_rgba8();

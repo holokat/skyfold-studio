@@ -160,6 +160,18 @@ pub fn library_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(crate::assets_path()).join("textures/terrain_library")
 }
 
+/// One file of a library material ("albedo.png"): the app's, or a downloaded content pack's
+/// (`crate::content`; the app keeps every material's swatch).
+pub fn library_file(id: &str, name: &str) -> std::path::PathBuf {
+    crate::paths::asset_file(&format!("textures/terrain_library/{id}/{name}"))
+}
+
+/// Whether a library material's files are on this computer (false for a content pack's
+/// material that hasn't been downloaded yet).
+pub fn library_available(id: &str) -> bool {
+    crate::content::available(&format!("textures/terrain_library/{id}"))
+}
+
 fn read_library() -> Vec<LibraryMaterial> {
     #[derive(serde::Deserialize)]
     struct Doc {
@@ -180,8 +192,9 @@ pub struct TerrainTextures {
     pub tiles: [f32; LAYER_COUNT],
     /// bumped whenever new arrays are loaded (UI swatches refresh)
     pub revision: u32,
-    /// the choices and surface style (`art_style::surfaces`) the current arrays were built from
-    applied: (TerrainLayerChoices, crate::art_style::ArtStyle),
+    /// the choices and surface style (`art_style::surfaces`) the current arrays were built from,
+    /// and the content packs installed then (`content::revision`)
+    applied: (TerrainLayerChoices, crate::art_style::ArtStyle, u32),
     /// Swatch previews for the UI (RGBA8, 128²), if available.
     pub swatches: Vec<Option<(u32, u32, Vec<u8>)>>,
     pub status: TextureStatus,
@@ -265,7 +278,11 @@ fn start_loading(
         return;
     }
     let art = crate::art_style::surfaces(meta.art_style);
-    tex.applied = (TerrainLayerChoices::default(), art);
+    tex.applied = (
+        TerrainLayerChoices::default(),
+        art,
+        crate::content::revision(),
+    );
     spawn_load(
         &mut commands,
         &mut tex,
@@ -303,13 +320,14 @@ fn reload_on_choice(
     meta: Res<crate::world::WorldMeta>,
 ) {
     let art = crate::art_style::surfaces(meta.art_style);
+    let rev = crate::content::revision();
     if task.is_some()
         || tex.status != TextureStatus::Ready
-        || (*choices == tex.applied.0 && art == tex.applied.1)
+        || (*choices == tex.applied.0 && art == tex.applied.1 && rev == tex.applied.2)
     {
         return;
     }
-    tex.applied = (choices.clone(), art);
+    tex.applied = (choices.clone(), art, rev);
     spawn_load(
         &mut commands,
         &mut tex,
@@ -525,21 +543,16 @@ fn layer_files(
     i: usize,
     choices: &TerrainLayerChoices,
     library: &[LibraryMaterial],
-    lib_dir: &Path,
     art: crate::art_style::ArtStyle,
 ) -> LayerFiles {
     if let Some(m) = library
         .iter()
         .find(|m| !choices.get(i).is_empty() && m.id == choices.get(i))
     {
-        let d = lib_dir.join(&m.id);
-        if d.join("albedo.png").is_file() && d.join("normal.png").is_file() {
+        let f = |name: &str| library_file(&m.id, name);
+        if f("albedo.png").is_file() && f("normal.png").is_file() {
             let [albedo, normal, swatch] = crate::art_style::textures(
-                [
-                    d.join("albedo.png"),
-                    d.join("normal.png"),
-                    d.join("swatch.png"),
-                ],
+                [f("albedo.png"), f("normal.png"), f("swatch.png")],
                 art,
             );
             return LayerFiles {
@@ -619,9 +632,8 @@ fn load_all(
     art: crate::art_style::ArtStyle,
 ) -> Result<Loaded, String> {
     let t0 = std::time::Instant::now();
-    let lib_dir = library_dir();
     let mut files: Vec<LayerFiles> = (0..LAYER_COUNT)
-        .map(|i| layer_files(dir, i, choices, library, &lib_dir, art))
+        .map(|i| layer_files(dir, i, choices, library, art))
         .collect();
     let mut tiles = LAYER_TILE;
     // the arrays take the largest layer's size (painted library materials are smaller than the

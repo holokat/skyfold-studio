@@ -2743,6 +2743,7 @@ pub fn patch(
     lod: u8,
     model: Option<&super::assets::CropModel>,
     reg: &Regions,
+    colour: Option<u8>,
 ) -> Patch {
     let lay = rows(crop);
     let nrows = (TILE / lay.row).round().max(1.0) as u32;
@@ -2826,7 +2827,7 @@ pub fn patch(
             );
             let v = match crop {
                 // tulips: the colour changes every few rows (bands across the field)
-                Crop::Tulips => (r / 4) % TULIP_COLOURS.len() as u32,
+                Crop::Tulips => colour.map_or((r / 4) % TULIP_COLOURS.len() as u32, u32::from),
                 _ => rng.below(lay.variants),
             };
             let (yaw, k) = match crop {
@@ -2898,11 +2899,11 @@ fn far_look(crop: Crop) -> &'static [(&'static str, f32)] {
 /// when it has them, so the far field matches its plants. Every vertex finds its own ground;
 /// `uv0.y` = -1 marks it for the shader (it rises out of the ground past the plants' draw
 /// distance instead of fading).
-pub fn canopy(crop: Crop, means: &Regions) -> Patch {
+pub fn canopy(crop: Crop, means: &Regions, colour: Option<u8>) -> Patch {
     use Crop::*;
     // the cheap crops are their own far view
     if matches!(crop, Tea | Plowed) {
-        let mut p = patch(crop, 2, None, &Regions::new());
+        let mut p = patch(crop, 2, None, &Regions::new(), None);
         p.uv0.iter_mut().for_each(|u| *u = [0.0, -1.0]);
         return p;
     }
@@ -3002,7 +3003,8 @@ pub fn canopy(crop: Crop, means: &Regions) -> Patch {
         for r in 0..nrows {
             let z = (r as f32 + 0.5) * row;
             let col = if crop == Tulips {
-                let (cr, cg, cb) = TULIP_COLOURS[((r / 4) % TULIP_COLOURS.len() as u32) as usize];
+                let band = colour.map_or(r / 4, u32::from);
+                let (cr, cg, cb) = TULIP_COLOURS[(band % TULIP_COLOURS.len() as u32) as usize];
                 c(cr, cg, cb)
             } else {
                 base
@@ -3037,6 +3039,8 @@ pub(crate) struct FloraGeometry {
     pub sway: Vec<f32>,
     pub idx: Vec<u32>,
     pub height: f32,
+    /// linear vertex colour: the paint's tint over the atlas, a plain part's own colour
+    pub color: Vec<[f32; 3]>,
 }
 
 /// Field recipes that also make botanically useful, root-centred small flora.
@@ -3044,7 +3048,12 @@ pub(crate) struct FloraGeometry {
 pub(crate) enum FieldFlora {
     Lavender,
     WildStrawberry,
+    /// a single tulip in one of the field's colours (`TULIP_COLOURS`, wrapping)
+    Tulip(u8),
 }
+
+/// The colours a tulip comes in (the field's bands, a single tulip's variants).
+pub(crate) const TULIP_COLOUR_NAMES: [&str; 6] = ["red", "yellow", "pink", "white", "purple", "orange"];
 
 /// Makes one field-grown plant as ordinary foliage geometry.
 ///
@@ -3062,16 +3071,30 @@ pub(crate) fn flora_geometry(
     let plant = match kind {
         FieldFlora::Lavender => lavender(&mut rng, lod, regions),
         FieldFlora::WildStrawberry => strawberry(&mut rng, lod, regions),
+        FieldFlora::Tulip(colour) => tulip(&mut rng, lod, colour as usize, regions),
     };
+    // plain-colour parts sample the `plain` region's middle (a neutral, opaque texel) when the
+    // caller names one; their colour is in the vertex colour
+    let plain = regions
+        .get("plain")
+        .map(|r| [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]);
     FloraGeometry {
         pos: plant.pos.iter().map(|p| p.to_array()).collect(),
         nor: plant.nor.iter().map(|n| n.to_array()).collect(),
         // Plant writes its selected atlas rectangle into tangent.xy.  Those are ordinary UVs;
         // tangent.zw belongs solely to the field shader and is discarded here.
-        uv: plant.tan.iter().map(|t| [t[0], t[1]]).collect(),
+        uv: plant
+            .tan
+            .iter()
+            .map(|t| match plain {
+                Some(uv) if t[2] < kind::ATLAS => uv,
+                _ => [t[0], t[1]],
+            })
+            .collect(),
         sway: plant.flex,
         idx: plant.idx,
         height: plant.height,
+        color: plant.col.iter().map(|c| c.to_array()).collect(),
     }
 }
 
@@ -3104,7 +3127,7 @@ mod tests {
             for crop in Crop::ALL {
                 let mut prev = usize::MAX;
                 for lod in 0..3u8 {
-                    let p = patch(crop, lod, None, &reg);
+                    let p = patch(crop, lod, None, &reg, None);
                     let n = p.pos.len();
                     assert!(n > 0, "{crop:?} lod {lod}: empty");
                     let budget = [210_000, 90_000, 40_000][lod as usize];
@@ -3143,8 +3166,8 @@ mod tests {
                     prev = n;
                 }
                 assert_eq!(
-                    patch(crop, 0, None, &reg).pos,
-                    patch(crop, 0, None, &reg).pos
+                    patch(crop, 0, None, &reg, None).pos,
+                    patch(crop, 0, None, &reg, None).pos
                 );
             }
         }

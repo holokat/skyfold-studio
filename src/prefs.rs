@@ -45,7 +45,17 @@ pub fn set(key: &str, value: Value) {
     all.insert(key.to_string(), value);
     let p = path();
     let tmp = p.with_extension("json.tmp");
-    if std::fs::write(&tmp, Value::Object(all).to_string()).is_ok() {
+    if write_private(&tmp, &Value::Object(all).to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, &p);
     }
+}
+
+/// Readable by this user only: the prefs hold the marketplace token and AI API keys.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    std::io::Write::write_all(&mut opts.open(path)?, text.as_bytes())
 }

@@ -273,6 +273,8 @@ pub struct Snapshot {
     pub dungeons: Result<Vec<crate::dungeons::export::DungeonExport>, String>,
     /// the placed objects' fires (`crate::flames`: fire anchors, painted flames, campfires)
     pub fires: Vec<crate::flames::Fire>,
+    /// the placed objects' light fixtures (`crate::fixture_lights`: their models' `light` anchors)
+    pub lights: Vec<crate::fixture_lights::FixtureLight>,
 }
 
 pub fn snapshot(world: &World) -> Snapshot {
@@ -348,6 +350,7 @@ pub fn snapshot(world: &World) -> Snapshot {
     let orbit = world.resource::<crate::camera::OrbitCamera>();
     let meta = world.resource::<crate::world::WorldMeta>();
     let fires = crate::flames::export_fires(world, &objects, None);
+    let lights = crate::fixture_lights::export_lights(world, &objects);
     Snapshot {
         name: meta.name.clone(),
         seed: meta.seed,
@@ -402,6 +405,7 @@ pub fn snapshot(world: &World) -> Snapshot {
         navmesh: vec![],
         dungeons,
         fires,
+        lights,
         characters: crate::characters::export::snapshot(world),
     }
 }
@@ -723,7 +727,6 @@ pub fn layer_texture(s: &Snapshot, i: usize, size: u32) -> Result<LayerTex, Stri
 
 /// Layer `i` wearing library material `choice` ("" = the built-in one).
 fn layer_texture_with(s: &Snapshot, choice: &str, i: usize, size: u32) -> Result<LayerTex, String> {
-    let lib_dir = crate::terrain::textures::library_dir();
     let chosen = s
         .library
         .iter()
@@ -731,9 +734,8 @@ fn layer_texture_with(s: &Snapshot, choice: &str, i: usize, size: u32) -> Result
     // (a hand-painted world exports its painted layers: `art_style`)
     let art = crate::art_style::current();
     let from_lib = chosen.and_then(|m| {
-        let d = lib_dir.join(&m.id);
-        let [albedo, normal] =
-            crate::art_style::textures([d.join("albedo.png"), d.join("normal.png")], art);
+        let f = |name: &str| crate::terrain::textures::library_file(&m.id, name);
+        let [albedo, normal] = crate::art_style::textures([f("albedo.png"), f("normal.png")], art);
         Some((
             image::open(albedo).ok()?.to_rgba8(),
             image::open(normal).ok()?.to_rgba8(),
@@ -955,6 +957,32 @@ pub struct ModelOut {
     pub collider: Collider,
     pub triangles: usize,
     pub bytes: usize,
+    /// a weapon of the weapons pack (its glTF root carries a `weapon` dict): exported whole, with
+    /// its moving nodes, sockets and clips (no LOD reorganising or flattening); engines instance
+    /// it as a scene / skeletal mesh so its clips can play
+    pub weapon: bool,
+}
+
+/// The glTF's root node carries a `weapon` dict (the weapons pack's models).
+pub fn is_weapon_glb(glb_bytes: &[u8]) -> bool {
+    let Some(doc) = glb::glb_json(glb_bytes) else {
+        return false;
+    };
+    let scene = doc.get("scene").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    let roots = doc
+        .get("scenes")
+        .and_then(|s| s.get(scene))
+        .and_then(|s| s.get("nodes"))
+        .and_then(|n| n.as_array())
+        .cloned()
+        .unwrap_or_default();
+    roots.iter().filter_map(|r| r.as_u64()).any(|r| {
+        doc.get("nodes")
+            .and_then(|n| n.get(r as usize))
+            .and_then(|n| n.get("extras"))
+            .and_then(|x| x.get("weapon"))
+            .is_some_and(|w| w.is_object())
+    })
 }
 
 impl ModelOut {
@@ -976,6 +1004,7 @@ impl ModelOut {
             "triangles": self.triangles,
             "bytes": self.bytes,
             "instances": instances,
+            "weapon": self.weapon,
         })
     }
 }
@@ -1405,6 +1434,7 @@ pub(super) fn model(s: &Snapshot, ai: usize, tex: u32, ctx: &Ctx) -> Result<Opti
     // impostor system; Unity's terrain billboards don't apply to trees with LOD groups): their
     // far LOD is light (about a seventh of LOD 0)
     let tree_cap = draw.max(600.0);
+    let mut weapon = false;
     let (bytes, variants, generated, lod_end) = if let Some(k) = a.kind {
         if let Some(sp) = crate::trees::export_species(&[k]).into_iter().next() {
             let (b, v) = tree_glb(a, &safe, &sp, tex)?;
@@ -1462,8 +1492,15 @@ pub(super) fn model(s: &Snapshot, ai: usize, tex: u32, ctx: &Ctx) -> Result<Opti
         } else {
             draw
         };
-        // levels of detail and a variant node like the generated models (`lods::packed`)
-        match super::lods::packed(&b, &safe, end, ctx.opts.target == super::Target::Unreal) {
+        weapon = is_weapon_glb(&b);
+        // levels of detail and a variant node like the generated models (`lods::packed`);
+        // weapons stay whole (their clips move nodes, engines hold them by their sockets)
+        let packed = if weapon {
+            None
+        } else {
+            super::lods::packed(&b, &safe, end, ctx.opts.target == super::Target::Unreal)
+        };
+        match packed {
             Some(p) => (p.bytes, vec![p.variant], false, p.lod_end),
             None => (
                 b,
@@ -1512,6 +1549,7 @@ pub(super) fn model(s: &Snapshot, ai: usize, tex: u32, ctx: &Ctx) -> Result<Opti
         collider,
         triangles: glb::triangles(&bytes),
         bytes: bytes.len(),
+        weapon,
     };
     Ok(Some(Built {
         out,
@@ -2348,6 +2386,37 @@ pub fn counts(s: &Snapshot, models: &[ModelOut], inst: &[Vec<Inst>]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weapons_are_recognised_and_keep_their_clips() {
+        let gun = std::path::Path::new(
+            "assets/models/stylepacks/photoreal/wpn_halo_sidearm/wpn_halo_sidearm.gltf",
+        );
+        let chair = std::path::Path::new("assets/models/polyhaven/ArmChair_01/ArmChair_01_1k.gltf");
+        if !gun.is_file() || !chair.is_file() {
+            return; // (the packs' files aren't in this checkout)
+        }
+        let b = glb::pack(gun, 256).unwrap();
+        assert!(is_weapon_glb(&b));
+        let doc = glb::glb_json(&b).unwrap();
+        let names: Vec<&str> = doc["animations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["name"].as_str())
+            .collect();
+        assert!(names.contains(&"fire") && names.contains(&"reload"), "{names:?}");
+        let nodes: Vec<&str> = doc["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["name"].as_str())
+            .collect();
+        for s in ["grip_r", "grip_l", "muzzle", "aim"] {
+            assert!(nodes.contains(&s), "{s} kept");
+        }
+        assert!(!is_weapon_glb(&glb::pack(chair, 256).unwrap()));
+    }
 
     #[test]
     fn quantized_weights_sum_to_255() {

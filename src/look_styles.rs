@@ -5,12 +5,16 @@
 //!
 //! Applying a style copies its values into the world's look (`Look::custom`), so a world keeps
 //! its look even where the style file is missing; `Look::saved` only names it in the UI.
+//!
+//! Version 2 adds the user's LUT (`Look::lut`), carried inside the file so a shared style
+//! brings its LUT along; version 1 files load as styles without one.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::grade::UserLut;
 use crate::look::{Look, LookParams, LookPreset};
 
 /// File extension of a saved (or shared) style.
@@ -26,6 +30,15 @@ pub struct SavedStyle {
     /// The built-in style it was made from (its colour swatch in the list).
     pub based_on: LookPreset,
     pub params: LookParams,
+    /// The user LUT and its strength (the look's strength folded in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lut: Option<UserLut>,
+    #[serde(default = "one")]
+    pub lut_strength: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl SavedStyle {
@@ -33,10 +46,12 @@ impl SavedStyle {
     pub fn from_look(name: &str, look: &Look) -> SavedStyle {
         SavedStyle {
             format: FORMAT.into(),
-            version: 1,
+            version: 2,
             name: clean_name(name),
             based_on: look.preset,
             params: look.effective(),
+            lut: look.lut.clone(),
+            lut_strength: look.user_lut().map_or(1.0, |(_, s)| s),
         }
     }
 
@@ -45,6 +60,8 @@ impl SavedStyle {
         look.custom = Some(self.params);
         look.strength = 1.0;
         look.saved = Some(self.name.clone());
+        look.lut = self.lut.clone();
+        look.lut_strength = self.lut_strength;
     }
 }
 
@@ -195,5 +212,26 @@ mod tests {
         // picking a built-in style leaves the saved one
         other.select(LookPreset::Natural);
         assert_eq!(other.saved, None);
+    }
+
+    #[test]
+    fn a_style_carries_its_lut_and_old_files_load() {
+        let mut look = Look::default();
+        let warm = crate::grade::Lut3::from_fn(5, |c| [c[0], c[1] * 0.9, c[2] * 0.8]);
+        look.lut = Some(UserLut::new("Warm", warm));
+        look.lut_strength = 0.5;
+        let s = SavedStyle::from_look("Warm", &look);
+        let back: SavedStyle = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let mut other = Look::default();
+        back.apply(&mut other);
+        assert_eq!(other.lut, look.lut);
+        assert!((other.lut_strength - 0.5).abs() < 1e-6);
+        // a version 1 file (no LUT) applies as a style without one
+        let mut v1 = serde_json::to_value(SavedStyle::from_look("Old", &Look::default())).unwrap();
+        v1.as_object_mut().unwrap().remove("lut_strength");
+        v1["version"] = serde_json::json!(1);
+        let old: SavedStyle = serde_json::from_value(v1).unwrap();
+        old.apply(&mut other);
+        assert_eq!(other.lut, None);
     }
 }

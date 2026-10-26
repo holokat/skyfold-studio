@@ -62,10 +62,10 @@ pub fn register(app: &mut App) {
     })
     .mcp_tool(McpTool {
         name: "characters_preview",
-        description: "Open the Characters tab with a model selected (`id`), playing `animation` (a library key) on the stage; or with an NPC (`npc_id`), a creature (`creature_id`) or the player (`player`: true) open in its inspector instead. `tab` picks the inspector tab (rig, animations, moves, export; for an NPC: basics, behavior, talk, moves). Take a screenshot to see it. `yaw_deg` turns the stage camera (0 = straight at its front), `front` shows the marker editor's front view.",
+        description: "Open the Characters tab with a model selected (`id`), playing `animation` (a library key) on the stage; or with an NPC (`npc_id`), a creature (`creature_id`) or the player (`player`: true) open in its inspector instead. `tab` picks the inspector tab (rig, motion, animations, moves, export; for an NPC: basics, behavior, talk, moves). Take a screenshot to see it. `yaw_deg` turns the stage camera (0 = straight at its front), `front` shows the marker editor's front view.",
         input_schema: || json!({"type": "object", "properties": {"id": {"type": "string"}, "animation": {"type": "string"},
             "npc_id": {"type": "integer"}, "creature_id": {"type": "integer"}, "player": {"type": "boolean"},
-            "tab": {"type": "string", "enum": ["rig", "animations", "moves", "export", "basics", "behavior", "talk"]},
+            "tab": {"type": "string", "enum": ["rig", "motion", "animations", "moves", "export", "basics", "behavior", "talk"]},
             "yaw_deg": {"type": "number"}, "front": {"type": "boolean"}, "time": {"type": "number", "description": "pause at this many seconds into the clip"}}}),
         run: preview,
     })
@@ -110,6 +110,18 @@ pub fn register(app: &mut App) {
         input_schema: || json!({"type": "object", "properties": {"id": {"type": ["string", "null"]},
             "third_person": {"type": "boolean"}}}),
         run: set_player,
+    })
+    .mcp_tool(McpTool {
+        name: "characters_camera",
+        description: "The world's game camera while walking (saved with the world, exported in characters.json). Read it with no arguments. `style`: shoulder (mouse look, camera behind), first_person, chase (classic MMO: free pointer, camera swings in behind, middle drag turns it), isometric (locked high angle like action RPGs; pointer aims attacks), top_down (locked steep view). A new `style` starts from its preset, then the other fields apply: `distance` (m for a 1.8 m character: the fixed distance, or where zoom starts), `zoom` (players may zoom with the wheel) between `zoom_min` and `zoom_max`, `heading_deg` (locked views: compass bearing the camera looks toward, 0 north = -z, 90 east), `tilt_deg` (locked views: degrees down, 10-89), `fov_deg`, `first_person` (shoulder/chase: P or zooming all the way in goes first person), `reset` (back to the style's preset). Returns the settings.",
+        input_schema: || json!({"type": "object", "properties": {
+            "style": {"type": "string", "enum": ["shoulder", "first_person", "chase", "isometric", "top_down"]},
+            "distance": {"type": "number"}, "zoom": {"type": "boolean"},
+            "zoom_min": {"type": "number"}, "zoom_max": {"type": "number"},
+            "heading_deg": {"type": "number"}, "tilt_deg": {"type": "number"},
+            "fov_deg": {"type": "number"}, "first_person": {"type": "boolean"},
+            "reset": {"type": "boolean"}}}),
+        run: camera,
     })
     .mcp_tool(McpTool {
         name: "characters_creature_set",
@@ -345,6 +357,7 @@ fn preview(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
         v.sel = Some(sel);
         match tab.as_deref() {
             Some("rig") => v.char_tab = CharTab::Rig,
+            Some("motion") => v.char_tab = CharTab::Motion,
             Some("animations") => v.char_tab = CharTab::Animations,
             Some("moves") => {
                 v.char_tab = CharTab::Moves;
@@ -573,6 +586,52 @@ fn set_player(world: &mut World, args: Value) -> Result<Vec<McpContent>, String>
     }
     world.resource_mut::<crate::world::WorldMeta>().dirty = true;
     Ok(vec![McpContent::Json(json!({"player": id}))])
+}
+
+fn camera(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {
+    need_labs()?;
+    use super::play_camera::{CameraStyle, GameCamera};
+    let mut c = world.resource::<WorldCharacters>().camera.clone();
+    let before = c.clone();
+    if let Some(s) = opt_arg::<String>(&args, "style")? {
+        let s = CameraStyle::from_id(&s).ok_or_else(|| format!("unknown style `{s}`"))?;
+        if s != c.style {
+            c = GameCamera::preset(s);
+        }
+    }
+    if opt_arg::<bool>(&args, "reset")? == Some(true) {
+        c = GameCamera::preset(c.style);
+    }
+    for (k, v) in [
+        ("distance", &mut c.distance),
+        ("zoom_min", &mut c.zoom_min),
+        ("zoom_max", &mut c.zoom_max),
+        ("heading_deg", &mut c.heading_deg),
+        ("tilt_deg", &mut c.tilt_deg),
+        ("fov_deg", &mut c.fov_deg),
+    ] {
+        if let Some(x) = opt_arg::<f32>(&args, k)? {
+            *v = x;
+        }
+    }
+    // (a closest past the furthest pushes it out)
+    if opt_arg::<f32>(&args, "zoom_min")?.is_some() && opt_arg::<f32>(&args, "zoom_max")?.is_none() {
+        c.zoom_max = c.zoom_max.max(c.zoom_min);
+    }
+    if let Some(x) = opt_arg::<bool>(&args, "zoom")? {
+        c.zoom = x;
+    }
+    if let Some(x) = opt_arg::<bool>(&args, "first_person")? {
+        c.first_person = x;
+    }
+    c.sanitize();
+    if c != before {
+        world.resource_mut::<WorldCharacters>().camera = c.clone();
+        world.resource_mut::<crate::world::WorldMeta>().dirty = true;
+    }
+    let mut out = serde_json::to_value(&c).map_err(|e| e.to_string())?;
+    out["about"] = json!(c.style.about());
+    Ok(vec![McpContent::Json(out)])
 }
 
 fn creature_set(world: &mut World, args: Value) -> Result<Vec<McpContent>, String> {

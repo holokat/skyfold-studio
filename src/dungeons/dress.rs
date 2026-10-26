@@ -395,6 +395,7 @@ pub fn dress_rooms(
             stretch: None,
             group: 0,
             locked: false,
+            glow: None,
         };
         o.set_scale3(Vec3::splat(e.default_scale));
         d.store.insert(o);

@@ -182,6 +182,17 @@ fn tex_layer(k: u32, wp: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>
             ao += tz.d.w * bw.z;
             pert += vec3<f32>(nz.x, nz.y, 0.0) * bw.z;
         }
+        // layered strata on cliff faces: beds of slightly different tone stacked up the wall,
+        // wandering a little in height (canyonlands; `overlay_image.w` is 0 in ordinary worlds)
+        let sb = terrain.overlay_image.w;
+        if k == 6u && sb > 0.0 {
+            let side = 1.0 - bw.y;
+            let y = wp.y + (value_noise2(wp.xz * 0.012, 61u) - 0.5) * 9.0;
+            let bed = smoothstep(0.25, 0.75, value_noise2(vec2<f32>(y * 0.28, 7.5), 67u));
+            let thin = value_noise2(vec2<f32>(y * 1.7, 3.5), 71u);
+            let tint = mix(vec3<f32>(0.68, 0.63, 0.61), vec3<f32>(1.22, 1.04, 0.84), bed) * mix(0.86, 1.1, thin);
+            a = vec4<f32>(a.rgb * mix(vec3<f32>(1.0), tint, side * sb), a.a);
+        }
         o.albedo = a.rgb;
         o.height = a.a;
         o.rough = rough;

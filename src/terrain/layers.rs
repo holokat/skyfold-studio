@@ -119,10 +119,17 @@ pub enum Surface {
     Crystal,
     Bone,
     Carpet,
+    // city & sci-fi grounds (appended: surface codes are indices into ALL)
+    Concrete,
+    Asphalt,
+    Tile,
+    Rubber,
+    Glass,
+    Grate,
 }
 
 impl Surface {
-    pub const ALL: [Surface; 22] = [
+    pub const ALL: [Surface; 28] = [
         Surface::Grass,
         Surface::Leaves,
         Surface::Loam,
@@ -145,6 +152,12 @@ impl Surface {
         Surface::Crystal,
         Surface::Bone,
         Surface::Carpet,
+        Surface::Concrete,
+        Surface::Asphalt,
+        Surface::Tile,
+        Surface::Rubber,
+        Surface::Glass,
+        Surface::Grate,
     ];
 
     pub fn name(self) -> &'static str {
@@ -171,6 +184,12 @@ impl Surface {
             Surface::Crystal => "Crystal",
             Surface::Bone => "Bone",
             Surface::Carpet => "Carpet / Cloth",
+            Surface::Concrete => "Concrete",
+            Surface::Asphalt => "Asphalt",
+            Surface::Tile => "Tile",
+            Surface::Rubber => "Rubber / Plastic",
+            Surface::Glass => "Glass",
+            Surface::Grate => "Metal Grating",
         }
     }
 
@@ -199,6 +218,12 @@ impl Surface {
             Surface::Crystal => "crystal",
             Surface::Bone => "bone",
             Surface::Carpet => "carpet",
+            Surface::Concrete => "concrete",
+            Surface::Asphalt => "asphalt",
+            Surface::Tile => "tile",
+            Surface::Rubber => "rubber",
+            Surface::Glass => "glass",
+            Surface::Grate => "metal_grate",
         }
     }
 
@@ -233,6 +258,12 @@ impl Surface {
             Surface::Crystal => [200, 120, 255],
             Surface::Bone => [230, 220, 190],
             Surface::Carpet => [180, 40, 90],
+            Surface::Concrete => [160, 160, 150],
+            Surface::Asphalt => [60, 60, 66],
+            Surface::Tile => [120, 200, 200],
+            Surface::Rubber => [40, 40, 40],
+            Surface::Glass => [160, 230, 220],
+            Surface::Grate => [110, 130, 160],
         }
     }
 
@@ -244,8 +275,10 @@ impl Surface {
     pub fn guess_from_name(name: &str) -> Surface {
         let n = name.to_lowercase();
         let has = |keys: &[&str]| keys.iter().any(|k| n.contains(k));
-        if has(&[
-            "metal", "iron", "steel", "bronze", "copper", "grate", "anvil", "chain",
+        if has(&["grate", "grating", "catwalk", "walkway"]) {
+            Surface::Grate
+        } else if has(&[
+            "metal", "iron", "steel", "bronze", "copper", "anvil", "chain",
         ]) {
             Surface::Metal
         } else if has(&["marble", "temple", "palace", "statue"]) {
@@ -261,6 +294,14 @@ impl Surface {
             "cabin", "tower", "fence", "boat", "ship", "deck", "timber", "tree", "stump",
         ]) {
             Surface::Wood
+        } else if has(&["asphalt", "tarmac", "highway"]) {
+            Surface::Asphalt
+        } else if has(&["concrete", "bunker", "sidewalk", "plaza"]) {
+            Surface::Concrete
+        } else if has(&["tile", "terrazzo", "ceramic"]) {
+            Surface::Tile
+        } else if has(&["rubber", "plastic"]) {
+            Surface::Rubber
         } else if has(&["cobble", "road", "street", "paving"]) {
             Surface::Cobble
         } else if has(&["ice", "frozen"]) {

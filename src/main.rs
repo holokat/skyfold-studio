@@ -13,8 +13,10 @@ mod bounce_light;
 mod camera;
 mod camera_fx;
 mod caves;
+mod celestial;
 mod characters;
 mod clouds;
+mod content;
 mod debug;
 mod dialogs;
 mod dungeons;
@@ -23,6 +25,7 @@ mod effects;
 mod export;
 mod fields;
 mod fish;
+mod fixture_lights;
 mod flames;
 mod flora;
 mod forest_contours;
@@ -30,10 +33,12 @@ mod frame_stats;
 mod fx_anchors;
 mod gameplay;
 mod gpu_watchdog;
+mod grade;
 mod grass;
 mod groundcover;
 mod haze;
 mod history;
+mod images;
 mod io;
 mod look;
 mod look_post;
@@ -83,6 +88,7 @@ mod water_render;
 mod weather;
 mod wind;
 mod world;
+mod world_kind;
 mod worldmap;
 mod zones;
 
@@ -207,6 +213,7 @@ fn main() {
             fx_anchors::FxAnchorsPlugin,
             auras::AurasPlugin,
             flames::FlamesPlugin,
+            fixture_lights::FixtureLightsPlugin,
         ))
         .add_plugins((
             gameplay::GameplayPlugin,
@@ -222,6 +229,7 @@ fn main() {
         .add_plugins(worldmap::WorldMapPlugin)
         .add_plugins(export::ExportPlugin)
         .add_plugins(characters::CharactersPlugin)
+        .add_plugins(images::ImagesPlugin)
         .add_plugins((scale::ScalePlugin, nature::NaturePlugin))
         .add_plugins(groundcover::GroundCoverPlugin)
         .add_plugins(bigworld::BigWorldPlugin)
@@ -238,10 +246,11 @@ fn main() {
         .add_plugins(caves::CavesPlugin)
         .add_plugins(dungeons::DungeonsPlugin)
         .add_plugins(setup::SetupPlugin)
+        .add_plugins((celestial::CelestialPlugin, world_kind::WorldKindPlugin))
         .add_plugins(towns::TownsPlugin)
         .add_plugins(scenes::ScenesPlugin)
         .add_plugins(fields::FieldsPlugin)
-        .add_plugins(market::MarketPlugin)
+        .add_plugins((market::MarketPlugin, content::ContentPlugin))
         .add_plugins(asset_rules::AssetRulesPlugin)
         .init_resource::<mcp_tools::McpTools>()
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
